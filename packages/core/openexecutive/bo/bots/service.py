@@ -418,7 +418,8 @@ def _emit(tenant: str, kind: str, data: dict[str, Any], *,
         get_adapter().emit(tenant=tenant, kind=kind, data=data,
                            run_ref=run_ref, agent_ref=agent_ref,
                            correlation_id=correlation_id)
-    except Exception:  # noqa: BLE001 — telemetry is fire-and-forget
+    except Exception as exc:  # noqa: BLE001 — telemetry is fire-and-forget
         import logging
 
-        logging.getLogger(__name__).warning("telemetry emit failed", exc_info=True)
+        logging.getLogger(__name__).warning("telemetry emit failed (%s)",
+                                            type(exc).__name__)

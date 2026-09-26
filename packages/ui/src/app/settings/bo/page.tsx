@@ -25,11 +25,12 @@ type LoadState =
 
 // Gruparea pe taburi — registrul marchează fiecare parametru; tabul
 // „exec" e suprafața de execuție/recuperare cerută de VAL4-03.
-const TAB_ORDER = ["general", "routing", "exec"] as const;
+const TAB_ORDER = ["general", "routing", "exec", "pilot"] as const;
 const TAB_LABEL: Record<string, string> = {
   general: "General",
   routing: "Rutare modele",
   exec: "Execuție și recuperare",
+  pilot: "Pilot ERP sintetic",
 };
 
 function SettingEditor({
@@ -131,6 +132,10 @@ function SettingEditor({
                     <option value="false">Oprit</option>
                     <option value="true">Pornit</option>
                   </>
+                ) : setting.key === "bo.pilot.profile" ? (
+                  <><option value="disabled">Dezactivat</option><option value="synthetic-loopback">Sintetic loopback</option></>
+                ) : setting.key === "bo.pilot.supervision" ? (
+                  <><option value="standalone">Standalone</option><option value="required">Guardian obligatoriu</option></>
                 ) : (
                   <>
                     <option value="ro">Română</option>

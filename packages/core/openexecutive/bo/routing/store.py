@@ -656,6 +656,27 @@ def retry_outbox_entry(
     return {"event_id": event_id, "requeued": True}
 
 
+def outbox_state(
+    tenant: str,
+    event_ids: list[str],
+    *,
+    db_path: Path | None = None,
+) -> dict[str, int]:
+    """delivered flag per event_id for envelopes already persisted —
+    a read-only lookup that detects missing rows without touching
+    pending, delivered or dead-lettered history."""
+    if not event_ids:
+        return {}
+    placeholders = ",".join("?" for _ in event_ids)
+    with get_conn(db_path) as conn:
+        rows = conn.execute(
+            "SELECT event_id, delivered FROM bo_telemetry_outbox "
+            f"WHERE tenant = ? AND event_id IN ({placeholders})",
+            (tenant, *event_ids),
+        ).fetchall()
+    return {r["event_id"]: int(r["delivered"]) for r in rows}
+
+
 def outbox_stats(tenant: str, db_path: Path | None = None) -> dict[str, Any]:
     with get_conn(db_path) as conn:
         row = conn.execute(
@@ -818,6 +839,7 @@ __all__ = [
     "list_catalog",
     "list_observations",
     "observation_stats",
+    "outbox_state",
     "outbox_stats",
     "outbox_tenants",
     "record_observation",

@@ -48,3 +48,5 @@ def initialize_db(db_path: Path | None = None) -> None:
     packages_store.initialize_db(db_path)
     routing_store.initialize_db(db_path)
     execution_store.initialize_db(db_path)
+    from openexecutive.bo.pilot.service import initialize_db as initialize_pilot
+    initialize_pilot(db_path)

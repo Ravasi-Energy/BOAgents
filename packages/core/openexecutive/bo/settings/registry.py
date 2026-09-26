@@ -880,6 +880,34 @@ REGISTRY: dict[str, SettingSpec] = {
 }
 
 
+def _pilot_specs() -> None:
+    from openexecutive.bo.pilot.config import allowlist, endpoint, secret_ref
+
+    entries = [
+        ("enabled", "boolean", False, "Pilot ERP sintetic", "Activare globală explicită; nu pornește un scheduler.", lambda v: _validate_bool(v, label="Pilot")),
+        ("profile", "enum", "disabled", "Profil pilot", "Loopback este permis numai în profilul synthetic-loopback.", lambda v: _validate_enum(v, allowed=("disabled", "synthetic-loopback"), label="Profil")),
+        ("endpoint", "text", "", "Endpoint ERP sintetic", "Adresă exactă prezentă în allowlist; fără DNS, proxy sau redirect.", endpoint),
+        ("allowlist", "text", "[]", "Allowlist ERP sintetic", "Listă JSON administrată de endpointuri loopback explicite.", allowlist),
+        ("secret_ref", "text", "BO_PILOT_SERVICE_TOKEN", "Referință secret ERP sintetic", "Numele variabilei server-only; credentialul serviciului fixează tenantul.", secret_ref),
+        ("timeout_s", "integer", 3, "Timeout ERP sintetic (s)", "Timeout de transport; lipsa răspunsului nu dovedește eșecul efectului.", lambda v: _validate_int(v, minimum=1, maximum=10, label="Timeout")),
+        ("stale_s", "integer", 60, "Prag stale pilot (s)", "Vârsta dovezii; fără dovadă starea este UNKNOWN.", lambda v: _validate_int(v, minimum=5, maximum=3600, label="Prag stale")),
+        ("max_queue", "integer", 100, "Limită coadă pilot", "Peste limită diagnosticul este DEGRADED, fără remediere automată.", lambda v: _validate_int(v, minimum=0, maximum=10000, label="Coada")),
+        ("supervision", "enum", "standalone", "Supraveghere pilot", "required cere mandat Guardian; mandatele legate rămân obligatorii și în standalone.", lambda v: _validate_enum(v, allowed=("standalone", "required"), label="Supraveghere")),
+    ]
+    for suffix, typ, default, label, help_text, validator in entries:
+        key = f"bo.pilot.{suffix}"
+        REGISTRY[key] = SettingSpec(
+            key=key, type=typ, default=default, apply_mode="IMMEDIATE",
+            scope="tenant", page="setari", tab="pilot", label_ro=label,
+            label_en=label, help_ro=help_text, owner_role="admin", edit_role="admin",
+            sensitivity="normal", effect_ro="Reverificat înainte de apel; schimbarea configurației cere o rulare nouă. Dovezile vechi se păstrează.",
+            acceptance_ro="CAS/RBAC/audit; refuz sigur fără configurație explicită.", validate=validator,
+        )
+
+
+_pilot_specs()
+
+
 def validate_value(key: str, value: Any) -> Any:
     spec = REGISTRY.get(key)
     if spec is None:

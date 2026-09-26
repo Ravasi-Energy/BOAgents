@@ -95,6 +95,9 @@ def deliver_pending(
             ack: dict[str, Any] | None
             if row["kind"] == "execution":
                 ack = _deliver_execution(tenant, row, db_path)
+            elif row["kind"] in ("service", "pilot-telemetry"):
+                from openexecutive.bo.pilot.delivery import deliver
+                ack = deliver(tenant, row["envelope"], db_path)
             else:
                 ack = adapter.deliver_event(row["envelope"])
         except TelemetryDisabledError:
@@ -195,8 +198,8 @@ def _worker_loop(interval_s: int, db_path: Path | None) -> None:
                 continue  # disabled: nothing to drain, stay quiet
             for tenant in store.outbox_tenants(db_path=db_path):
                 deliver_pending(tenant, db_path=db_path, adapter=adapter)
-        except Exception:  # noqa: BLE001 — a broken cycle never kills the worker
-            logger.warning("ciclul de livrare a eșuat", exc_info=True)
+        except Exception as exc:  # noqa: BLE001 — a broken cycle never kills the worker
+            logger.warning("ciclul de livrare a eșuat (%s)", type(exc).__name__)
 
 
 def ensure_worker(db_path: Path | None = None) -> bool:

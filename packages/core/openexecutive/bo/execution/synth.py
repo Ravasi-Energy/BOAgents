@@ -25,7 +25,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from openexecutive.bo.db import get_conn
 
@@ -40,6 +40,24 @@ class ProviderError(Exception):
     """A definitive provider-side failure (the effect did not happen)."""
 
 
+class EffectProvider(Protocol):
+    """Structural contract of every effect provider the engine drives —
+    the synthetic counter, the pilot HTTP adapter, any future real one."""
+
+    name: str
+    idempotent: bool
+    retry_unknown: bool
+
+    def submit(
+        self, *, tenant: str, idempotency_key: str, payload_digest: str,
+        amount: int,
+    ) -> dict[str, Any]: ...
+
+    def receipt_for(
+        self, *, tenant: str, idempotency_key: str,
+    ) -> dict[str, Any] | None: ...
+
+
 class SyntheticCounterProvider:
     def __init__(
         self,
@@ -52,6 +70,9 @@ class SyntheticCounterProvider:
     ) -> None:
         self.name = name
         self.idempotent = idempotent
+        # Explicit contract member (EffectProvider): the counter dedups by
+        # key, so resuming after UNKNOWN is safe to retry through readback.
+        self.retry_unknown = True
         self.supports_receipts = supports_receipts
         self.fail_after_write = fail_after_write
         self.db_path = db_path

@@ -18,7 +18,7 @@ export class BoApiError extends Error {
   }
 }
 
-async function req<T>(
+export async function req<T>(
   path: string,
   init?: RequestInit,
 ): Promise<T> {
@@ -757,6 +757,32 @@ export function workBoRuns(workerId?: string): Promise<{
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(workerId ? { worker_id: workerId } : {}),
+  });
+}
+
+// Postura telemetriei unei rulări pilot, raportată de GET /bo/pilot. Nu este
+// starea execuției: receiptul rămâne dovada efectului; aici urmărim doar
+// dacă observația persistată a ajuns în outboxul durabil.
+export interface BoRunTelemetry {
+  status: "ok" | "pending" | "degraded" | "dead" | "incident" | "unavailable" | "none";
+  marker: string | null;
+  error: string | null;
+  expected: number;
+  queued: number;
+  delivered: number;
+  dead: number;
+  missing: number;
+  replayable: boolean;
+}
+
+export function replayBoRunTelemetry(runId: string): Promise<{
+  run_id: string;
+  enqueued: number;
+  existing: number;
+  telemetry: BoRunTelemetry;
+}> {
+  return req(`/pilot/runs/${encodeURIComponent(runId)}/telemetry/replay`, {
+    method: "POST",
   });
 }
 

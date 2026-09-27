@@ -23,6 +23,7 @@ that will resolve it, or it stays pending for the next cycle/flush.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 import uuid
@@ -167,10 +168,18 @@ def deliver_pending(
         else:
             status = (ack or {}).get("status")
             if status is not None and status not in _ACK_OK:
+                # The ack status is receiver-controlled text persisted into
+                # last_error — redact the bound credential before it can
+                # be reflected back into the DB/UI.
+                detail = str(status)
+                bound_ref = row["dest_ref"] or ""
+                bound_token = os.environ.get(bound_ref) if bound_ref else None
+                if bound_token and bound_token in detail:
+                    detail = detail.replace(bound_token, "[redat]")
                 store.resolve_outbox(
                     tenant, row["event_id"], kind=row["kind"],
                     ref_id=row["ref_id"],
-                    error=f"ack neașteptat: {status}"[:200],
+                    error=f"ack neașteptat: {detail}"[:200],
                     db_path=db_path,
                 )
                 failed += 1

@@ -38,6 +38,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -103,8 +104,10 @@ def provisioned_secret_refs() -> set[str]:
     ``BO_GUARDIAN_SECRET_REFS`` (comma-separated env names). Administering
     a SecretRef can never reach an arbitrary environment variable."""
     refs = set(_GUARDIAN_BUILTIN_REFS)
-    extra = os.environ.get("BO_GUARDIAN_SECRET_REFS", "")
-    refs.update(name.strip() for name in extra.split(",") if name.strip())
+    for raw in os.environ.get("BO_GUARDIAN_SECRET_REFS", "").split(","):
+        name = raw.strip()
+        if name and re.match(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$", name):
+            refs.add(name)
     return refs
 
 
@@ -513,6 +516,10 @@ def post_execution_event(
     if status >= 500:
         raise GuardianTransientError(f"HTTP {status}")
     ack_status = str(body.get("status") or "")
+    if token and token in ack_status:
+        # A hostile receiver can reflect the Bearer it just received —
+        # the persisted error never carries it back.
+        ack_status = ack_status.replace(token, "[redat]")
     if ack_status not in _ACK_OK:
         raise GuardianPermanentError(
             f"ack neașteptat: {ack_status or f'HTTP {status}'}"

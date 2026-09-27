@@ -774,12 +774,18 @@ def rebind_outbox(
     with get_conn(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         if event_ids is None:
-            rows = conn.execute(
-                "SELECT event_id, kind FROM bo_telemetry_outbox "
-                "WHERE tenant = ? AND delivered <> 1 "
-                "AND (lease_until IS NULL OR lease_until < ?)",
-                (tenant, now),
+            all_rows = conn.execute(
+                "SELECT event_id, kind, lease_until FROM "
+                "bo_telemetry_outbox WHERE tenant = ? AND delivered <> 1",
+                (tenant,),
             ).fetchall()
+            rows = []
+            for r in all_rows:
+                if r["lease_until"] is not None and r["lease_until"] > now:
+                    skipped += 1
+                else:
+                    rows.append({"event_id": r["event_id"],
+                                 "kind": r["kind"]})
         else:
             rows = []
             if event_ids:

@@ -1069,17 +1069,26 @@ def drain_audit_intents(
             # The logger resolves/opens its DB lazily — an unreachable
             # journal must fail the intent, not the whole drain.
             journal = get_audit_logger()
-            # A failing read (fresh file without schema, corrupt) must not
-            # skip the emit — a failed read is not proof of absence; the
-            # dedup constraint inside log() is what keeps it unique.
+            # Schema FIRST: on a fresh/restored journal this creates the
+            # tables so the read below is honest; on a corrupt journal it
+            # fails and we never reach emit. A failed read is NOT proof of
+            # absence — emitting then would risk a new duplicate for a
+            # legacy (pre-dedup-marker) row, so emit only happens after a
+            # read that CONFIRMS absence.
+            journal.initialize_db()
             try:
-                emitted = journal.has_detail("intent_id", iid)
-            except Exception:  # noqa: BLE001
-                emitted = False
-            if not emitted:
-                # The journal may have been restored as an empty/new file —
-                # ``log`` only INSERTs, so the drain must ensure the schema.
-                journal.initialize_db()
+                row_id = journal.detail_row_id("intent_id", iid)
+            except Exception:  # noqa: BLE001 — unreadable journal
+                row_id = -1
+            if row_id == -1:
+                emitted = False  # honest: cannot prove absence → no emit
+            elif row_id is not None:
+                # Already in the journal (incl. pre-audit_dedup legacy
+                # rows): backfill the marker so a later read error or stale
+                # emitter can never duplicate it, then mark delivered.
+                journal.mark_dedup(iid, row_id)
+                emitted = True
+            else:
                 details = json.loads(intent["details_json"])
                 # Emit through the module seam (tests patch log_event) with
                 # the intent_id as the journal-level dedup key — then
@@ -1091,7 +1100,10 @@ def drain_audit_intents(
                     details={**details, "intent_id": iid},
                     dedup_key=iid,
                 )
-                emitted = journal.has_detail("intent_id", iid)
+                try:
+                    emitted = journal.has_detail("intent_id", iid)
+                except Exception:  # noqa: BLE001
+                    emitted = False
         except Exception:  # noqa: BLE001 — journal unreachable/corrupt
             emitted = False
         budget = _drain_max_attempts(intent["tenant"], db_path)
@@ -1130,30 +1142,146 @@ def drain_audit_intents(
             "skipped": skipped, "preempted": preempted}
 
 
+def audit_intents_evidence(
+    tenant: str,
+    *,
+    status: str | None = None,
+    limit: int = 200,
+    offset: int = 0,
+    db_path: Path | None = None,
+) -> dict[str, Any]:
+    """Operator evidence export: audit intents correlated with the journal.
+
+    Each intent returns its durable state (status, attempts, lease/claim
+    generation) plus the journal-side marker correlation: ``audit_row_id``
+    and whether that row actually exists — so an operator can see a
+    delivered intent, spot an orphan marker (``journal_row_present`` False)
+    and never mistake a marker for delivered evidence. Secrets are never
+    part of intents by construction (payloads are rebind metadata).
+    Journal unreachable → correlation fields are ``None``, intents still
+    listed.
+    """
+    initialize_db(db_path)  # additive: a pre-PILOT-07 DB gains the table
+    where = "tenant = ?"
+    params: list[Any] = [tenant]
+    if status is not None:
+        where += " AND status = ?"
+        params.append(status)
+    with get_conn(db_path) as conn:
+        rows = [
+            dict(r) for r in conn.execute(
+                "SELECT intent_id, event, actor, summary, status, "
+                "created_at, delivered_at, attempts, last_error, "
+                "drain_owner, drain_until, details_json "
+                "FROM bo_audit_intents "
+                f"WHERE {where} ORDER BY created_at "
+                "LIMIT ? OFFSET ?",
+                (*params, min(max(limit, 1), 500), max(offset, 0)),
+            )
+        ]
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM bo_audit_intents WHERE {where}",
+            params).fetchone()[0]
+    journal_ok = True
+    try:
+        from openexecutive.audit.logger import get_audit_logger
+        journal = get_audit_logger()
+        journal.initialize_db()
+    except Exception:  # noqa: BLE001 — journal down; list intents anyway
+        journal = None
+        journal_ok = False
+    intents = []
+    for row in rows:
+        row.pop("details_json", None)
+        marker = journal.dedup_lookup(row["intent_id"]) if journal else None
+        intents.append({
+            **row,
+            "audit_row_id": (
+                marker["audit_row_id"] if marker else None),
+            "journal_row_present": (
+                marker["journal_row_present"] if marker else None),
+        })
+    return {"intents": intents, "total": total,
+            "journal_reachable": journal_ok}
+
+
 def requeue_failed_audit_intents(
-    tenant: str, *, actor: str, db_path: Path | None = None
+    tenant: str, *, actor: str, intent_id: str | None = None,
+    db_path: Path | None = None
 ) -> dict[str, Any]:
     """Explicit operator recovery: parked ``failed`` intents go back to
     ``pending`` so the next drain retries them against a restored journal.
-    Audited like the mutation it is — the intent is recorded in the same
-    transaction, then drained."""
+
+    With ``intent_id`` the operator can also demote ONE ``delivered``
+    intent — but only after the journal verifiably lost its evidence (no
+    marker, or a marker whose row is gone, and no row carrying the
+    intent_id in details). A delivered intent whose journal row is present
+    is refused: it is already proven. Audited like the mutation it is."""
+    missing_evidence = 0
+    if intent_id is not None:
+        missing_evidence = _evidence_missing(
+            tenant, intent_id, db_path)
     with get_conn(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
-        cur = conn.execute(
-            "UPDATE bo_audit_intents SET status='pending', "
-            "drain_owner=NULL, drain_until=NULL "
-            "WHERE tenant = ? AND status = 'failed'",
-            (tenant,),
-        )
-        count = cur.rowcount
+        count = 0
+        if intent_id is None:
+            cur = conn.execute(
+                "UPDATE bo_audit_intents SET status='pending', "
+                "drain_owner=NULL, drain_until=NULL "
+                "WHERE tenant = ? AND status = 'failed'",
+                (tenant,),
+            )
+            count = cur.rowcount
+        else:
+            row = conn.execute(
+                "SELECT status FROM bo_audit_intents "
+                "WHERE tenant = ? AND intent_id = ?",
+                (tenant, intent_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"unknown intent_id {intent_id}")
+            if row["status"] == "delivered" and not missing_evidence:
+                raise ValueError(
+                    "intent is delivered with live journal evidence — "
+                    "requeue is only for missing evidence")
+            if row["status"] in ("failed", "delivered"):
+                cur = conn.execute(
+                    "UPDATE bo_audit_intents SET status='pending', "
+                    "delivered_at=NULL, drain_owner=NULL, "
+                    "drain_until=NULL "
+                    "WHERE tenant = ? AND intent_id = ?",
+                    (tenant, intent_id),
+                )
+                count = cur.rowcount
         if count:
             _insert_audit_intent(
                 conn, tenant, "bo_audit_intents_requeue", actor,
                 f"bo_audit_intents_requeue: {count} relansate",
-                {"requeued": count},
+                {"requeued": count, "intent_id": intent_id},
             )
     drain_audit_intents(db_path=db_path, tenant=tenant)
     return {"requeued": count}
+
+
+def _evidence_missing(
+    tenant: str, intent_id: str, db_path: Path | None = None
+) -> int:
+    """1 when the journal provably lacks evidence for this intent — no
+    dedup marker row (or an orphan marker) AND no audit row carrying the
+    intent_id in details. Journal unreachable → 0 (refuse to demote on an
+    unreadable journal; that would risk re-emitting proven evidence)."""
+    try:
+        from openexecutive.audit.logger import get_audit_logger
+        journal = get_audit_logger()
+        journal.initialize_db()
+        marker = journal.dedup_lookup(intent_id)
+        if marker is not None and marker["journal_row_present"]:
+            return 0
+        if journal.detail_row_id("intent_id", intent_id) is not None:
+            return 0
+        return 1
+    except Exception:  # noqa: BLE001 — unreadable journal → refuse
+        return 0
 
 
 def outbox_stats(tenant: str, db_path: Path | None = None) -> dict[str, Any]:

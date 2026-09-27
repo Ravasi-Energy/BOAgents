@@ -8,6 +8,7 @@ modelului real, BoBot cu LLM oprit (fără dependență de router).
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -1548,6 +1549,63 @@ class TestRoutes:
             json={"value": "0.05 USD", "expected_version": 0})
         assert resp.status_code == 200
 
+    def test_audit_intents_evidence_export(
+        self, client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GET /execution/audit-intents — bounded, tenant-scoped evidence
+        correlating intent ↔ journal row; an orphan marker is shown as
+        ``journal_row_present=false``, never implied delivered."""
+        import openexecutive.audit as audit_pkg
+        from openexecutive.audit import logger as audit_logger
+
+        journal = audit_logger.AuditLogger(tmp_path / "journal.db")
+        monkeypatch.setattr(audit_logger, "_default_logger", journal)
+        monkeypatch.setattr(audit_pkg, "log_event", audit_logger.log_event)
+
+        store.enqueue_outbox(
+            TENANT, "models", "ref-a",
+            {"schemaVersion": "bo.model-observation.v1",
+             "eventId": "evt_ev", "tenantRef": TENANT})
+        with bo_db.get_conn() as conn:
+            conn.execute(
+                "UPDATE bo_telemetry_outbox SET dest_bound=NULL, "
+                "dest_endpoint=NULL, dest_ref=NULL WHERE event_id='evt_ev'")
+        out = store.rebind_outbox(
+            TENANT, actor="admin@t", reason="evidence")
+        assert out["audit"] == "delivered"
+
+        resp = client.get("/bo/execution/audit-intents", headers=self.VIEWER)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["journal_reachable"] is True and body["total"] == 1
+        intent = body["intents"][0]
+        assert intent["status"] == "delivered"
+        assert intent["audit_row_id"] is not None
+        assert intent["journal_row_present"] is True
+        assert "details_json" not in intent
+        assert {"drain_owner", "drain_until", "attempts"} <= set(intent)
+
+        # Orphan marker: journal row gone (restore/repair) → flagged,
+        # never presented as live evidence.
+        with audit_logger._get_conn(journal._db_path) as conn:
+            conn.execute("DELETE FROM audit_log")
+        resp = client.get("/bo/execution/audit-intents", headers=self.VIEWER)
+        intent = resp.json()["intents"][0]
+        assert intent["journal_row_present"] is False
+
+        # Bounded + status filter (bogus values degrade to unfiltered,
+        # never an error) — read capability is viewer-level like the
+        # outbox listing; tenant scoping comes from the identity.
+        resp = client.get(
+            "/bo/execution/audit-intents?status=bogus&limit=5",
+            headers=self.VIEWER)
+        assert resp.status_code == 200
+        resp = client.get(
+            "/bo/execution/audit-intents?status=failed",
+            headers=self.VIEWER)
+        assert resp.status_code == 200
+        assert resp.json()["intents"] == []
+
 
 def test_bobots_have_no_router_dependency() -> None:
     """Static check: no bo.bots module imports bo.routing or providers."""
@@ -1769,24 +1827,139 @@ class TestRebindAuditDurability:
     def test_journal_dedup_marker_is_atomic(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Journal-level exactly-once: ``log(dedup_key=k)`` commits the
-        marker in the same transaction as the row — a second emit rolls
-        back and returns the original row id, never a duplicate."""
+        """Journal-level exactly-once + content contract: ``dedup_key=k``
+        commits marker + row atomically; a same-content retry returns the
+        original row id, while a different-content emit on the same key is
+        an observable conflict — never presented as proof of the new op."""
         from openexecutive.audit import logger as audit_logger
 
         journal = self._journal(tmp_path, monkeypatch)
         first = journal.log(
             "bo_outbox_rebind", "s1", actor="a",
             details={"intent_id": "iid-x"}, dedup_key="iid-x")
-        second = journal.log(
+        # Same key + same content → retry returns the original proof.
+        retry = journal.log(
+            "bo_outbox_rebind", "s1", actor="a",
+            details={"intent_id": "iid-x"}, dedup_key="iid-x")
+        # Same key + DIFFERENT content → conflict, refused, no new row.
+        conflict = journal.log(
             "bo_outbox_rebind", "s2", actor="b",
             details={"intent_id": "iid-x"}, dedup_key="iid-x")
-        assert first is not None and second == first
+        assert first is not None and retry == first and conflict is None
         with audit_logger._get_conn(journal._db_path) as conn:
             assert conn.execute(
                 "SELECT COUNT(*) FROM audit_log").fetchone()[0] == 1
             assert conn.execute(
                 "SELECT COUNT(*) FROM audit_dedup").fetchone()[0] == 1
+
+    def test_orphan_dedup_marker_recovers(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A marker whose audit row is absent (restored/repaired journal)
+        must not be returned as proof of a nonexistent row — the emit
+        re-writes the evidence and re-points the marker atomically."""
+        from openexecutive.audit import logger as audit_logger
+
+        journal = self._journal(tmp_path, monkeypatch)
+        # Orphan marker: points at a row that doesn't exist.
+        with audit_logger._get_conn(journal._db_path) as conn:
+            conn.execute(
+                "INSERT INTO audit_dedup (dedup_key, audit_row_id, "
+                "created_at) VALUES ('iid-orphan', 999999, 't')")
+        row_id = journal.log(
+            "bo_outbox_rebind", "recovered", actor="a",
+            details={"intent_id": "iid-orphan"}, dedup_key="iid-orphan")
+        assert row_id is not None and row_id != 999999
+        with audit_logger._get_conn(journal._db_path) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM audit_log").fetchone()[0] == 1
+            marker = conn.execute(
+                "SELECT audit_row_id FROM audit_dedup "
+                "WHERE dedup_key='iid-orphan'").fetchone()
+            assert marker["audit_row_id"] == row_id
+
+    def test_legacy_row_read_error_never_duplicates(
+        self, db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """IA01-01: a legacy intent already emitted in a pre-``audit_dedup``
+        journal — one transient read error must NOT produce a new row;
+        the intent stays honestly pending until the read confirms."""
+        from openexecutive.audit import logger as audit_logger
+
+        journal = self._journal(tmp_path, monkeypatch)
+        self._legacy_row(db)
+        store.rebind_outbox(
+            TENANT, actor="admin@t", reason="legacy", db_path=db)
+        iid = store.pending_audit_intents(db_path=db)
+        assert iid == []  # delivered immediately — journal reachable
+        # Simulate the pre-dedup journal: strip the marker, re-pend intent.
+        with audit_logger._get_conn(journal._db_path) as conn:
+            conn.execute("DELETE FROM audit_dedup")
+        with bo_db.get_conn(db) as conn:
+            conn.execute(
+                "UPDATE bo_audit_intents SET status='pending', "
+                "delivered_at=NULL")
+        # First drain: read fails once → NO emit, attempt burned.
+        real_detail = audit_logger.AuditLogger.detail_row_id
+        calls = {"n": 0}
+
+        def flaky(self, *a, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise sqlite3.OperationalError("transient read error")
+            return real_detail(self, *a, **kw)
+
+        monkeypatch.setattr(
+            audit_logger.AuditLogger, "detail_row_id", flaky)
+        res = store.drain_audit_intents(db_path=db)
+        assert res["delivered"] == 0 and res["failed"] == 1
+        with audit_logger._get_conn(journal._db_path) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM audit_log").fetchone()[0] == 1
+        # Second drain: read recovers → confirmed, backfilled, delivered —
+        # still exactly one journal row.
+        res = store.drain_audit_intents(db_path=db)
+        assert res["delivered"] == 1
+        with audit_logger._get_conn(journal._db_path) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM audit_log").fetchone()[0] == 1
+            assert conn.execute(
+                "SELECT COUNT(*) FROM audit_dedup").fetchone()[0] == 1
+
+    def test_requeue_delivered_only_when_evidence_missing(
+        self, db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Restore recovery: a ``delivered`` intent may be demoted only
+        when the journal verifiably lost its row — live evidence refuses.
+        The demoted intent re-emits exactly once at the next drain."""
+        from openexecutive.audit import logger as audit_logger
+
+        journal = self._journal(tmp_path, monkeypatch)
+        self._legacy_row(db)
+        store.rebind_outbox(
+            TENANT, actor="admin@t", reason="r1", db_path=db)
+        with bo_db.get_conn(db) as conn:
+            iid = conn.execute(
+                "SELECT intent_id FROM bo_audit_intents WHERE "
+                "status='delivered'").fetchone()["intent_id"]
+
+        # Evidence lives → demotion refused.
+        with pytest.raises(ValueError, match="live journal evidence"):
+            store.requeue_failed_audit_intents(
+                TENANT, actor="admin@t", intent_id=iid, db_path=db)
+
+        # Journal restored without the row (and the marker) → missing
+        # evidence → explicit requeue → exactly one new row.
+        with audit_logger._get_conn(journal._db_path) as conn:
+            conn.execute("DELETE FROM audit_log")
+            conn.execute("DELETE FROM audit_dedup")
+        out = store.requeue_failed_audit_intents(
+            TENANT, actor="admin@t", intent_id=iid, db_path=db)
+        assert out["requeued"] == 1
+        with audit_logger._get_conn(journal._db_path) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM audit_log WHERE details_json "
+                "LIKE ?", (f"%{iid}%",)).fetchone()[0] == 1
 
     def test_fenced_update_stale_owner(
         self, db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

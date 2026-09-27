@@ -277,6 +277,44 @@ substituie.
 tenantului și așteaptă cel mult până la cea mai apropiată scadență — un send
 nu mai poate întârzia un tenant rapid până la boundul de recheck.
 
+## Jurnal legacy, fingerprint de conținut și restaurare (PILOT-10)
+
+**Contractul cheie/conținut.** Fiecare marcaj `audit_dedup` poartă un
+fingerprint al conținutului `(event_type, actor, summary, details_json)`:
+aceeași cheie + același conținut întoarce id-ul rândului original (retry
+curat); aceeași cheie + conținut DIFERIT e un conflict observabil —
+emiterea e refuzată (`audit.dedup_conflict` în log, `None`), niciodată
+prezentată ca dovadă a operației noi. Marcajele create înainte de
+fingerprint (`fingerprint NULL`, journaluri pre-PILOT-10) sunt tolerate:
+rândul viu sub ele rămâne dovada. Migrarea e aditivă (`ALTER TABLE`).
+
+**Upgrade cu jurnal legacy.** La drain, citirea vine întâi:
+`detail_row_id` confirmă un rând `audit_log` vechi (emitted înainte de
+`audit_dedup`) → marcajul e backfill-uit (`mark_dedup`) și intența e
+`delivered` fără rând nou. O eroare de citire NU e dovadă de lipsă:
+emiterea nu se încearcă deloc, intența arde o tentativă și rămâne honest
+pending — exact opusul duplicatei create de vechiul emit-oricum.
+Duplicatele istorice (rânduri multiple pe aceeași intent) sunt păstrate
+ca dovadă; backfill-ul leagă marcajul de primul rând găsit.
+
+**Marcaj orfan.** Un marcaj al cărui rând a dispărut (jurnal restaurat/
+reparat) nu e dovadă: `log()` re-emite rândul și re-pointează marcajul
+în aceeași tranzacție; drain-ul nu marchează `delivered` decât după
+re-citirea confirmată a rândului.
+
+**Restaurare operabilă (doar pe copii sintetice demonstrate).** Procedura:
+opriți workerii → snapshot coerent (`sqlite3` backup API sau copie cu
+writeri oprit) → continuați → restaurați o versiune MAI VECHE a unui
+singur fișier: checkpoint `PRAGMA wal_checkpoint(TRUNCATE)` pe DB live,
+ștergeți `-wal`/`-shm`, copiați snapshotul peste. Reconciliere: drain-ul
+re-emite intențile `pending` exact o dată; o intență `delivered` a cărei
+dovadă a dispărut NU e re-emisă silent — `GET /bo/execution/audit-intents`
+o arată cu `audit_row_id=NULL`, iar calea explicită este
+`POST /bo/execution/outbox/audit-requeue {"intent_id": …}` (admin),
+refuzat cu 409 câtă vreme dovada e vie. Limită honestă: NU se pretinde
+exactly-once global peste două baze restaurate independent — divergența
+rămâne detectabilă prin export, nu auto-vindecată.
+
 ## Upgrade, dezinstalare și rollback
 
 Opriți workerii proprii înainte de upgrade, salvați SHA/configurație și o copie SQLite

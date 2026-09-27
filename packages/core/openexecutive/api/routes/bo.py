@@ -980,17 +980,54 @@ def rebind_outbox(body: _RebindBody, ident: BoIdentity) -> Any:
     )
 
 
+@router.get("/execution/audit-intents")
+def list_audit_intents(
+    ident: BoIdentity,
+    status: str | None = None,
+    limit: int = 200,
+    offset: int = 0,
+) -> Any:
+    """Operator evidence export — durable audit intents correlated with
+    the central journal: status, attempts, claim generation, and the
+    ``audit_row_id`` marker plus whether that row actually exists. An
+    orphan marker (journal restored without the row) shows as
+    ``journal_row_present=false`` — never implied delivered. Bounded,
+    tenant-scoped, secret-free by construction (rebind metadata only)."""
+    bo_identity.require(ident, "execution:read")
+    from openexecutive.bo.routing import store as routing_store
+
+    if status is not None and status not in {
+        "pending", "delivered", "failed",
+    }:
+        status = None
+    return routing_store.audit_intents_evidence(
+        ident.tenant, status=status, limit=limit, offset=offset,
+    )
+
+
+class _AuditRequeueBody(BaseModel):
+    intent_id: str | None = Field(default=None, max_length=128)
+
+
 @router.post("/execution/outbox/audit-requeue")
-def audit_requeue(ident: BoIdentity) -> Any:
-    """Explicit operator recovery for parked (``failed``) audit intents —
-    they go back to ``pending`` and the drain retries them against the
-    (restored) journal. Audited like the mutation it is. Admin-only."""
+def audit_requeue(
+    ident: BoIdentity, body: _AuditRequeueBody | None = None,
+) -> Any:
+    """Explicit operator recovery for audit intents — parked ``failed``
+    ones go back to ``pending``; with ``intent_id``, a single ``delivered``
+    intent may be demoted ONLY when the journal verifiably lost its
+    evidence (restored/corrupt journal) — live evidence is refused.
+    Audited like the mutation it is. Admin-only."""
     bo_identity.require(ident, "execution:write")
     from openexecutive.bo.routing import store as routing_store
 
-    return routing_store.requeue_failed_audit_intents(
-        ident.tenant, actor=ident.actor,
-    )
+    try:
+        return routing_store.requeue_failed_audit_intents(
+            ident.tenant, actor=ident.actor,
+            intent_id=body.intent_id if body else None,
+        )
+    except ValueError as exc:
+        return _bo_json(409, "audit_requeue_refused", str(exc))
 
 
 class _WorkBody(BaseModel):

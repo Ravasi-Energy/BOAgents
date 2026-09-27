@@ -82,6 +82,21 @@ def _parse_secret_ref_allowlist(
     return bare, scoped
 
 
+def _send_timeout_s(tenant: str | None, db_path: Path | None) -> float:
+    """Operator-tunable http send timeout (``bo.telemetry.timeout_s``).
+    Tenant-scoped and re-read per delivery; settings failure keeps the
+    internal default — a slow receiver bounds a worker, not wedges it."""
+    if tenant is None:
+        return 5.0
+    try:
+        from openexecutive.bo.settings import store as settings_store
+
+        return float(settings_store.get_effective_value(
+            tenant, "bo.telemetry.timeout_s", db_path=db_path))
+    except Exception:  # noqa: BLE001
+        return 5.0
+
+
 def provisioned_secret_refs(
     tenant: str | None = None,
 ) -> frozenset[str]:
@@ -281,17 +296,19 @@ class TelemetryAdapter:
                 credential_state = "configured" if token else "missing"
         transport: Transport | None
         if kind == "http":
+            timeout_s = _send_timeout_s(tenant, db_path)
             current = self.transport if isinstance(self.transport, HttpTransport) else None
             if (
                 current is not None
                 and current.endpoint == endpoint
+                and current.timeout_s == timeout_s
                 and source["token_ref"] == "default"
                 and source["endpoint"] != "tenant"
             ):
                 transport = current
             else:
                 transport = (
-                    HttpTransport(endpoint, token)
+                    HttpTransport(endpoint, token, timeout_s=timeout_s)
                     if endpoint and token and credential_state == "configured"
                     else None
                 )
@@ -469,7 +486,10 @@ class TelemetryAdapter:
                         "credentialul asociat plicului nu este provisionat "
                         "în mediul procesului"
                     )
-                transport = HttpTransport(endpoint, token)
+                transport = HttpTransport(
+                    endpoint, token,
+                    timeout_s=_send_timeout_s(
+                        tenant or event.get("tenantRef"), db_path))
             elif cfg.transport_kind == "http" and cfg.endpoint:
                 # Bound to "no HTTP destination" at enqueue — a newly
                 # configured endpoint must never receive this envelope;

@@ -315,26 +315,28 @@ class AuditLogger:
         """Marker state for a dedup key: ``audit_row_id`` plus whether the
         referenced audit row actually exists — the operator-facing way to
         distinguish delivered evidence from an orphan marker (journal
-        restored without that row)."""
-        try:
-            with _get_conn(self._db_path) as conn:
-                marker = conn.execute(
-                    "SELECT audit_row_id, fingerprint FROM audit_dedup "
-                    "WHERE dedup_key = ?", (dedup_key,),
-                ).fetchone()
-                if marker is None:
-                    return None
-                live = conn.execute(
-                    "SELECT 1 FROM audit_log WHERE id = ?",
-                    (marker["audit_row_id"],),
-                ).fetchone() is not None
-            return {
-                "audit_row_id": int(marker["audit_row_id"]),
-                "journal_row_present": live,
-                "fingerprint": marker["fingerprint"],
-            }
-        except Exception:  # noqa: BLE001 — journal unreadable → unknown
-            return None
+        restored without that row).
+
+        ``None`` means *provably no marker*. A read failure is NOT
+        absence: the exception propagates so callers can distinguish
+        "confirmed missing" from "unreadable" per row/per read
+        (OP13-A01-01) instead of reporting missing evidence."""
+        with _get_conn(self._db_path) as conn:
+            marker = conn.execute(
+                "SELECT audit_row_id, fingerprint FROM audit_dedup "
+                "WHERE dedup_key = ?", (dedup_key,),
+            ).fetchone()
+            if marker is None:
+                return None
+            live = conn.execute(
+                "SELECT 1 FROM audit_log WHERE id = ?",
+                (marker["audit_row_id"],),
+            ).fetchone() is not None
+        return {
+            "audit_row_id": int(marker["audit_row_id"]),
+            "journal_row_present": live,
+            "fingerprint": marker["fingerprint"],
+        }
 
     def log(
         self,

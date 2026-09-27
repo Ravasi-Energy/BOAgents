@@ -266,6 +266,40 @@ nu are knob separat: frecvența reîncercărilor = ciclul workerului deja
 administrat, iar bugetul de tentative e limita — un jurnal mort nu produce
 buclă nelimitată.
 
+## Setări operaționale cu efect runtime (PILOT-12)
+
+Toate setările au scope tenant, `edit_role=admin`, CAS prin
+`expected_version` (409 la conflict), și sunt aplicate IMMEDIATE —
+citite la fiecare rezoluție/ciclu, fără restart.
+
+- `bo.router.delivery_retry_backoff_s` (0–86400, default 0): pauza minimă
+  până la următoarea tentativă pentru un plic eșuat (`retry_not_before`
+  pe `bo_telemetry_outbox`; claim-ul sare rândurile în fereastră).
+  0 = comportamentul vechi (reîncercare la fiecare ciclu).
+- `bo.router.audit_drain_batch` (1–1000, default 200): câte intenții
+  pending emite o trecere de drain — un backlog mare avansează mărginit
+  per ciclu, nu blochează workerul.
+- `bo.telemetry.timeout_s` (1–120, default 5): timeout-ul http pe
+  destinația administrată; transportul e reconstruit când valoarea se
+  schimbă (niciodată moștenit pe transportul bootstrap).
+- `bo.packages.max_package_bytes` (64K–256M, default 8M): plafon
+  operator, combinat `min()` cu `policy.maxPackageBytes` din trust store
+  — poate doar restrânge.
+- `bo.packages.rollback_requires_approval` (default true): dacă trust
+  store-ul permite rollback (`rollbackRequiresApproval:true`), acesta
+  decide dacă cere aprobare legată sau permite downgrade liber; dacă
+  registrul înrolat spune `false`, rollback-ul e OPRIT indiferent de
+  setare.
+- Secretele rămân referințe: `bo.telemetry.token_ref` ține un NUME de
+  variabilă provisionată (lista `BO_TELEMETRY_SECRET_REFS`), niciodată
+  valoarea; endpoint administrat fără ref provisionat = refuz controlat.
+
+**Read error ≠ absent (OP13-A01-01).** În exportul de dovezi, o citire
+eșuată a marcajului `audit_dedup` e raportată per-rând ca
+`journal_read_error=true` (+ `journal_reachable=false` la nivel de
+răspuns) — distinct de „dovadă absentă" confirmată. UI nu oferă
+recuperare și serverul refuză requeue-ul (409) cât citirea nu e posibilă.
+
 **Rutare uniformă.** `pilot/delivery` consumă aceeași configurație efectivă
 ca adaptorul general (`adapter.resolve`) — endpointul și referința administrate
 guvernează observațiile pilot și telemetria derivată (Heartbeat/RunFinished)

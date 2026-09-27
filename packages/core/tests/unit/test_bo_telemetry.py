@@ -245,6 +245,39 @@ def test_secret_ref_resolves_env_never_stores_secret(tmp_path, monkeypatch) -> N
     assert "sekrit" not in json.dumps(items)
 
 
+def test_send_timeout_setting_applies(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    """``bo.telemetry.timeout_s`` (administered, IMMEDIATE) reaches the
+    HttpTransport built for a tenant-administered destination — the
+    bootstrap transport's internal constant stays untouched."""
+    use_tmp_db(tmp_path, monkeypatch)
+    monkeypatch.setenv("TEL_TOKEN_T", "tok")
+    _provision_refs(monkeypatch, "TEL_TOKEN_T")
+    for key, val in (
+        ("bo.telemetry.transport", "http"),
+        ("bo.telemetry.endpoint", "https://admin.example/t"),
+        ("bo.telemetry.token_ref", "TEL_TOKEN_T"),
+    ):
+        settings_store.set_value(
+            "tenant-a", key, val, expected_version=0, actor="admin@t")
+    adapter = TelemetryAdapter(enabled=True)
+    cfg = adapter.resolve("tenant-a")
+    assert isinstance(cfg.transport, HttpTransport)
+    assert cfg.transport.timeout_s == 5.0  # default
+
+    settings_store.set_value(
+        "tenant-a", "bo.telemetry.timeout_s", 9,
+        expected_version=0, actor="admin@t")
+    cfg = adapter.resolve("tenant-a")
+    assert isinstance(cfg.transport, HttpTransport)
+    assert cfg.transport.timeout_s == 9.0
+    # out-of-range values are refused by the registry validator
+    from openexecutive.bo.settings.registry import SettingValidationError
+    with pytest.raises(SettingValidationError):
+        settings_store.set_value(
+            "tenant-a", "bo.telemetry.timeout_s", 999,
+            expected_version=1, actor="admin@t")
+
+
 def test_endpoint_override_gets_fresh_transport(tmp_path, monkeypatch) -> None:  # noqa: ANN001
     """An administered endpoint builds a NEW transport ONLY when an
     administered, provisioned token_ref exists — the bootstrap token is

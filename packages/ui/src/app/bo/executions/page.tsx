@@ -850,6 +850,7 @@ function AuditIntentsSection({ refreshKey }: { refreshKey: number }) {
     return (
       state.kind === "data" &&
       state.journalReachable &&
+      !i.journal_read_error &&
       i.status === "delivered" &&
       (i.audit_row_id === null || i.journal_row_present === false)
     );
@@ -1045,12 +1046,13 @@ function AuditIntentsSection({ refreshKey }: { refreshKey: number }) {
                   ) : null}
                   {i.status === "delivered" &&
                   i.audit_row_id === null &&
-                  state.journalReachable ? (
+                  state.journalReachable &&
+                  !i.journal_read_error ? (
                     <Pill kind="warn">dovadă absentă</Pill>
                   ) : null}
                   {i.status === "delivered" &&
                   i.audit_row_id === null &&
-                  !state.journalReachable ? (
+                  (!state.journalReachable || i.journal_read_error) ? (
                     <Pill kind="neutral">dovadă neverificabilă</Pill>
                   ) : null}
                   {i.content_verifiable === false ? (

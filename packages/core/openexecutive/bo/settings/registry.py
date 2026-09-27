@@ -671,6 +671,46 @@ REGISTRY: dict[str, SettingSpec] = {
             v, minimum=1, maximum=1000, label="Tentativele maxime"
         ),
     ),
+    "bo.router.delivery_retry_backoff_s": SettingSpec(
+        key="bo.router.delivery_retry_backoff_s",
+        type="integer",
+        default=0,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="routing",
+        label_ro="Backoff reîncercare livrare (s)",
+        label_en="Delivery retry backoff (s)",
+        help_ro="Pauza minimă între două tentative de livrare pentru un plic eșuat. 0 = reîncearcă la fiecare ciclu (comportamentul implicit).",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Eșecurile următoare programează următoarea tentativă după cel puțin aceste secunde.",
+        acceptance_ro="Un endpoint picat nu mai e bombardat la fiecare ciclu; plicurile nereușite rămân vizibile.",
+        validate=lambda v: _validate_int(
+            v, minimum=0, maximum=86400, label="Backoff-ul de livrare"
+        ),
+    ),
+    "bo.router.audit_drain_batch": SettingSpec(
+        key="bo.router.audit_drain_batch",
+        type="integer",
+        default=200,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="routing",
+        label_ro="Intenții audit per drain",
+        label_en="Audit drain batch size",
+        help_ro="Câte intenții de audit pending procesează un ciclu de drain. Mărginește cât blochează reconcilierea ciclul workerului.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Următorul drain procesează cel mult această valoare; restul așteaptă ciclul următor.",
+        acceptance_ro="Un backlog mare nu blochează ciclul de livrare — avansează mărginit per ciclu.",
+        validate=lambda v: _validate_int(
+            v, minimum=1, maximum=1000, label="Batch-ul drain audit"
+        ),
+    ),
     "bo.telemetry.enabled": SettingSpec(
         key="bo.telemetry.enabled",
         type="boolean",
@@ -744,6 +784,26 @@ REGISTRY: dict[str, SettingSpec] = {
         effect_ro="Se citește variabila indicată la următoarea trimitere http. Cu endpoint administrat, referința lipsește/neprovisionată înseamnă refuz controlat de livrare, nu fallback la BO_TELEMETRY_TOKEN.",
         acceptance_ro="Doar un nume de variabilă de mediu provisionat (litere, cifre, _), niciodată valoarea secretă.",
         validate=_validate_telemetry_secret_ref,
+    ),
+    "bo.telemetry.timeout_s": SettingSpec(
+        key="bo.telemetry.timeout_s",
+        type="integer",
+        default=5,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="telemetrie",
+        label_ro="Timeout trimitere telemetrie (s)",
+        label_en="Telemetry send timeout (s)",
+        help_ro="Timeout-ul apelului http către destinația administrată. Plicul netrimis rămâne pending și se reîncearcă — un timeout nu livrează și nu pierde.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Se aplică la următoarea trimitere http; transportul construit din mediu (bootstrap) păstrează constanta internă.",
+        acceptance_ro="Întreg 1–120 secunde; apelul abortează controlat la timeout.",
+        validate=lambda v: _validate_int(
+            v, minimum=1, maximum=120, label="Timeout-ul telemetriei"
+        ),
     ),
     "bo.exec.enabled": SettingSpec(
         key="bo.exec.enabled",

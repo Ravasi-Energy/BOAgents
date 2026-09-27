@@ -149,6 +149,12 @@ def initialize_db(db_path: Path | None = None) -> None:
                 "ALTER TABLE bo_telemetry_outbox ADD COLUMN dest_endpoint TEXT")
             conn.execute(
                 "ALTER TABLE bo_telemetry_outbox ADD COLUMN dest_ref TEXT")
+        # PILOT-12: operator-spaced retries. A failed resolve schedules the
+        # next attempt after ``bo.router.delivery_retry_backoff_s``; claim
+        # skips rows whose backoff hasn't elapsed. NULL = retryable now.
+        if "retry_not_before" not in columns:
+            conn.execute(
+                "ALTER TABLE bo_telemetry_outbox ADD COLUMN retry_not_before TEXT")
         conn.execute("""CREATE TABLE IF NOT EXISTS bo_outbox_retries (
             tenant TEXT NOT NULL, event_id TEXT NOT NULL, series INTEGER NOT NULL,
             attempts_before INTEGER NOT NULL, last_error TEXT, reason TEXT NOT NULL,
@@ -579,9 +585,10 @@ def claim_outbox(
         " FROM bo_telemetry_outbox"
         " WHERE tenant = ? AND delivered = 0"
         "   AND (lease_until IS NULL OR lease_until < ?)"
+        "   AND (retry_not_before IS NULL OR retry_not_before <= ?)"
         "   AND (COALESCE(dest_bound, 0) = 1 OR attempts = 0)"
     )
-    params: list[Any] = [tenant, now]
+    params: list[Any] = [tenant, now, now]
     if kinds is not None:
         placeholders = ",".join("?" for _ in kinds)
         query += f" AND kind IN ({placeholders})"
@@ -622,19 +629,31 @@ def resolve_outbox(
     ref_id: str | None = None,
     error: str | None,
     dead: bool = False,
+    backoff_s: float = 0,
     db_path: Path | None = None,
 ) -> None:
     """Record the delivery outcome and release the lease. ``dead`` marks a
     permanently failed envelope (attempt cap reached) — visible, never
-    silently dropped. Routing observations mirror the outcome."""
+    silently dropped. Routing observations mirror the outcome.
+
+    ``backoff_s`` (administered via ``bo.router.delivery_retry_backoff_s``)
+    schedules the next claim on transient failure: the row stays pending
+    but is skipped by ``claim_outbox`` until the backoff has elapsed — a
+    dead receiver is not hammered every cycle. Success/dead clears it."""
     delivered = 2 if dead else (0 if error else 1)
+    retry_not_before = None
+    if error and not dead and backoff_s > 0:
+        retry_not_before = (
+            datetime.now(UTC) + timedelta(seconds=backoff_s)
+        ).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     with get_conn(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         conn.execute(
             "UPDATE bo_telemetry_outbox SET delivered = ?, last_error = ?, "
-            "lease_owner = NULL, lease_until = NULL "
+            "lease_owner = NULL, lease_until = NULL, "
+            "retry_not_before = ? "
             "WHERE tenant = ? AND event_id = ?",
-            (delivered, error, tenant, event_id),
+            (delivered, error, retry_not_before, tenant, event_id),
         )
         if kind == "routing" and ref_id is not None:
             conn.execute(
@@ -746,7 +765,7 @@ def retry_outbox_entry(
         )
         conn.execute(
             "UPDATE bo_telemetry_outbox SET delivered = 0, retry_base = attempts, "
-            "lease_owner = NULL, lease_until = NULL "
+            "lease_owner = NULL, lease_until = NULL, retry_not_before = NULL "
             "WHERE tenant = ? AND event_id = ?",
             (tenant, event_id),
         )
@@ -870,7 +889,7 @@ def rebind_outbox(
                     list(event_ids) if event_ids is not None else None,
             },
         )
-    drain_audit_intents(db_path=db_path)
+    drain_audit_intents(db_path=db_path, tenant=tenant)
     intent_state = next(
         (
             i["status"]
@@ -993,6 +1012,21 @@ def _drain_max_attempts(tenant: str, db_path: Path | None) -> int:
         return 3
 
 
+def _drain_batch(tenant: str | None, db_path: Path | None) -> int:
+    """Operator-tunable bound on how many pending intents one drain pass
+    emits — a large backlog advances incrementally instead of blocking a
+    worker cycle."""
+    if tenant is None:
+        return 200
+    try:
+        from openexecutive.bo.settings import store as settings_store
+
+        return int(settings_store.get_effective_value(
+            tenant, "bo.router.audit_drain_batch", db_path=db_path))
+    except Exception:
+        return 200
+
+
 def _claim_audit_intent(
     conn: sqlite3.Connection, intent_id: str, owner: str, now: str,
     lease_s: int,
@@ -1049,12 +1083,14 @@ def drain_audit_intents(
     if tenant is not None:
         where += " AND tenant = ?"
         params.append(tenant)
+    batch = _drain_batch(tenant, db_path)
     with get_conn(db_path) as conn:
         candidates = [
             dict(r) for r in conn.execute(
                 "SELECT intent_id, tenant, event, actor, summary, "
                 "details_json FROM bo_audit_intents "
-                f"WHERE {where} ORDER BY created_at", params)
+                f"WHERE {where} ORDER BY created_at LIMIT ?",
+                (*params, batch))
         ]
     delivered = failed = skipped = preempted = 0
     for intent in candidates:
@@ -1191,9 +1227,17 @@ def audit_intents_evidence(
         journal = None
         journal_ok = False
     intents = []
+    any_read_error = False
     for row in rows:
         row.pop("details_json", None)
-        marker = journal.dedup_lookup(row["intent_id"]) if journal else None
+        marker = None
+        read_error = False
+        if journal is not None:
+            try:
+                marker = journal.dedup_lookup(row["intent_id"])
+            except Exception:  # noqa: BLE001 — unreadable is NOT absent
+                read_error = True
+                any_read_error = True
         intents.append({
             **row,
             "audit_row_id": (
@@ -1205,9 +1249,13 @@ def audit_intents_evidence(
             # intent; never imply a conflict we cannot prove.
             "content_verifiable": (
                 marker["fingerprint"] is not None if marker else None),
+            # OP13-A01-01: a per-row read failure stays distinct from a
+            # confirmed absent marker — the operator must never see
+            # "evidence missing" for a row whose marker could not be read.
+            "journal_read_error": read_error,
         })
     return {"intents": intents, "total": total,
-            "journal_reachable": journal_ok}
+            "journal_reachable": journal_ok and not any_read_error}
 
 
 def requeue_failed_audit_intents(

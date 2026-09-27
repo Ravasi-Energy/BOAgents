@@ -82,6 +82,9 @@ def deliver_pending(
     # receiver can't produce a double-send from a second worker mid-flight.
     lease_s = max(60, _setting(tenant, "bo.router.delivery_interval_s", 30,
                                db_path) * 4)
+    retry_backoff_s = _setting(
+        tenant, "bo.router.delivery_retry_backoff_s", 0, db_path
+    )
 
     # Audit-intent reconcile: intents persisted by mutations (rebind) are
     # replayed to the journal here too — a crash between the mutation
@@ -144,14 +147,14 @@ def deliver_pending(
             store.resolve_outbox(
                 tenant, row["event_id"], kind=row["kind"],
                 ref_id=row["ref_id"], error=str(exc)[:200],
-                db_path=db_path,
+                backoff_s=retry_backoff_s, db_path=db_path,
             )
             failed += 1
         except TelemetryDisabledError:
             store.resolve_outbox(
                 tenant, row["event_id"], kind=row["kind"],
                 ref_id=row["ref_id"], error="telemetry disabled",
-                db_path=db_path,
+                backoff_s=retry_backoff_s, db_path=db_path,
             )
             failed += 1
         except _ExecutionDeadLetter as exc:
@@ -167,7 +170,7 @@ def deliver_pending(
             store.resolve_outbox(
                 tenant, row["event_id"], kind=row["kind"],
                 ref_id=row["ref_id"], error=str(exc)[:200],
-                db_path=db_path,
+                backoff_s=retry_backoff_s, db_path=db_path,
             )
             failed += 1
         else:
@@ -185,7 +188,7 @@ def deliver_pending(
                     tenant, row["event_id"], kind=row["kind"],
                     ref_id=row["ref_id"],
                     error=f"ack neașteptat: {detail}"[:200],
-                    db_path=db_path,
+                    backoff_s=retry_backoff_s, db_path=db_path,
                 )
                 failed += 1
                 continue

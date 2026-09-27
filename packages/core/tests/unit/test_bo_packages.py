@@ -422,6 +422,55 @@ class TestDowngradeApprovals:
         res = _import(ADMIN, tmp_path / "v1", db_path)
         assert res["verdict"]["reasons"][0].startswith("ROLLBACK_UNAUTHORIZED")
 
+    def test_operator_setting_allows_free_downgrade(
+            self, db_path: Path, qroot: Path, tmp_path: Path) -> None:
+        """``bo.packages.rollback_requires_approval = False`` (operator,
+        owner of both documents) permits the downgrade the trust-store
+        policy would otherwise gate behind an approval."""
+        _enable(db_path)
+        settings_store.set_value(
+            "tenant-a", "bo.packages.rollback_requires_approval", False,
+            expected_version=0, actor=ADMIN.actor, db_path=db_path)
+        write_pkg(tmp_path / "v2", version="2.0.0")
+        write_pkg(tmp_path / "v1", version="1.0.0")
+        assert _import(ADMIN, tmp_path / "v2", db_path)["status"] == "QUARANTINED"
+        res = _import(ADMIN, tmp_path / "v1", db_path)
+        assert res["status"] == "QUARANTINED"
+
+    def test_registry_disabled_rollback_stays_off(
+            self, db_path: Path, qroot: Path, tmp_path: Path) -> None:
+        """Trust store ``rollbackRequiresApproval=False`` means OFF — no
+        tenant setting re-enables what the enrolled registry forbids."""
+        doc = _registry_doc()
+        doc["policy"]["rollbackRequiresApproval"] = False
+        _enable(db_path)
+        settings_store.set_value(
+            "tenant-a", "bo.packages.trust_store_json", json.dumps(doc),
+            expected_version=1, actor=ADMIN.actor, db_path=db_path)
+        write_pkg(tmp_path / "v2", version="2.0.0")
+        write_pkg(tmp_path / "v1", version="1.0.0")
+        assert _import(ADMIN, tmp_path / "v2", db_path)["status"] == "QUARANTINED"
+        res = _import(ADMIN, tmp_path / "v1", db_path)
+        assert res["verdict"]["reasons"][0].startswith("ROLLBACK_UNAUTHORIZED")
+
+    def test_operator_size_cap_tightens_policy(
+            self, db_path: Path, qroot: Path, tmp_path: Path) -> None:
+        """``bo.packages.max_package_bytes`` tightens (never loosens) the
+        trust-store cap: 80 KiB of artifacts pass the 1 MiB policy cap but
+        are refused once the operator lowers the bound to 64 KiB."""
+        _enable(db_path)
+        big = {"bots/a.bobot.json": b'{"x":1}\n',
+               "docs/blob.bin": b"b" * (80 * 1024)}
+        write_pkg(tmp_path / "pkg", files=big)
+        assert _import(ADMIN, tmp_path / "pkg", db_path)["status"] == "QUARANTINED"
+        settings_store.set_value(
+            "tenant-a", "bo.packages.max_package_bytes", 65536,
+            expected_version=0, actor=ADMIN.actor, db_path=db_path)
+        write_pkg(tmp_path / "pkg2", files=big, version="2.0.0")
+        res = _import(ADMIN, tmp_path / "pkg2", db_path)
+        assert res["verdict"]["verdict"] == "REJECT"
+        assert res["verdict"]["reasons"][0].startswith("PACKAGE_TOO_LARGE")
+
 
 class TestVerifierContractService:
     """Contract `bo.package.verdict.v1` și semantica §8 — prin `verify_package`

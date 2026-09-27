@@ -169,7 +169,11 @@ def import_package(
         source_dir, registry,
         tenant_ref=identity.tenant, installed=installed,
         approvals=approvals, consumed_approvals=consumed,
-        host_version=BO_PRODUCT_VERSION)
+        host_version=BO_PRODUCT_VERSION,
+        operator_max_bytes=int(
+            _setting(identity, "bo.packages.max_package_bytes", db_path)),
+        operator_rollback_requires_approval=bool(_setting(
+            identity, "bo.packages.rollback_requires_approval", db_path)))
 
     if not verdict.accepted:
         row_id = store.insert_import(

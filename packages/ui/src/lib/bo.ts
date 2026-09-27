@@ -894,6 +894,9 @@ export interface BoAuditIntent {
   /** Marcajul poartă fingerprint de conținut? false = marcaj legacy
    *  (pre-PILOT-10) — conținutul nu e verificabil; nu e conflict dovedit. */
   content_verifiable: boolean | null;
+  /** Citirea marcajului acestui rând a eșuat — necunoscut, NU absent:
+   *  dovada poate exista; recuperarea nu se oferă. */
+  journal_read_error: boolean;
 }
 
 export function listBoAuditIntents(opts?: {

@@ -2153,3 +2153,144 @@ class TestRebindAuditDurability:
         assert st["stale_claim"] == 1 and st["claimed"] == 0
         stats = store.outbox_stats(TENANT, db_path=db)
         assert stats["audit_stale_claim"] == 1
+
+    def test_drain_batch_setting_bounds_one_pass(
+        self, db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``bo.router.audit_drain_batch`` bounds how many intents a single
+        drain pass emits — a backlog advances incrementally per cycle."""
+        self._journal(tmp_path, monkeypatch)
+        settings_store.set_value(
+            TENANT, "bo.router.audit_drain_batch", 2,
+            expected_version=0, actor="admin@t", db_path=db)
+        with bo_db.get_conn(db) as conn:
+            for i in range(3):
+                store._insert_audit_intent(
+                    conn, TENANT, "bo_test_evt", "admin@t",
+                    f"intent {i}", {"n": i})
+        res = store.drain_audit_intents(db_path=db, tenant=TENANT)
+        assert res["delivered"] == 2
+        assert len(store.pending_audit_intents(db_path=db)) == 1
+        res = store.drain_audit_intents(db_path=db, tenant=TENANT)
+        assert res["delivered"] == 1
+        assert store.pending_audit_intents(db_path=db) == []
+
+    def test_dedup_read_error_distinct_from_absent(
+        self, db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """OP13-A01-01: a failed read of ``audit_dedup`` is NOT a missing
+        marker. The export marks the row ``journal_read_error`` (and the
+        response ``journal_reachable=false``) instead of reporting absent
+        evidence, and requeue stays refused — fail closed."""
+        from openexecutive.audit import logger as audit_logger
+
+        self._journal(tmp_path, monkeypatch)
+        self._legacy_row(db)
+        store.rebind_outbox(
+            TENANT, actor="admin@t", reason="r", db_path=db)
+        iid = None
+        with bo_db.get_conn(db) as conn:
+            iid = conn.execute(
+                "SELECT intent_id FROM bo_audit_intents "
+                "WHERE status='delivered'").fetchone()["intent_id"]
+
+        def deny(*a, **kw):  # noqa: ANN001, ANN202
+            raise sqlite3.OperationalError(
+                "authorizer denies audit_dedup read")
+
+        monkeypatch.setattr(
+            audit_logger.AuditLogger, "dedup_lookup", deny)
+        out = store.audit_intents_evidence(TENANT, db_path=db)
+        assert out["journal_reachable"] is False
+        row = next(
+            i for i in out["intents"] if i["intent_id"] == iid)
+        assert row["journal_read_error"] is True
+        assert row["audit_row_id"] is None
+        # Recovery stays refused: unreadable ≠ missing.
+        with pytest.raises(ValueError, match="live journal evidence"):
+            store.requeue_failed_audit_intents(
+                TENANT, actor="admin@t", intent_id=iid, db_path=db)
+
+
+class TestRetryBackoff:
+    """``bo.router.delivery_retry_backoff_s`` — transient failures park the
+    row until the backoff elapses; claim_outbox honours the gate."""
+
+    def _failing_adapter(self, monkeypatch: pytest.MonkeyPatch):
+        import urllib.request
+
+        from openexecutive.bo.telemetry import adapter as tel
+
+        def boom(req, **kw):  # noqa: ANN001
+            raise OSError("receiver down")
+
+        monkeypatch.setattr(urllib.request, "urlopen", boom)
+        ad = tel.TelemetryAdapter(
+            enabled=True,
+            transport=tel.HttpTransport(
+                "https://dest-a.invalid/v1/telemetry", "synthetic-token-a"))
+        monkeypatch.setattr(tel, "_adapter", ad)
+        return ad
+
+    def test_backoff_defers_then_allows_retry(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from openexecutive.bo.routing import delivery
+
+        monkeypatch.setenv("BO_TELEMETRY_TOKEN", "synthetic-token-a")
+        adapter = self._failing_adapter(monkeypatch)
+        settings_store.set_value(
+            TENANT, "bo.router.delivery_retry_backoff_s", 3600,
+            expected_version=0, actor="admin@t", db_path=db)
+        store.enqueue_outbox(
+            TENANT, "models", "ref-bo",
+            {"schemaVersion": "bo.model-observation.v1",
+             "eventId": "evt_bo", "tenantRef": TENANT},
+            db_path=db)
+
+        res = delivery.deliver_pending(TENANT, adapter=adapter, db_path=db)
+        assert res["failed"] == 1
+        with bo_db.get_conn(db) as conn:
+            nbf = conn.execute(
+                "SELECT retry_not_before FROM bo_telemetry_outbox "
+                "WHERE event_id='evt_bo'").fetchone()["retry_not_before"]
+        assert nbf is not None  # scheduled in the future
+
+        # Inside the backoff window the row is invisible to claims.
+        assert store.claim_outbox(
+            TENANT, worker_id="w2", limit=10, lease_s=60,
+            db_path=db) == []
+
+        # Once it elapses the same row is claimable again.
+        with bo_db.get_conn(db) as conn:
+            conn.execute(
+                "UPDATE bo_telemetry_outbox SET "
+                "retry_not_before='2020-01-01T00:00:00Z'")
+        claimed = store.claim_outbox(
+            TENANT, worker_id="w3", limit=10, lease_s=60, db_path=db)
+        assert [r["event_id"] for r in claimed] == ["evt_bo"]
+
+    def test_zero_backoff_keeps_immediate_retry(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Backoff 0 (default) preserves the pre-PILOT-12 behaviour: a
+        failed row is retryable on the very next claim."""
+        from openexecutive.bo.routing import delivery
+
+        monkeypatch.setenv("BO_TELEMETRY_TOKEN", "synthetic-token-a")
+        adapter = self._failing_adapter(monkeypatch)
+        store.enqueue_outbox(
+            TENANT, "models", "ref-b0",
+            {"schemaVersion": "bo.model-observation.v1",
+             "eventId": "evt_b0", "tenantRef": TENANT},
+            db_path=db)
+        res = delivery.deliver_pending(TENANT, adapter=adapter, db_path=db)
+        assert res["failed"] == 1
+        with bo_db.get_conn(db) as conn:
+            nbf = conn.execute(
+                "SELECT retry_not_before FROM bo_telemetry_outbox "
+                "WHERE event_id='evt_b0'").fetchone()["retry_not_before"]
+        assert nbf is None
+        claimed = store.claim_outbox(
+            TENANT, worker_id="w2", limit=10, lease_s=60, db_path=db)
+        assert [r["event_id"] for r in claimed] == ["evt_b0"]

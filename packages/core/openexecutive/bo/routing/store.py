@@ -1200,6 +1200,11 @@ def audit_intents_evidence(
                 marker["audit_row_id"] if marker else None),
             "journal_row_present": (
                 marker["journal_row_present"] if marker else None),
+            # NULL fingerprint = marker created before PILOT-10 — the row
+            # is evidence, but its content is NOT verifiable against the
+            # intent; never imply a conflict we cannot prove.
+            "content_verifiable": (
+                marker["fingerprint"] is not None if marker else None),
         })
     return {"intents": intents, "total": total,
             "journal_reachable": journal_ok}
@@ -1207,7 +1212,7 @@ def audit_intents_evidence(
 
 def requeue_failed_audit_intents(
     tenant: str, *, actor: str, intent_id: str | None = None,
-    db_path: Path | None = None
+    reason: str | None = None, db_path: Path | None = None
 ) -> dict[str, Any]:
     """Explicit operator recovery: parked ``failed`` intents go back to
     ``pending`` so the next drain retries them against a restored journal.
@@ -1257,7 +1262,8 @@ def requeue_failed_audit_intents(
             _insert_audit_intent(
                 conn, tenant, "bo_audit_intents_requeue", actor,
                 f"bo_audit_intents_requeue: {count} relansate",
-                {"requeued": count, "intent_id": intent_id},
+                {"requeued": count, "intent_id": intent_id,
+                 "reason": reason},
             )
     drain_audit_intents(db_path=db_path, tenant=tenant)
     return {"requeued": count}

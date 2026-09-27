@@ -315,6 +315,29 @@ refuzat cu 409 câtă vreme dovada e vie. Limită honestă: NU se pretinde
 exactly-once global peste două baze restaurate independent — divergența
 rămâne detectabilă prin export, nu auto-vindecată.
 
+## Suprafață operator: intenții de audit (PILOT-11)
+
+Pagina BO „Execuții" expune secțiunea „Dovezi de audit" (vizibilă la
+`execution:read`): lista intenților cu filtrare după stare și paginare
+(explicită, `limit`+`offset`). Fiecare intență arată dovada de jurnal:
+`dovadă #N` (rând viu confirmat), `dovadă absentă` (`delivered` fără
+`audit_row_id`), `marcaj orfan` (marker spre rând dispărut) și
+`conținut neverificabil` (marcaj legacy cu `fingerprint NULL` — rândul
+e acceptat ca dovadă, dar conținutul nu e verificabil; toleranță
+declarată, nu certificare). Lease-ul de drain e vizibil, inclusiv
+emitentul căzut (claim expirat încă afișat).
+
+Recuperarea e individuală și explicită: buton „Recuperează dovada"
+(doar pe `failed` sau `delivered` cu dovadă pierdută) → confirmare →
+`POST audit-requeue {"intent_id", "reason"?}`. Un 409 înseamnă că
+dovada e vie (sau jurnalul neverificabil) — re-emisia ar fi un
+duplicat; nu forțați. Exportul „Exportă pagina"
+descarcă un JSON cu timestamp de generare, filtre și paginare; dacă
+rezultatul e o singură pagină din mai multe, fișierul și UI-ul îl
+marchează `partial=true` — nu tratați un export parțial ca complet.
+Niciun octet de secret sau `details_json` brut nu ajunge în UI sau
+export.
+
 ## Upgrade, dezinstalare și rollback
 
 Opriți workerii proprii înainte de upgrade, salvați SHA/configurație și o copie SQLite

@@ -1007,6 +1007,7 @@ def list_audit_intents(
 
 class _AuditRequeueBody(BaseModel):
     intent_id: str | None = Field(default=None, max_length=128)
+    reason: str | None = Field(default=None, max_length=500)
 
 
 @router.post("/execution/outbox/audit-requeue")
@@ -1025,6 +1026,7 @@ def audit_requeue(
         return routing_store.requeue_failed_audit_intents(
             ident.tenant, actor=ident.actor,
             intent_id=body.intent_id if body else None,
+            reason=body.reason if body else None,
         )
     except ValueError as exc:
         return _bo_json(409, "audit_requeue_refused", str(exc))

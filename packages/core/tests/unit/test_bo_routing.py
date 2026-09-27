@@ -1582,6 +1582,7 @@ class TestRoutes:
         assert intent["status"] == "delivered"
         assert intent["audit_row_id"] is not None
         assert intent["journal_row_present"] is True
+        assert intent["content_verifiable"] is True
         assert "details_json" not in intent
         assert {"drain_owner", "drain_until", "attempts"} <= set(intent)
 
@@ -1605,6 +1606,101 @@ class TestRoutes:
             headers=self.VIEWER)
         assert resp.status_code == 200
         assert resp.json()["intents"] == []
+
+    def test_audit_requeue_route_contract(
+        self, client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """POST /execution/outbox/audit-requeue {intent_id} — 409 on live
+        evidence and on unknown intents, 403 for viewers, and demotion
+        only once the journal verifiably lost the evidence."""
+        import openexecutive.audit as audit_pkg
+        from openexecutive.audit import logger as audit_logger
+
+        journal = audit_logger.AuditLogger(tmp_path / "journal.db")
+        monkeypatch.setattr(audit_logger, "_default_logger", journal)
+        monkeypatch.setattr(audit_pkg, "log_event", audit_logger.log_event)
+
+        store.enqueue_outbox(
+            TENANT, "models", "ref-a",
+            {"schemaVersion": "bo.model-observation.v1",
+             "eventId": "evt_rq", "tenantRef": TENANT})
+        with bo_db.get_conn() as conn:
+            conn.execute(
+                "UPDATE bo_telemetry_outbox SET dest_bound=NULL, "
+                "dest_endpoint=NULL, dest_ref=NULL WHERE event_id='evt_rq'")
+        out = store.rebind_outbox(TENANT, actor="admin@t", reason="rq")
+        assert out["audit"] == "delivered"
+        with bo_db.get_conn() as conn:
+            intent_id = conn.execute(
+                "SELECT intent_id FROM bo_audit_intents").fetchone()[0]
+
+        # viewer → 403
+        resp = client.post(
+            "/bo/execution/outbox/audit-requeue", headers=self.VIEWER,
+            json={"intent_id": intent_id})
+        assert resp.status_code == 403
+        # unknown intent_id → 409
+        resp = client.post(
+            "/bo/execution/outbox/audit-requeue", headers=self.ADMIN,
+            json={"intent_id": "nope"})
+        assert resp.status_code == 409
+        # live journal evidence → 409, status untouched
+        resp = client.post(
+            "/bo/execution/outbox/audit-requeue", headers=self.ADMIN,
+            json={"intent_id": intent_id, "reason": "verify"})
+        assert resp.status_code == 409
+        with bo_db.get_conn() as conn:
+            row = conn.execute(
+                "SELECT status FROM bo_audit_intents "
+                "WHERE intent_id = ?", (intent_id,)).fetchone()
+            assert row[0] == "delivered"
+        # journal loses the row → demote + drain re-emits exactly once
+        with audit_logger._get_conn(journal._db_path) as conn:
+            conn.execute("DELETE FROM audit_log")
+            conn.execute("DELETE FROM audit_dedup")
+        resp = client.post(
+            "/bo/execution/outbox/audit-requeue", headers=self.ADMIN,
+            json={"intent_id": intent_id, "reason": "journal restored"})
+        assert resp.status_code == 200
+        assert resp.json()["requeued"] == 1
+        with audit_logger._get_conn(journal._db_path) as conn:
+            rows = conn.execute(
+                "SELECT COUNT(*) FROM audit_log").fetchone()[0]
+        assert rows == 2  # requeue audit + re-emitted rebind intent
+
+    def test_audit_intents_offset_pagination(
+        self, client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """offset paginates deterministically; limit is bounded."""
+        from openexecutive.audit import logger as audit_logger
+
+        journal = audit_logger.AuditLogger(tmp_path / "journal.db")
+        monkeypatch.setattr(audit_logger, "_default_logger", journal)
+        with bo_db.get_conn() as conn:
+            conn.execute(
+                "INSERT INTO bo_audit_intents (intent_id, tenant, event,"
+                " actor, summary, status, created_at, attempts,"
+                " details_json) VALUES"
+                " ('i1', 'tenant-a', 'e', 'a', 's', 'failed',"
+                " '2026-01-01T00:00:00+00:00', 3, '{}')")
+            conn.execute(
+                "INSERT INTO bo_audit_intents (intent_id, tenant, event,"
+                " actor, summary, status, created_at, attempts,"
+                " details_json) VALUES"
+                " ('i2', 'tenant-a', 'e', 'a', 's', 'failed',"
+                " '2026-01-02T00:00:00+00:00', 3, '{}')")
+        resp = client.get(
+            "/bo/execution/audit-intents?limit=1&offset=0",
+            headers=self.VIEWER)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total"] == 2 and len(body["intents"]) == 1
+        resp = client.get(
+            "/bo/execution/audit-intents?limit=1&offset=1",
+            headers=self.VIEWER)
+        page2 = resp.json()["intents"]
+        assert len(page2) == 1
+        assert page2[0]["intent_id"] != body["intents"][0]["intent_id"]
 
 
 def test_bobots_have_no_router_dependency() -> None:

@@ -5,7 +5,7 @@
 // execuție ≠ observație, succes ≠ rezultat necunoscut, reluare ≠
 // duplicarea efectului, anularea NU inversează un efect extern deja
 // executat. Acțiunile consecvențiale cer confirmare + motiv auditat.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import IconBO from "@/components/bo/IconBO";
 import { InlineAlert, Pill, StateBlock } from "@/components/bo/ui";
@@ -17,17 +17,20 @@ import {
   getBoMandates,
   getBoRunAuthority,
   getBoRunDetail,
+  listBoAuditIntents,
   listBoExecRuns,
   listBoOutbox,
   pauseBoRun,
   rebindBoOutbox,
   reconcileBoRun,
+  requeueBoAuditIntent,
   requeueBoAuditIntents,
   resumeBoRun,
   retryBoOutbox,
   revokeBoMandate,
   submitBoRun,
   workBoRuns,
+  type BoAuditIntent,
   type BoAuthorityCheck,
   type BoExecRun,
   type BoExecStatus,
@@ -756,6 +759,368 @@ function OutboxSection({
   );
 }
 
+// --------------------------------------------------------------------------- //
+// Intențiile de audit durabile (PILOT-10/11): corelare intență ↔ rând jurnal,
+// dovadă prezentă/absentă/orfană, recuperare explicită individuală.
+// --------------------------------------------------------------------------- //
+
+const AUDIT_INTENT_LABEL: Record<
+  string,
+  { label: string; kind: "ok" | "warn" | "danger" | "info" | "neutral" }
+> = {
+  pending: { label: "în așteptare", kind: "warn" },
+  delivered: { label: "livrată", kind: "ok" },
+  failed: { label: "parcată", kind: "danger" },
+};
+
+const AUDIT_PAGE = 20;
+
+type AuditIntentsState =
+  | { kind: "loading" }
+  | { kind: "error"; message: string }
+  | { kind: "forbidden" }
+  | {
+      kind: "data";
+      intents: BoAuditIntent[];
+      total: number;
+      journalReachable: boolean;
+      status: string;
+      offset: number;
+    };
+
+function AuditIntentsSection({ refreshKey }: { refreshKey: number }) {
+  const [state, setState] = useState<AuditIntentsState>({ kind: "loading" });
+  const [statusFilter, setStatusFilter] = useState("");
+  const [offset, setOffset] = useState(0);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ kind: "ok" | "danger"; text: string } | null>(null);
+  const loadSeq = useRef(0);
+
+  const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
+    try {
+      const res = await listBoAuditIntents({
+        status: statusFilter || undefined,
+        limit: AUDIT_PAGE,
+        offset,
+      });
+      if (seq !== loadSeq.current) return;
+      if (offset > 0 && offset >= res.total) {
+        setOffset(0);
+        return;
+      }
+      setState({
+        kind: "data",
+        intents: res.intents,
+        total: res.total,
+        journalReachable: res.journal_reachable,
+        status: statusFilter,
+        offset,
+      });
+    } catch (err) {
+      if (seq !== loadSeq.current) return;
+      if (err instanceof BoApiError && err.status === 403) {
+        setState({ kind: "forbidden" });
+      } else {
+        setState({
+          kind: "error",
+          message: "Nu am putut încărca intențiile de audit.",
+        });
+      }
+    }
+  }, [statusFilter, offset]);
+
+  useEffect(() => {
+    void load();
+  }, [load, refreshKey]);
+
+  function changeFilter(next: string) {
+    setStatusFilter(next);
+    setOffset(0);
+    setNotice(null);
+  }
+
+  /** Eligibil pentru recuperare individuală: parcată (`failed`) sau
+   *  `delivered` a cărei dovadă din jurnal lipsește verificabil —
+   *  fără marcaj sau marcaj orfan. Jurnal indisponibil = necunoscut,
+   *  nu absent — serverul ar refuza oricum cu 409. `pending` e în
+   *  curs — nu se atinge. */
+  function recoverable(i: BoAuditIntent): boolean {
+    if (i.status === "failed") return true;
+    return (
+      state.kind === "data" &&
+      state.journalReachable &&
+      i.status === "delivered" &&
+      (i.audit_row_id === null || i.journal_row_present === false)
+    );
+  }
+
+  async function recover(i: BoAuditIntent) {
+    const prompt =
+      i.status === "failed"
+        ? `Reiei intenția parcată ${i.intent_id.slice(0, 12)}…?\n\n` +
+          `Reintră în pending și drain-ul o reemite către jurnal.\n\nContinui?`
+        : `Reiei emiterea intenției ${i.intent_id.slice(0, 12)}… către jurnal?\n\n` +
+          `Doar dacă dovada a dispărut cu adevărat (ex. jurnal restaurat la o ` +
+          `versiune mai veche). Refacerea intenției produce o înregistrare ` +
+          `nouă de audit — nu repară și nu rescrie istoricul. O restaurare ` +
+          `independentă a celor două baze poate lăsa divergențe care NU se ` +
+          `închid automat.\n\nContinui?`;
+    if (!window.confirm(prompt)) return;
+    let reason: string | undefined;
+    if (i.status === "delivered") {
+      const r = window.prompt("Motivul recuperării (opțional, auditat):");
+      if (r === null) return;
+      reason = r || undefined;
+    }
+    setBusyId(i.intent_id);
+    setNotice(null);
+    try {
+      const out = await requeueBoAuditIntent(i.intent_id, reason);
+      setNotice({
+        kind: out.requeued > 0 ? "ok" : "danger",
+        text:
+          out.requeued > 0
+            ? "Intenția a fost retrimisă spre drain — confirmarea apare după re-citirea jurnalului."
+            : "Intenția nu a fost reluată (starea s-a schimbat între timp).",
+      });
+      void load();
+    } catch (err) {
+      setNotice({
+        kind: "danger",
+        text:
+          err instanceof BoApiError
+            ? err.status === 409
+              ? `409 — ${typeof err.detail === "string" ? err.detail : "recuperarea a fost refuzată (dovadă vie sau stare schimbată)"}`
+              : `${err.status} — ${typeof err.detail === "string" ? err.detail : err.code}`
+            : "Recuperarea a eșuat.",
+      });
+      void load();
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  function exportEvidence() {
+    if (state.kind !== "data") return;
+    // Exportăm din snapshot-ul afișat, nu din controalele live — un filtru
+    // proaspăt schimbat nu trebuie să eticheteze datele paginii vechi.
+    const { intents, total, status, offset: snapOffset } = state;
+    const lastPage = snapOffset + intents.length >= total;
+    const partial = snapOffset > 0 || !lastPage;
+    const payload = {
+      generated_at: new Date().toISOString(),
+      surface: "GET /bo/execution/audit-intents",
+      filter: { status: status || null },
+      page: {
+        limit: AUDIT_PAGE,
+        offset: snapOffset,
+        returned: intents.length,
+        total_matching: total,
+      },
+      // Honest bound: this file is one page, never claimed complete.
+      partial,
+      note: partial
+        ? `Export parțial: pagina curentă (offset ${snapOffset}) acoperă ${intents.length} din ${total} intenții.`
+        : `Export complet pentru filtrul curent: ${total} intenții.`,
+      intents,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `bo-audit-evidence-${payload.generated_at.replace(/[:.]/g, "-")}.json`;
+    a.click();
+    // Revocarea sincronă poate întrerupe descărcarea pe unele browsere.
+    setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  }
+
+  return (
+    <div className="bo-card" style={{ marginTop: 12 }}>
+      <div className="bo-spread">
+        <h3 className="bo-card-title">Dovezi de audit</h3>
+        <div className="bo-row">
+          <select
+            className="bo-select"
+            value={statusFilter}
+            onChange={(e) => changeFilter(e.target.value)}
+            aria-label="Filtrează după stare"
+          >
+            <option value="">toate</option>
+            <option value="pending">în așteptare</option>
+            <option value="delivered">livrate</option>
+            <option value="failed">parcate</option>
+          </select>
+          <button
+            type="button"
+            className="bo-btn bo-btn--icon"
+            onClick={() => void load()}
+            aria-label="Reîmprospătează"
+          >
+            <IconBO name="refresh" size={14} />
+          </button>
+          {state.kind === "data" && state.intents.length > 0 ? (
+            <button
+              type="button"
+              className="bo-btn"
+              onClick={exportEvidence}
+            >
+              Exportă pagina
+            </button>
+          ) : null}
+        </div>
+      </div>
+      <p className="bo-hint" style={{ marginTop: 4 }}>
+        Fiecare mutație auditabilă persistă o intență durabilă; drain-ul o
+        emite către jurnal și o confirmă prin re-citire. Dovada =
+        marcajul de deduplicare + rândul din jurnal. Un marcaj fără rând
+        viu (jurnal restaurat/reparat) este orfan — semnalat, niciodată
+        prezentat ca dovadă.
+      </p>
+      {state.kind === "loading" ? (
+        <p className="bo-hint" style={{ marginTop: 8 }}>Se încarcă…</p>
+      ) : null}
+      {state.kind === "forbidden" ? (
+        <div style={{ marginTop: 8 }}>
+          <InlineAlert kind="danger">
+            Acces interzis — contul curent nu are drept de citire pe
+            dovezile de audit.
+          </InlineAlert>
+        </div>
+      ) : null}
+      {state.kind === "error" ? (
+        <div style={{ marginTop: 8 }}>
+          <InlineAlert kind="danger">
+            {state.message}
+            {" "}
+            <button
+              type="button"
+              className="bo-btn bo-btn--icon"
+              onClick={() => void load()}
+              aria-label="Reîncearcă"
+            >
+              <IconBO name="refresh" size={13} />
+            </button>
+          </InlineAlert>
+        </div>
+      ) : null}
+      {state.kind === "data" ? (
+        <>
+          {!state.journalReachable ? (
+            <div style={{ marginTop: 8 }}>
+              <InlineAlert kind="warn">
+                Jurnalul de audit e indisponibil — corelația cu rândurile
+                lipsește; stările durabile rămân reale.
+              </InlineAlert>
+            </div>
+          ) : null}
+          {state.intents.length === 0 ? (
+            <p className="bo-hint" style={{ marginTop: 8 }}>
+              Nicio intență de audit pentru filtrul curent.
+            </p>
+          ) : (
+            state.intents.map((i) => {
+              const l =
+                AUDIT_INTENT_LABEL[i.status] ?? {
+                  label: i.status,
+                  kind: "neutral" as const,
+                };
+              const staleLease =
+                i.drain_until !== null &&
+                new Date(i.drain_until).getTime() < Date.now();
+              return (
+                <div
+                  key={i.intent_id}
+                  className="bo-row"
+                  style={{ marginTop: 8, flexWrap: "wrap" }}
+                >
+                  <Pill kind={l.kind}>{l.label}</Pill>
+                  {i.status === "delivered" && i.journal_row_present === true ? (
+                    <Pill kind="ok">dovadă #{i.audit_row_id}</Pill>
+                  ) : null}
+                  {i.journal_row_present === false && i.audit_row_id !== null ? (
+                    <Pill kind="danger">marcaj orfan</Pill>
+                  ) : null}
+                  {i.status === "delivered" &&
+                  i.audit_row_id === null &&
+                  state.journalReachable ? (
+                    <Pill kind="warn">dovadă absentă</Pill>
+                  ) : null}
+                  {i.status === "delivered" &&
+                  i.audit_row_id === null &&
+                  !state.journalReachable ? (
+                    <Pill kind="neutral">dovadă neverificabilă</Pill>
+                  ) : null}
+                  {i.content_verifiable === false ? (
+                    <Pill kind="neutral">conținut neverificabil</Pill>
+                  ) : null}
+                  {i.drain_owner ? (
+                    <Pill kind={staleLease ? "warn" : "info"}>
+                      {staleLease ? "lease expirat" : "lease activ"} ·{" "}
+                      {i.drain_owner.slice(-10)}
+                    </Pill>
+                  ) : null}
+                  <span className="bo-hint">
+                    {i.intent_id.slice(0, 12)}… · {i.event} ·{" "}
+                    {i.actor.slice(0, 40)} · {i.attempts} tentative
+                    {i.last_error ? ` · ${i.last_error.slice(0, 60)}` : ""}
+                  </span>
+                  {recoverable(i) ? (
+                    <button
+                      type="button"
+                      className="bo-btn"
+                      disabled={busyId !== null}
+                      onClick={() => void recover(i)}
+                    >
+                      {busyId === i.intent_id ? "Se reia…" : "Recuperează dovada"}
+                    </button>
+                  ) : null}
+                </div>
+              );
+            })
+          )}
+          {state.total > AUDIT_PAGE || state.offset > 0 ? (
+            <div className="bo-row" style={{ marginTop: 8 }}>
+              <button
+                type="button"
+                className="bo-btn"
+                disabled={state.offset === 0}
+                onClick={() =>
+                  setOffset(Math.max(0, state.offset - AUDIT_PAGE))
+                }
+              >
+                ‹ Anterioare
+              </button>
+              <span className="bo-hint">
+                {state.offset + 1}–
+                {Math.min(state.offset + AUDIT_PAGE, state.total)} din{" "}
+                {state.total}
+              </span>
+              <button
+                type="button"
+                className="bo-btn"
+                disabled={state.offset + AUDIT_PAGE >= state.total}
+                onClick={() => setOffset(state.offset + AUDIT_PAGE)}
+              >
+                Următoare ›
+              </button>
+            </div>
+          ) : null}
+        </>
+      ) : null}
+      {notice ? (
+        <div style={{ marginTop: 8 }}>
+          <InlineAlert kind={notice.kind === "ok" ? "info" : notice.kind}>
+            {notice.text}
+          </InlineAlert>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function RunDetail({
   detail,
   canOperate,
@@ -1036,6 +1401,7 @@ export default function BoExecutionsPage() {
   const [filter, setFilter] = useState<string>("");
   const [workNotice, setWorkNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [auditTick, setAuditTick] = useState(0);
 
   const load = useCallback(async () => {
     try {
@@ -1177,7 +1543,15 @@ export default function BoExecutionsPage() {
 
       <MandatesSection mandates={mandates} onChanged={() => void load()} />
       <SubmitRunForm mandates={mandates} onChanged={() => void load()} />
-      <OutboxSection entries={outbox} stats={outboxStats} onChanged={() => void load()} />
+      <OutboxSection
+        entries={outbox}
+        stats={outboxStats}
+        onChanged={() => {
+          setAuditTick((t) => t + 1);
+          void load();
+        }}
+      />
+      <AuditIntentsSection refreshKey={auditTick} />
 
       {/* Filtru stare */}
       <div className="bo-row" style={{ marginTop: 16 }}>

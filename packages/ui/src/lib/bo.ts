@@ -870,6 +870,65 @@ export function requeueBoAuditIntents(): Promise<{ requeued: number }> {
   return req("/execution/outbox/audit-requeue", { method: "POST" });
 }
 
+// ---------------------------------------------------------------------------
+// Audit intents — dovadă operator (PILOT-10/11)
+// ---------------------------------------------------------------------------
+
+export interface BoAuditIntent {
+  intent_id: string;
+  event: string;
+  actor: string;
+  summary: string;
+  status: "pending" | "delivered" | "failed" | string;
+  created_at: string;
+  delivered_at: string | null;
+  attempts: number;
+  last_error: string | null;
+  drain_owner: string | null;
+  drain_until: string | null;
+  /** Id-ul rândului audit_log referit de marcajul dedup — null = jurnalul
+   *  nu are marcaj (dovada lipsește sau jurnalul e indisponibil). */
+  audit_row_id: number | null;
+  /** Marcajul pointează la un rând real? false = marcaj orfan. */
+  journal_row_present: boolean | null;
+  /** Marcajul poartă fingerprint de conținut? false = marcaj legacy
+   *  (pre-PILOT-10) — conținutul nu e verificabil; nu e conflict dovedit. */
+  content_verifiable: boolean | null;
+}
+
+export function listBoAuditIntents(opts?: {
+  status?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<{
+  intents: BoAuditIntent[];
+  total: number;
+  journal_reachable: boolean;
+}> {
+  const q = new URLSearchParams();
+  if (opts?.status) q.set("status", opts.status);
+  if (opts?.limit) q.set("limit", String(opts.limit));
+  if (opts?.offset) q.set("offset", String(opts.offset));
+  const suffix = q.toString() ? `?${q}` : "";
+  return req(`/execution/audit-intents${suffix}`);
+}
+
+/** Recuperare explicită, individuală: demotează o intență `delivered` a
+ *  cărei dovadă a dispărut din jurnal (restaurare/reparare) — serverul
+ *  refuză 409 câtă vreme dovada e vie. Admin-only, auditat. */
+export function requeueBoAuditIntent(
+  intentId: string,
+  reason?: string,
+): Promise<{ requeued: number }> {
+  return req("/execution/outbox/audit-requeue", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(
+      reason ? { intent_id: intentId, reason } : { intent_id: intentId },
+    ),
+  });
+}
+
 export function getBoExecStatus(): Promise<BoExecStatus> {
   return req("/execution/status");
 }

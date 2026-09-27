@@ -1690,8 +1690,8 @@ class TestRebindAuditDurability:
             timespec="milliseconds").replace("+00:00", "Z")
         # Another drainer holds a live claim.
         with bo_db.get_conn(db) as conn:
-            assert store._claim_audit_intent(conn, iid, "other", now)
-            assert not store._claim_audit_intent(conn, iid, "me", now)
+            assert store._claim_audit_intent(conn, iid, "other", now, 60)
+            assert not store._claim_audit_intent(conn, iid, "me", now, 60)
         res = store.drain_audit_intents(db_path=db, owner="me")
         assert res["delivered"] == 0 and res["skipped"] == 1
         with audit_logger._get_conn(journal._db_path) as conn:
@@ -1731,7 +1731,8 @@ class TestRebindAuditDurability:
         assert [i["status"] for i in intents] == ["failed"]
         # Auto-drain must NOT loop on a parked intent.
         res = store.drain_audit_intents(db_path=db)
-        assert res == {"delivered": 0, "failed": 0, "skipped": 0}
+        assert res == {"delivered": 0, "failed": 0, "skipped": 0,
+                       "preempted": 0}
         # Journal restored; explicit requeue → delivered, audited.
         monkeypatch.undo()
         journal = self._journal(tmp_path, monkeypatch)
@@ -1764,3 +1765,122 @@ class TestRebindAuditDurability:
         # rebind's own drain already burned the single attempt.
         assert [i["status"] for i in
                 store.pending_audit_intents(db_path=db)] == ["failed"]
+
+    def test_journal_dedup_marker_is_atomic(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Journal-level exactly-once: ``log(dedup_key=k)`` commits the
+        marker in the same transaction as the row — a second emit rolls
+        back and returns the original row id, never a duplicate."""
+        from openexecutive.audit import logger as audit_logger
+
+        journal = self._journal(tmp_path, monkeypatch)
+        first = journal.log(
+            "bo_outbox_rebind", "s1", actor="a",
+            details={"intent_id": "iid-x"}, dedup_key="iid-x")
+        second = journal.log(
+            "bo_outbox_rebind", "s2", actor="b",
+            details={"intent_id": "iid-x"}, dedup_key="iid-x")
+        assert first is not None and second == first
+        with audit_logger._get_conn(journal._db_path) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM audit_log").fetchone()[0] == 1
+            assert conn.execute(
+                "SELECT COUNT(*) FROM audit_dedup").fetchone()[0] == 1
+
+    def test_fenced_update_stale_owner(
+        self, db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The final UPDATEs are conditioned on (owner, generation): an
+        owner whose claim expired and was re-taken cannot overwrite the
+        new owner's in-flight state."""
+        from openexecutive.audit import logger as audit_logger
+
+        self._journal(tmp_path, monkeypatch)
+        self._legacy_row(db)
+        monkeypatch.setattr(
+            audit_logger.AuditLogger, "log", lambda *a, **kw: None)
+        store.rebind_outbox(
+            TENANT, actor="admin@t", reason="fence", db_path=db)
+        monkeypatch.undo()
+        self._journal(tmp_path, monkeypatch)
+        iid = store.pending_audit_intents(db_path=db)[0]["intent_id"]
+        now = datetime.now(UTC).isoformat(
+            timespec="milliseconds").replace("+00:00", "Z")
+        with bo_db.get_conn(db) as conn:
+            gen_a = store._claim_audit_intent(conn, iid, "A", now, 60)
+            assert gen_a
+        # Lease A expires; B re-claims with a new generation.
+        with bo_db.get_conn(db) as conn:
+            conn.execute(
+                "UPDATE bo_audit_intents SET drain_until='2020-01-01T00:00:00Z'")
+        with bo_db.get_conn(db) as conn:
+            gen_b = store._claim_audit_intent(conn, iid, "B", now, 60)
+            assert gen_b and gen_b != gen_a
+            # Stale A tries to mark delivered — fenced UPDATE must no-op.
+            cur = conn.execute(
+                "UPDATE bo_audit_intents SET status='delivered', "
+                "drain_owner=NULL, drain_until=NULL "
+                "WHERE intent_id=? AND drain_owner=? AND drain_until=?",
+                (iid, "A", gen_a))
+            assert cur.rowcount == 0
+            row = conn.execute(
+                "SELECT status, drain_owner FROM bo_audit_intents "
+                "WHERE intent_id=?", (iid,)).fetchone()
+            assert row["status"] == "pending" and row["drain_owner"] == "B"
+
+    def test_lease_seconds_administered(
+        self, db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``bo.router.audit_drain_lease_s`` is live-read: a claim writes
+        drain_until ≈ now + administered lease, not the 60s fallback."""
+        from openexecutive.audit import logger as audit_logger
+        from openexecutive.bo.settings import store as settings_store
+
+        self._journal(tmp_path, monkeypatch)
+        settings_store.set_value(
+            TENANT, "bo.router.audit_drain_lease_s", 5,
+            expected_version=0, actor="admin@t", db_path=db)
+        self._legacy_row(db)
+        monkeypatch.setattr(
+            audit_logger.AuditLogger, "log", lambda *a, **kw: None)
+        store.rebind_outbox(
+            TENANT, actor="admin@t", reason="lease", db_path=db)
+        monkeypatch.undo()
+        iid = store.pending_audit_intents(db_path=db)[0]["intent_id"]
+        before = datetime.now(UTC)
+        now = before.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        with bo_db.get_conn(db) as conn:
+            gen = store._claim_audit_intent(conn, iid, "me", now, 5)
+            assert gen is not None
+            until = datetime.fromisoformat(gen.replace("Z", "+00:00"))
+            assert (until - before).total_seconds() <= 6
+
+    def test_stale_claim_visible_in_status(
+        self, db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``audit_intents_status`` exposes live vs stale claims — the
+        trace of a crashed emitter is visible, not hidden."""
+        from openexecutive.audit import logger as audit_logger
+
+        self._journal(tmp_path, monkeypatch)
+        self._legacy_row(db)
+        monkeypatch.setattr(
+            audit_logger.AuditLogger, "log", lambda *a, **kw: None)
+        store.rebind_outbox(
+            TENANT, actor="admin@t", reason="status", db_path=db)
+        monkeypatch.undo()
+        iid = store.pending_audit_intents(db_path=db)[0]["intent_id"]
+        now = datetime.now(UTC).isoformat(
+            timespec="milliseconds").replace("+00:00", "Z")
+        with bo_db.get_conn(db) as conn:
+            assert store._claim_audit_intent(conn, iid, "me", now, 60)
+        st = store.audit_intents_status(TENANT, db_path=db)
+        assert st["claimed"] == 1 and st["stale_claim"] == 0
+        with bo_db.get_conn(db) as conn:
+            conn.execute(
+                "UPDATE bo_audit_intents SET drain_until='2020-01-01T00:00:00Z'")
+        st = store.audit_intents_status(TENANT, db_path=db)
+        assert st["stale_claim"] == 1 and st["claimed"] == 0
+        stats = store.outbox_stats(TENANT, db_path=db)
+        assert stats["audit_stale_claim"] == 1

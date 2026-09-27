@@ -207,8 +207,10 @@ intență în `bo_audit_intents`, comisă în ACEEAȘI tranzacție cu mutația �
 un crash între commitul rutei și scrierea în jurnal nu mai poate pierde
 auditul. `drain_audit_intents` (apelat după rebind și la fiecare ciclu al
 workerului) reia intențile către jurnalul central cu deduplicare pe
-`intent_id`; emisia e confirmată prin re-citirea jurnalului, deci un emit
-urmat de crash la marcaj nu dublează rândul. Statul real e raportat
+`intent_id`; emisia e confirmată prin re-citirea jurnalului, iar unicitatea
+finală vine din constrângerea `audit_dedup` (vezi PILOT-09), deci un emit
+urmat de crash la marcaj — sau un emitent stale după expirarea lease-ului —
+nu dublează rândul. Statul real e raportat
 (`audit=delivered|pending|failed`) și expus în `outbox_stats`
 (`audit_pending`/`audit_failed`) + UI — fără afirmație falsă de „auditat".
 
@@ -231,6 +233,38 @@ plic o singură dată pe fir.
 vizibile ca legacy, refuzate închis până la rebind auditat; istoricul
 delivered/dead-letter nu se atinge; lease-urile active moștenite sunt
 respectate. Restartul workerului (proces nou pe aceeași DB) reia totul.
+
+## Exactly-once real, claim stale și parametri operabili (PILOT-09)
+
+**Două niveluri de garanție.** Lease-ul de drain (`drain_owner`/
+`drain_until` pe `bo_audit_intents`) face ca exact un proces să emită ÎN
+INTERIORUL unei ferestre de claim viu — dar NU este o garanție absolută:
+un emitent suspendat peste expirarea lease-ului poate pierde claim-ul către
+un al doilea proces. Unicitatea reală vine din `audit_dedup` (tabel în
+jurnalul `episodic_memory.db`): `log(dedup_key=intent_id)` comite marcajul
+ÎN ACEEAȘI tranzacție cu rândul `audit_log` — al doilea emitent dă rollback
+și primește id-ul rândului original, niciodată o a doua copie. UPDATE-urile
+finale (delivered / attempts / eliberare claim) sunt condiționate de
+`(drain_owner, drain_until)` — generația claim-ului — deci un owner stale
+care se trezește nu poate suprascrie starea noului owner (`preempted` în
+rezultatul drain-ului). O eroare de citire a jurnalului NU e dovadă de
+lipsă: emiterea se încearcă oricum și dedup-ul decide unicitatea.
+
+**Claim stale vizibil.** `audit_intents_status` / `outbox_stats` expun
+`audit_claimed` (intenții pending sub lease viu) și `audit_stale_claim`
+(lease expirat fără rezultat = urma unui emitent căzut); UI arată pill-ul
+„audit — emitent căzut". Statul rămâne honest: `pending`, `failed` (parcate
+după `bo.router.audit_drain_attempts`, relansabile doar prin requeue
+auditat), `delivered`.
+
+**Parametri operabili (toți IMMEDIATE — citiți live la fiecare drain).**
+`bo.router.audit_drain_attempts` (1–10, default 3): bugetul de tentative de
+emitere înainte de parcarea `failed`. `bo.router.audit_drain_lease_s`
+(5–3600, default 60): cât deține un drain o intență — nu e o garanție de
+unicitate, doar cât de repede poate fi revendicată după un crash. Backoff-ul
+nu are knob separat: frecvența reîncercărilor = ciclul workerului deja
+administrat, iar bugetul de tentative e limita — un jurnal mort nu produce
+buclă nelimitată.
 
 **Rutare uniformă.** `pilot/delivery` consumă aceeași configurație efectivă
 ca adaptorul general (`adapter.resolve`) — endpointul și referința administrate

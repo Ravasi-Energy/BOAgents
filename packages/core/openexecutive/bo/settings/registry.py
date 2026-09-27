@@ -631,6 +631,26 @@ REGISTRY: dict[str, SettingSpec] = {
             v, minimum=1, maximum=10, label="Pragul tentative audit"
         ),
     ),
+    "bo.router.audit_drain_lease_s": SettingSpec(
+        key="bo.router.audit_drain_lease_s",
+        type="integer",
+        default=60,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="routing",
+        label_ro="Lease claim audit (s)",
+        label_en="Audit drain claim lease (s)",
+        help_ro="Cât deține un drain o intență de audit înainte ca un alt proces să o poată revendica. Un claim expirat NU blochează reconcilierea — garanția de unicitate vine din dedup-ul jurnalului, nu din lease.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Următorul ciclu de drain folosește noul lease; claim-urile expirate devin revendicabile.",
+        acceptance_ro="Un emitent blocat/căzut nu blochează intenția mai mult decât lease-ul configurat.",
+        validate=lambda v: _validate_int(
+            v, minimum=5, maximum=3600, label="Lease-ul drain audit"
+        ),
+    ),
     "bo.router.delivery_max_attempts": SettingSpec(
         key="bo.router.delivery_max_attempts",
         type="integer",

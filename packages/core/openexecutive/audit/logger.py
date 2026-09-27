@@ -181,6 +181,12 @@ _USAGE_SUM_COLS = """
 """
 
 
+class _DedupSeen(Exception):
+    """Internal: a dedup_key insert raced a committed marker — the enclosing
+    transaction (audit row + marker attempt) rolls back and the caller is
+    answered with the original row id."""
+
+
 class AuditLogger:
     """Synchronous SQLite writer/reader for audit events.
 
@@ -209,6 +215,11 @@ class AuditLogger:
                 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts DESC);
                 CREATE INDEX IF NOT EXISTS idx_audit_session ON audit_log(session_id);
                 CREATE INDEX IF NOT EXISTS idx_audit_type ON audit_log(event_type);
+                CREATE TABLE IF NOT EXISTS audit_dedup (
+                    dedup_key    TEXT PRIMARY KEY,
+                    audit_row_id INTEGER NOT NULL,
+                    created_at   TEXT NOT NULL
+                );
             """)
             # Additive migrations. PRAGMA-guarded so a second boot is a no-op
             # (no migration tooling in this repo). Concurrent workers can race
@@ -252,8 +263,15 @@ class AuditLogger:
         details: dict[str, Any] | None = None,
         full: dict[str, Any] | None = None,
         department: str | None = None,
+        dedup_key: str | None = None,
     ) -> int | None:
         """Insert one audit row. Returns row id, or None on failure.
+
+        ``dedup_key`` makes the insert idempotent at the journal level: the
+        marker lands in ``audit_dedup`` in the SAME transaction as the
+        ``audit_log`` row, so two racing emitters can never both commit a row
+        for the same key — the loser rolls back and this returns the original
+        row id. This is the guarantee check-then-write cannot give.
 
         `full` is an un-truncated drill-down payload (entire user messages,
         full tool inputs/results, full specialist queries). It is never
@@ -297,27 +315,47 @@ class AuditLogger:
                         "preview": full_json[: _FULL_MAX_LEN - 200],
                     })
             ts_value = _now()
-            with _get_conn(self._db_path) as conn:
-                cur = conn.execute(
-                    """
-                    INSERT INTO audit_log
-                        (ts, event_type, session_id, turn_id, actor, summary, details_json, full_json, department)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        ts_value,
-                        event_type,
-                        session_id,
-                        turn_id,
-                        actor,
-                        safe_summary,
-                        details_json,
-                        full_json,
-                        department,
-                    ),
-                )
-                row_id = int(cur.lastrowid or 0)
-            return row_id
+            try:
+                with _get_conn(self._db_path) as conn:
+                    cur = conn.execute(
+                        """
+                        INSERT INTO audit_log
+                            (ts, event_type, session_id, turn_id, actor, summary, details_json, full_json, department)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            ts_value,
+                            event_type,
+                            session_id,
+                            turn_id,
+                            actor,
+                            safe_summary,
+                            details_json,
+                            full_json,
+                            department,
+                        ),
+                    )
+                    row_id = int(cur.lastrowid or 0)
+                    if dedup_key is not None:
+                        try:
+                            conn.execute(
+                                "INSERT INTO audit_dedup "
+                                "(dedup_key, audit_row_id, created_at) "
+                                "VALUES (?, ?, ?)",
+                                (dedup_key, row_id, ts_value),
+                            )
+                        except sqlite3.IntegrityError:
+                            # Another emitter committed this key first —
+                            # the row above must roll back with it.
+                            raise _DedupSeen(dedup_key) from None
+                return row_id
+            except _DedupSeen:
+                with _get_conn(self._db_path) as conn:
+                    row = conn.execute(
+                        "SELECT audit_row_id FROM audit_dedup "
+                        "WHERE dedup_key = ?", (dedup_key,),
+                    ).fetchone()
+                return int(row["audit_row_id"]) if row else -1
         except Exception:
             logger.warning("audit.log_failed event_type=%s", event_type, exc_info=True)
             return None
@@ -534,6 +572,7 @@ def log_event(
     details: dict[str, Any] | None = None,
     full: dict[str, Any] | None = None,
     department: str | None = None,
+    dedup_key: str | None = None,
 ) -> None:
     """Fire-and-forget convenience wrapper around the default logger.
 
@@ -561,6 +600,7 @@ def log_event(
             details=details,
             full=full,
             department=department,
+            dedup_key=dedup_key,
         )
     except Exception:
         logger.warning("audit.log_event_failed event_type=%s", event_type, exc_info=True)

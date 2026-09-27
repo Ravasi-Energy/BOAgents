@@ -636,6 +636,7 @@ function OutboxSection({
   const pending = entries.filter((e) => e.delivered === 0).length;
   const auditPending = Number(stats.audit_pending ?? 0);
   const auditFailed = Number(stats.audit_failed ?? 0);
+  const auditStale = Number(stats.audit_stale_claim ?? 0);
   return (
     <div className="bo-card" style={{ marginTop: 12 }}>
       <div className="bo-spread">
@@ -648,6 +649,9 @@ function OutboxSection({
           ) : null}
           {auditPending > 0 ? (
             <Pill kind="warn">{auditPending} audit în așteptare</Pill>
+          ) : null}
+          {auditStale > 0 ? (
+            <Pill kind="warn">{auditStale} audit — emitent căzut</Pill>
           ) : null}
           {auditFailed > 0 ? (
             <button

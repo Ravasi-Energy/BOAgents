@@ -45,6 +45,7 @@ type LoadState =
       runs: BoExecRun[];
       mandates: BoMandate[];
       outbox: BoOutboxEntry[];
+      outboxStats: Record<string, number | string | null>;
       detail: BoRunDetail | null;
     };
 
@@ -520,9 +521,11 @@ const OUTBOX_LABEL: Record<number, { label: string; kind: "ok" | "warn" | "dange
 
 function OutboxSection({
   entries,
+  stats,
   onChanged,
 }: {
   entries: BoOutboxEntry[];
+  stats: Record<string, number | string | null>;
   onChanged: () => void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -573,11 +576,20 @@ function OutboxSection({
       const out = await rebindBoOutbox(
         reason.trim(), e ? [e.event_id] : undefined,
       );
+      // Stare reală — nicio afirmație de succes global când auditul e
+      // în așteptare/eșuat sau rânduri au rămas sub lease activ.
+      const auditTxt =
+        out.audit === "delivered" || out.audit === undefined
+          ? ""
+          : ` Audit: ${out.audit} — intența e persistată, reconcilierea o reia automat.`;
+      const degraded = out.skipped_leased
+        ? `${out.rebound} plic(uri) reasociate; ${out.skipped_leased} sărit(e) — lease activ.`
+        : out.rebound === 0
+          ? "Niciun plic reasociat — verifică starea rândurilor (livrat/lease)."
+          : `${out.rebound} plic(uri) reasociate destinației curente.`;
       setNotice({
-        kind: "ok",
-        text: out.skipped_leased
-          ? `${out.rebound} plic(uri) reasociate; ${out.skipped_leased} sărit(e) — lease activ.`
-          : `${out.rebound} plic(uri) reasociate destinației curente.`,
+        kind: out.audit && out.audit !== "delivered" ? "danger" : "ok",
+        text: degraded + auditTxt,
       });
       onChanged();
     } catch (err) {
@@ -594,6 +606,8 @@ function OutboxSection({
 
   const dead = entries.filter((e) => e.delivered === 2).length;
   const pending = entries.filter((e) => e.delivered === 0).length;
+  const auditPending = Number(stats.audit_pending ?? 0);
+  const auditFailed = Number(stats.audit_failed ?? 0);
   return (
     <div className="bo-card" style={{ marginTop: 12 }}>
       <div className="bo-spread">
@@ -601,6 +615,12 @@ function OutboxSection({
         <div className="bo-row">
           <Pill kind="warn">{pending} în așteptare</Pill>
           <Pill kind={dead ? "danger" : "neutral"}>{dead} dead-letter</Pill>
+          {auditFailed > 0 ? (
+            <Pill kind="danger">{auditFailed} audit eșuat</Pill>
+          ) : null}
+          {auditPending > 0 ? (
+            <Pill kind="warn">{auditPending} audit în așteptare</Pill>
+          ) : null}
           {pending + dead > 0 ? (
             <button
               type="button"
@@ -997,6 +1017,7 @@ export default function BoExecutionsPage() {
         runs: runsRes.runs,
         mandates: mandatesRes.mandates,
         outbox: outboxRes.entries,
+        outboxStats: outboxRes.stats,
         detail,
       });
     } catch (err) {
@@ -1069,7 +1090,7 @@ export default function BoExecutionsPage() {
     );
   }
 
-  const { status, runs, mandates, outbox, detail } = state;
+  const { status, runs, mandates, outbox, outboxStats, detail } = state;
   const canOperate = true; // server enforcește RBAC; controalele cer 403 explicit
 
   return (
@@ -1114,7 +1135,7 @@ export default function BoExecutionsPage() {
 
       <MandatesSection mandates={mandates} onChanged={() => void load()} />
       <SubmitRunForm mandates={mandates} onChanged={() => void load()} />
-      <OutboxSection entries={outbox} onChanged={() => void load()} />
+      <OutboxSection entries={outbox} stats={outboxStats} onChanged={() => void load()} />
 
       {/* Filtru stare */}
       <div className="bo-row" style={{ marginTop: 16 }}>

@@ -45,7 +45,15 @@ def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture(autouse=True)
-def audit(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+def audit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[dict]:
+    """capture_audit + point the real journal at tmp — drain_audit_intents
+    reads it back via has_detail and must never touch ./episodic_memory.db."""
+    from openexecutive.audit import logger as audit_logger
+
+    monkeypatch.setattr(
+        audit_logger, "_default_logger",
+        audit_logger.AuditLogger(tmp_path / "journal.db"),
+    )
     return capture_audit(monkeypatch)
 
 
@@ -1560,3 +1568,101 @@ def test_bobots_have_no_router_dependency() -> None:
                 assert "bo.routing" not in n and "providers" not in n, (
                     f"{src.name} imports {n} — BoBots stay LLM-free"
                 )
+
+
+# --------------------------------------------------------------------------- #
+# PILOT-07 — audit durabil pentru rebind: intența se persistă în aceeași
+# tranzacție cu mutația rutei; reconcilierea către jurnal e idempotentă.
+# --------------------------------------------------------------------------- #
+
+class TestRebindAuditDurability:
+    def _journal(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        """Real journal pointed at a tmp file — the honest sink. Also
+        restores the real ``log_event`` (the autouse ``audit`` fixture
+        replaces it with a capture sink)."""
+        import openexecutive.audit as audit_pkg
+        from openexecutive.audit import logger as audit_logger
+
+        instance = audit_logger.AuditLogger(tmp_path / "journal.db")
+        monkeypatch.setattr(audit_logger, "_default_logger", instance)
+        monkeypatch.setattr(audit_pkg, "log_event", audit_logger.log_event)
+        return instance
+
+    def _legacy_row(self, db: Path, event_id: str = "evt_aud") -> None:
+        store.enqueue_outbox(
+            TENANT, "models", "ref-a",
+            {"schemaVersion": "bo.model-observation.v1",
+             "eventId": event_id, "tenantRef": TENANT},
+            db_path=db)
+        with bo_db.get_conn(db) as conn:
+            conn.execute(
+                "UPDATE bo_telemetry_outbox SET dest_bound = NULL, "
+                "dest_endpoint = NULL, dest_ref = NULL "
+                "WHERE event_id = ?", (event_id,))
+
+    def test_rebind_intent_persists_when_journal_down(
+        self, db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Crash between route commit and journal write: the mutation AND
+        the audit intent commit atomically — nothing is lost silently."""
+        from openexecutive.audit import logger as audit_logger
+
+        self._journal(tmp_path, monkeypatch)
+        self._legacy_row(db)
+        # Journal write fails at drain time — mutation must still commit
+        # with a durable pending intent, honestly reported.
+        monkeypatch.setattr(
+            audit_logger.AuditLogger, "log", lambda *a, **kw: None)
+        out = store.rebind_outbox(
+            TENANT, actor="admin@t", reason="audit durability", db_path=db)
+        assert out["rebound"] == 1
+        assert out["audit"] in ("pending", "failed")
+        intents = store.pending_audit_intents(db_path=db)
+        assert len(intents) == 1
+        assert intents[0]["event"] == "bo_outbox_rebind"
+
+        # Journal recovers; reconciliation delivers exactly once.
+        monkeypatch.undo()
+        journal2 = self._journal(tmp_path, monkeypatch)
+        res = store.drain_audit_intents(db_path=db)
+        assert res["delivered"] == 1
+        assert store.pending_audit_intents(db_path=db) == []
+        with audit_logger._get_conn(journal2._db_path) as conn:
+            rows = conn.execute(
+                "SELECT details_json FROM audit_log "
+                "WHERE event_type = 'bo_outbox_rebind'").fetchall()
+        assert len(rows) == 1
+        assert "intent_id" in (rows[0]["details_json"] or "")
+        # Replay — no duplicate rows in the journal.
+        store.drain_audit_intents(db_path=db)
+        with audit_logger._get_conn(journal2._db_path) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM audit_log "
+                "WHERE event_type = 'bo_outbox_rebind'").fetchone()[0] == 1
+
+    def test_reconcile_dedup_when_mark_failed(
+        self, db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Emit succeeded but the mark-delivered crashed: the intent stays
+        pending, and reconcile must NOT emit a second journal row."""
+        from openexecutive.audit import logger as audit_logger
+
+        journal = self._journal(tmp_path, monkeypatch)
+        self._legacy_row(db)
+        out = store.rebind_outbox(
+            TENANT, actor="admin@t", reason="reconcile", db_path=db)
+        assert out["audit"] == "delivered"
+        intent = store.pending_audit_intents(db_path=db)
+        assert intent == []  # delivered
+        # Simulate the crash window: journal has the row, intent reverts to
+        # pending (mark never committed).
+        with bo_db.get_conn(db) as conn:
+            conn.execute(
+                "UPDATE bo_audit_intents SET status = 'pending', "
+                "delivered_at = NULL")
+        res = store.drain_audit_intents(db_path=db)
+        assert res["delivered"] == 1
+        with audit_logger._get_conn(journal._db_path) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM audit_log "
+                "WHERE event_type = 'bo_outbox_rebind'").fetchone()[0] == 1

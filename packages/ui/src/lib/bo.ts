@@ -850,11 +850,13 @@ export function retryBoOutbox(
 
 /** Reasociere explicită, auditată: plicurile nelivrate (inclusiv rândurile
  *  legacy fără legătură) primesc destinația curent efectivă pe kind-ul lor.
- *  Octeții și identitățile nu se rescriu. Doar admin. */
+ *  Octeții și identitățile nu se rescriu. Doar admin.
+ *  `audit` = starea reală a livrării evenimentului de audit către jurnal
+ *  (delivered/pending/failed) — intența e persistată atomic cu mutația. */
 export function rebindBoOutbox(
   reason: string,
   eventIds?: string[],
-): Promise<{ rebound: number; skipped_leased?: number }> {
+): Promise<{ rebound: number; skipped_leased?: number; audit?: string }> {
   return req("/execution/outbox/rebind", {
     method: "POST",
     headers: { "content-type": "application/json" },

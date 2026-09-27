@@ -228,6 +228,19 @@ class AuditLogger:
                     if "duplicate column" not in str(exc).lower():
                         raise
 
+    def has_detail(self, key: str, value: str) -> bool:
+        """True when a journal row already carries ``details_json[key]`` —
+        consumer-side dedup for durable-intent reconciliation (a rebind
+        intent that was emitted but whose mark-delivered crashed must not
+        produce a second journal row)."""
+        with _get_conn(self._db_path) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM audit_log WHERE "
+                "json_extract(details_json, ?) = ? LIMIT 1",
+                (f"$.{key}", value),
+            ).fetchone()
+        return row is not None
+
     def log(
         self,
         event_type: str,

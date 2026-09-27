@@ -11,6 +11,7 @@ from openexecutive.bo.settings.registry import SettingValidationError
 from openexecutive.bo.telemetry import schema
 from openexecutive.bo.telemetry.adapter import (
     BufferedTransport,
+    CredentialUnavailableError,
     HttpTransport,
     NullTransport,
     TelemetryAdapter,
@@ -507,6 +508,51 @@ class TestSecretRefTenantScope:
         assert cfg.transport is None
         cfg_a = adapter.resolve("tenant-a")
         assert cfg_a.credential_state != "unprovisioned"  # scope is t-a's
+
+    def test_bound_row_ref_rescoped_away_refuses_zero_wire(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The binding persisted on an outbox row is re-checked against the
+        CURRENT tenant scope at delivery: re-scoping ``TEL_B`` to tenant-a
+        revokes it for tenant-b even though the env var still exists —
+        controlled refusal, zero bytes, no credential substitution."""
+        use_tmp_db(tmp_path, monkeypatch)
+        monkeypatch.setenv("BO_TELEMETRY_SECRET_REFS", "TEL_B")
+        monkeypatch.setenv("TEL_B", "synthetic-b")
+        monkeypatch.setenv("BO_TELEMETRY_TOKEN", "synthetic-bootstrap")
+        calls = _capture_http(monkeypatch)
+        adapter = TelemetryAdapter(enabled=True, transport=NullTransport())
+        bound = ("https://dest-b.invalid/v1/telemetry", "TEL_B")
+        monkeypatch.setenv("BO_TELEMETRY_SECRET_REFS", "TEL_B@tenant-a")
+        with pytest.raises(CredentialUnavailableError):
+            adapter.deliver_event(
+                {"eventId": "evt_b", "tenantRef": "tenant-b"},
+                tenant="tenant-b", destination=bound)
+        assert calls == []
+        adapter.deliver_event(
+            {"eventId": "evt_a", "tenantRef": "tenant-a"},
+            tenant="tenant-a", destination=bound)
+        assert len(calls) == 1
+        assert calls[0].get_header("Authorization") == "Bearer synthetic-b"
+
+    def test_bound_row_uses_rotated_env_value(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Binding pins the ref NAME, not the value: while the ref stays
+        provisioned for the tenant, the current env value is read — a
+        rotated credential reaches the wire on the bound destination."""
+        use_tmp_db(tmp_path, monkeypatch)
+        monkeypatch.setenv("BO_TELEMETRY_SECRET_REFS", "TEL_B@tenant-b")
+        monkeypatch.setenv("TEL_B", "synthetic-old")
+        calls = _capture_http(monkeypatch)
+        adapter = TelemetryAdapter(enabled=True, transport=NullTransport())
+        bound = ("https://dest-b.invalid/v1/telemetry", "TEL_B")
+        monkeypatch.setenv("TEL_B", "synthetic-new")
+        adapter.deliver_event(
+            {"eventId": "evt_rot", "tenantRef": "tenant-b"},
+            tenant="tenant-b", destination=bound)
+        assert len(calls) == 1
+        assert calls[0].get_header("Authorization") == "Bearer synthetic-new"
 
     def test_scoped_guardian_ref_rejected_for_other_tenant(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -154,6 +154,25 @@ def initialize_db(db_path: Path | None = None) -> None:
             attempts_before INTEGER NOT NULL, last_error TEXT, reason TEXT NOT NULL,
             actor TEXT NOT NULL, created_at TEXT NOT NULL,
             PRIMARY KEY (tenant, event_id, series))""")
+        # PILOT-07: durable audit intents. The audit event for a mutation
+        # (e.g. rebind) is persisted in the SAME transaction as the route
+        # change — a crash between the commit and the journal write can no
+        # longer lose the audit. Reconciliation replays pending intents to
+        # the central journal with intent_id dedup; ``status`` exposes the
+        # real state (pending/failed) instead of claiming audited.
+        conn.execute("""CREATE TABLE IF NOT EXISTS bo_audit_intents (
+            intent_id    TEXT PRIMARY KEY,
+            tenant       TEXT NOT NULL,
+            event        TEXT NOT NULL,
+            actor        TEXT NOT NULL,
+            summary      TEXT NOT NULL,
+            details_json TEXT NOT NULL,
+            status       TEXT NOT NULL DEFAULT 'pending',
+            created_at   TEXT NOT NULL,
+            delivered_at TEXT,
+            attempts     INTEGER NOT NULL DEFAULT 0,
+            last_error   TEXT
+        )""")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS bo_outbox_pending "
             "ON bo_telemetry_outbox (tenant, delivered, lease_until)"
@@ -821,22 +840,153 @@ def rebind_outbox(
             )
             destinations.setdefault(row["kind"], set()).add(
                 f"{endpoint or 'sink'}|{ref or 'n/a'}")
-    from openexecutive.bo.execution.store import _audit as audit
-
-    audit(
-        tenant,
-        "bo_outbox_rebind",
-        {
-            "rebound": len(rows),
-            "skipped_leased": skipped,
-            "reason": reason[:300],
-            # SecretRef names + endpoints only — never credential material.
-            "destinations": {k: sorted(v) for k, v in destinations.items()},
-            "event_ids": list(event_ids) if event_ids is not None else None,
-        },
-        actor=actor,
+        # The audit event is an INTENT row in this same transaction — the
+        # mutation and its audit commit or roll back together. Delivery to
+        # the central journal happens after commit via drain_audit_intents;
+        # a crash in between leaves a pending intent, not a silent loss.
+        intent_id = _insert_audit_intent(
+            conn, tenant, "bo_outbox_rebind", actor,
+            f"bo_outbox_rebind: {len(rows)} rebound",
+            {
+                "rebound": len(rows),
+                "skipped_leased": skipped,
+                "reason": reason[:300],
+                # SecretRef names + endpoints — never credential material.
+                "destinations":
+                    {k: sorted(v) for k, v in destinations.items()},
+                "event_ids":
+                    list(event_ids) if event_ids is not None else None,
+            },
+        )
+    drain_audit_intents(db_path=db_path)
+    intent_state = next(
+        (
+            i["status"]
+            for i in pending_audit_intents(db_path=db_path)
+            if i["intent_id"] == intent_id
+        ),
+        "delivered",
     )
-    return {"rebound": len(rows), "skipped_leased": skipped}
+    return {
+        "rebound": len(rows),
+        "skipped_leased": skipped,
+        "audit": intent_state,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Durable audit intents (PILOT-07) — journal reconcile
+# --------------------------------------------------------------------------- #
+
+
+def _insert_audit_intent(
+    conn: sqlite3.Connection,
+    tenant: str,
+    event: str,
+    actor: str,
+    summary: str,
+    details: dict[str, Any],
+) -> str:
+    """Persist one audit intent inside the caller's open transaction —
+    the mutation and its audit commit atomically on this connection."""
+    intent_id = str(uuid.uuid4())
+    conn.execute(
+        "INSERT INTO bo_audit_intents (intent_id, tenant, event, actor, "
+        "summary, details_json, status, created_at) "
+        "VALUES (?,?,?,?,?,?,'pending',?)",
+        (intent_id, tenant, event, actor, summary[:300],
+         json.dumps(details, default=str), _now()),
+    )
+    return intent_id
+
+
+def pending_audit_intents(
+    db_path: Path | None = None, *, tenant: str | None = None
+) -> list[dict[str, Any]]:
+    """Intents not yet confirmed in the central journal."""
+    where = "status <> 'delivered'"
+    params: list[Any] = []
+    if tenant is not None:
+        where += " AND tenant = ?"
+        params.append(tenant)
+    with get_conn(db_path) as conn:
+        rows = conn.execute(
+            "SELECT intent_id, tenant, event, actor, summary, "
+            "details_json, status, created_at, attempts, last_error "
+            f"FROM bo_audit_intents WHERE {where} ORDER BY created_at",
+            params,
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def audit_intents_status(
+    tenant: str, db_path: Path | None = None
+) -> dict[str, int]:
+    """{pending, failed} — the real audit-drain state for API/UI."""
+    with get_conn(db_path) as conn:
+        rows = conn.execute(
+            "SELECT status, COUNT(*) AS n FROM bo_audit_intents "
+            "WHERE tenant = ? AND status <> 'delivered' GROUP BY status",
+            (tenant,),
+        ).fetchall()
+    out = {"pending": 0, "failed": 0}
+    for r in rows:
+        out[str(r["status"])] = int(r["n"])
+    return out
+
+
+def drain_audit_intents(
+    db_path: Path | None = None, *, tenant: str | None = None
+) -> dict[str, Any]:
+    """Replay persisted audit intents into the central journal.
+
+    Idempotent: the journal is queried for ``intent_id`` before emitting,
+    so a crash between journal-write and mark-delivered never double-logs.
+    ``AuditLogger.log`` returns the row id or ``None`` on failure — a
+    failed emit keeps the intent pending (``failed`` after 3 attempts),
+    never pretends delivered.
+    """
+    from openexecutive.audit import log_event
+    from openexecutive.audit.logger import get_audit_logger
+
+    journal = get_audit_logger()
+    delivered = failed = 0
+    for intent in pending_audit_intents(db_path, tenant=tenant):
+        iid = intent["intent_id"]
+        try:
+            if journal.has_detail("intent_id", iid):
+                emitted = True  # already in journal — reconcile, no re-emit
+            else:
+                details = json.loads(intent["details_json"])
+                # Emit through the module seam (tests patch log_event), then
+                # CONFIRM by reading the journal back — log_event swallows
+                # its own failures, so the row's presence is the truth.
+                log_event(
+                    intent["event"], intent["summary"],
+                    actor=intent["actor"],
+                    details={**details, "intent_id": iid},
+                )
+                emitted = journal.has_detail("intent_id", iid)
+        except Exception:  # noqa: BLE001 — journal unreachable/corrupt
+            emitted = False
+        with get_conn(db_path) as conn:
+            if emitted:
+                conn.execute(
+                    "UPDATE bo_audit_intents SET status='delivered', "
+                    "delivered_at=? WHERE intent_id=?",
+                    (_now(), iid),
+                )
+                delivered += 1
+            else:
+                conn.execute(
+                    "UPDATE bo_audit_intents SET attempts=attempts+1, "
+                    "last_error='journal unreachable', "
+                    "status = CASE WHEN attempts+1 >= 3 THEN 'failed' "
+                    "ELSE 'pending' END WHERE intent_id=?",
+                    (iid,),
+                )
+                failed += 1
+    return {"delivered": delivered, "failed": failed}
 
 
 def outbox_stats(tenant: str, db_path: Path | None = None) -> dict[str, Any]:
@@ -857,6 +1007,7 @@ def outbox_stats(tenant: str, db_path: Path | None = None) -> dict[str, Any]:
             "AND last_error IS NOT NULL ORDER BY created_at DESC LIMIT 1",
             (tenant,),
         ).fetchone()
+    audit = audit_intents_status(tenant, db_path)
     return {
         "outbox_total": int(row["total"] or 0),
         "outbox_pending": int(row["pending"] or 0),
@@ -864,6 +1015,8 @@ def outbox_stats(tenant: str, db_path: Path | None = None) -> dict[str, Any]:
         "outbox_unbound": int(row["unbound"] or 0),
         "outbox_attempts": int(row["attempts"] or 0),
         "outbox_last_error": last["last_error"] if last else None,
+        "audit_pending": audit["pending"],
+        "audit_failed": audit["failed"],
     }
 
 

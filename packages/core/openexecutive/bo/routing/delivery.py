@@ -83,6 +83,11 @@ def deliver_pending(
     lease_s = max(60, _setting(tenant, "bo.router.delivery_interval_s", 30,
                                db_path) * 4)
 
+    # Audit-intent reconcile: intents persisted by mutations (rebind) are
+    # replayed to the journal here too — a crash between the mutation
+    # commit and the inline drain is recovered while the worker lives.
+    store.drain_audit_intents(db_path=db_path, tenant=tenant)
+
     sent = failed = dead = 0
     claimed = store.claim_outbox(
         tenant, worker_id=worker_id, limit=batch_size, lease_s=lease_s,

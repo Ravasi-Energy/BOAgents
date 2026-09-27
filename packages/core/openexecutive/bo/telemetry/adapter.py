@@ -451,7 +451,18 @@ class TelemetryAdapter:
         if destination is not None:
             endpoint, ref = destination
             if endpoint:
-                token = os.environ.get(ref, "") if ref else ""
+                # The bound ref must still be provisioned FOR THIS TENANT —
+                # a NAME@other scope or a removed allow-list entry revokes
+                # the credential even though the env var still exists.
+                # ``or ""`` — a missing tenant must never satisfy a scoped
+                # entry (scoped names resolve only for their own tenant).
+                token = (
+                    os.environ.get(ref, "")
+                    if ref and ref in provisioned_secret_refs(
+                        tenant or event.get("tenantRef") or ""
+                    )
+                    else ""
+                )
                 if not token:
                     self.dropped += 1
                     raise CredentialUnavailableError(

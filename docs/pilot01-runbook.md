@@ -200,6 +200,38 @@ un receptor ostil nu poate reflecta tokenul Bearer înapoi în DB/UI.
 `bo.telemetry.enabled=false` suspendă numai kind-urile de telemetrie —
 plicurile `execution` continuă să se scurgă automat.
 
+## Audit durabil, izolare la livrare și upgrade (PILOT-07)
+
+**Intenții de audit durabile.** Evenimentul de audit al unui rebind este o
+intență în `bo_audit_intents`, comisă în ACEEAȘI tranzacție cu mutația —
+un crash între commitul rutei și scrierea în jurnal nu mai poate pierde
+auditul. `drain_audit_intents` (apelat după rebind și la fiecare ciclu al
+workerului) reia intențile către jurnalul central cu deduplicare pe
+`intent_id`; emisia e confirmată prin re-citirea jurnalului, deci un emit
+urmat de crash la marcaj nu dublează rândul. Statul real e raportat
+(`audit=delivered|pending|failed`) și expus în `outbox_stats`
+(`audit_pending`/`audit_failed`) + UI — fără afirmație falsă de „auditat".
+
+**Izolarea scopului la livrare.** Legătura persistată fixează NUMELE
+referinței, nu valoarea: la fiecare livrare pe un rând legat, ref-ul este
+re-verificat în `BO_TELEMETRY_SECRET_REFS` PENTRU TENANTUL curent —
+re-scoparea `NUME@alt-tenant` sau ștergerea intrării revocă credentialul
+chiar dacă variabila env există încă (refuz închis, zero octeți), iar
+rotația valorii env este preluată cât timp referința rămâne autorizată.
+
+**Concurență.** `PRAGMA busy_timeout=5000` pe conexiunile `bo` face ca
+rebind×claim×delivery concurente să aștepte lockul, nu să crape
+(`database is locked`). Un rând sub lease activ este sărit de rebind și
+nu livrat de alt worker; lease-ul eliberat la `resolve_outbox` îl
+reîntoarce în pending — convergență garantată pe runde ulterioare, fiecare
+plic o singură dată pe fir.
+
+**Upgrade d519→head.** Migrarea e aditivă (coloane `dest_*` noi, tabelul
+`bo_audit_intents`): rândurile pre-existente rămân `dest_bound=NULL` —
+vizibile ca legacy, refuzate închis până la rebind auditat; istoricul
+delivered/dead-letter nu se atinge; lease-urile active moștenite sunt
+respectate. Restartul workerului (proces nou pe aceeași DB) reia totul.
+
 **Rutare uniformă.** `pilot/delivery` consumă aceeași configurație efectivă
 ca adaptorul general (`adapter.resolve`) — endpointul și referința administrate
 guvernează observațiile pilot și telemetria derivată (Heartbeat/RunFinished)

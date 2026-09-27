@@ -1027,3 +1027,36 @@ def validate_value(key: str, value: Any) -> Any:
     if spec is None:
         raise SettingValidationError(f"Setare necunoscută: {key}")
     return spec.validate(value)
+
+
+#: Settings whose SecretRef value must also be provisioned FOR this tenant —
+#: an allow-list entry ``NAME@other-tenant`` is provisioned globally but must
+#: never be selectable here (a tenant cannot name another tenant's ref).
+def validate_tenant_scope(tenant: str, key: str, value: Any) -> Any:
+    """Per-tenant SecretRef scope check, applied on top of ``spec.validate``
+    by ``settings_store.set_value`` — the unary validator only knows the
+    name is provisioned *somewhere*; this gates it to THIS tenant."""
+    if not isinstance(value, str) or not value:
+        return value
+    if key == "bo.telemetry.token_ref":
+        from openexecutive.bo.telemetry import adapter
+
+        if value not in adapter.provisioned_secret_refs(tenant):
+            raise SettingValidationError(
+                "Referința tokenului de telemetrie: numele este provisionat "
+                "pentru alt tenant — un tenant nu poate folosi referința "
+                "altui tenant"
+            )
+    elif key in (
+        "bo.exec.guardian_secret_ref",
+        "bo.exec.guardian_policy_secret_ref",
+    ):
+        from openexecutive.bo.execution import guardian
+
+        if value not in guardian.provisioned_secret_refs(tenant):
+            raise SettingValidationError(
+                "Referința de secret Guardian: numele este provisionat "
+                "pentru alt tenant — un tenant nu poate folosi referința "
+                "altui tenant"
+            )
+    return value

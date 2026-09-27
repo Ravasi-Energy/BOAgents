@@ -151,7 +151,11 @@ provisionate de operator prin `BO_TELEMETRY_SECRET_REFS` (CSV de nume env) sau
 referințele bootstrap încorporate (`BO_TELEMETRY_TOKEN`,
 `BO_PILOT_OBSERVATION_TOKEN`). Un nume arbitrar este respins la salvare (422) —
 administratorul nu poate transforma o variabilă de mediu oarecare în secret
-administrabil.
+administrabil. O intrare din listă este `NUME` (utilizabilă de orice tenant)
+sau `NUME@tenant` (utilizabilă numai de acel tenant — re-scopabilă prin
+repetare `NUME@t1,NUME@t2`); scoparea se aplică și la salvare (422 pentru
+referința altui tenant) și la rezolvare/livrare — același format pentru
+`BO_GUARDIAN_SECRET_REFS`.
 
 **Legătura credential↔destinație↔tenant.** Un `endpoint` administrat per tenant
 cere și un `token_ref` administrat și provisionat; altfel adaptorul raportează

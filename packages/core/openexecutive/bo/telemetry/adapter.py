@@ -57,17 +57,49 @@ _BUILTIN_REFS = frozenset({"BO_TELEMETRY_TOKEN", "BO_PILOT_OBSERVATION_TOKEN"})
 _REF_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 
 
-def provisioned_secret_refs() -> frozenset[str]:
+def _parse_secret_ref_allowlist(
+    raw_list: str,
+) -> tuple[set[str], dict[str, set[str]]]:
+    """Split ``BO_*_SECRET_REFS`` into (bare names, {name: {tenants}}).
+
+    An entry is either ``NAME`` — usable by any tenant — or ``NAME@tenant``
+    — usable only by that tenant (repeatable for several tenants). Scoped
+    entries let the operator bind a credential to specific tenants: no
+    other tenant's settings can name it."""
+    bare: set[str] = set()
+    scoped: dict[str, set[str]] = {}
+    for raw in raw_list.split(","):
+        entry = raw.strip()
+        if not entry:
+            continue
+        name, sep, scope = entry.partition("@")
+        if not _REF_NAME_RE.match(name):
+            continue
+        if sep and scope.strip():
+            scoped.setdefault(name, set()).add(scope.strip())
+        else:
+            bare.add(name)
+    return bare, scoped
+
+
+def provisioned_secret_refs(
+    tenant: str | None = None,
+) -> frozenset[str]:
     """The env-var names an administered ``bo.telemetry.token_ref`` may
     point at. Provisioning is operator-side only: ``BO_TELEMETRY_SECRET_REFS``
-    (comma-separated env names) plus the built-in bootstrap references.
-    An admin can never make an arbitrary env var readable by naming it —
-    only names the operator provisioned."""
-    names = set(_BUILTIN_REFS)
-    for raw in os.environ.get("BO_TELEMETRY_SECRET_REFS", "").split(","):
-        name = raw.strip()
-        if name and _REF_NAME_RE.match(name):
-            names.add(name)
+    plus the built-in bootstrap references. An admin can never make an
+    arbitrary env var readable by naming it — only names the operator
+    provisioned, and a ``NAME@other-tenant`` entry is never usable here."""
+    bare, scoped = _parse_secret_ref_allowlist(
+        os.environ.get("BO_TELEMETRY_SECRET_REFS", "")
+    )
+    names = set(_BUILTIN_REFS) | bare
+    if tenant is None:
+        names.update(scoped)
+    else:
+        names.update(
+            n for n, ts in scoped.items() if tenant in ts
+        )
     return frozenset(names)
 
 
@@ -236,7 +268,7 @@ class TelemetryAdapter:
             if endpoint_administered and not ref_administered:
                 credential_state = "endpoint_without_ref"
             elif ref_administered and (
-                token_ref not in provisioned_secret_refs()
+                token_ref not in provisioned_secret_refs(tenant)
             ):
                 credential_state = "unprovisioned"
             else:

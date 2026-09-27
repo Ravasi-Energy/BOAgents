@@ -98,15 +98,29 @@ _GUARDIAN_BUILTIN_REFS = frozenset(
 )
 
 
-def provisioned_secret_refs() -> set[str]:
+_GUARDIAN_REF_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+
+
+def provisioned_secret_refs(tenant: str | None = None) -> set[str]:
     """Env-var names an administered Guardian secret ref may point at:
     the built-in references plus the operator allow-list
-    ``BO_GUARDIAN_SECRET_REFS`` (comma-separated env names). Administering
-    a SecretRef can never reach an arbitrary environment variable."""
+    ``BO_GUARDIAN_SECRET_REFS`` (comma-separated ``NAME`` or
+    ``NAME@tenant`` entries — a scoped entry is usable only by its own
+    tenant, so one tenant can never name another's credential).
+    Administering a SecretRef can never reach an arbitrary environment
+    variable."""
     refs = set(_GUARDIAN_BUILTIN_REFS)
     for raw in os.environ.get("BO_GUARDIAN_SECRET_REFS", "").split(","):
-        name = raw.strip()
-        if name and re.match(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$", name):
+        entry = raw.strip()
+        if not entry:
+            continue
+        name, sep, scope = entry.partition("@")
+        if not _GUARDIAN_REF_RE.match(name):
+            continue
+        if sep and scope.strip():
+            if tenant is None or scope.strip() == tenant:
+                refs.add(name)
+        else:
             refs.add(name)
     return refs
 
@@ -168,8 +182,14 @@ def _link_config(
     endpoint, secret_ref = binding_for(tenant, db_path)
     # binding_for already reports the effective ref — including the
     # BO_TELEMETRY_TOKEN fallback on the bootstrap channel. A bound or
-    # administered endpoint never substitutes another credential.
-    token = os.environ.get(secret_ref) or None
+    # administered endpoint never substitutes another credential, and a
+    # ref provisioned for a different tenant (``NAME@other``) never
+    # resolves here.
+    token = (
+        os.environ.get(secret_ref)
+        if secret_ref in provisioned_secret_refs(tenant)
+        else None
+    )
     timeout_s = float(
         _setting(tenant, "bo.exec.guardian_timeout_s", 5, db_path)
     )
@@ -192,6 +212,8 @@ def _policy_token(tenant: str, db_path: Path | None) -> str | None:
             "BO_GUARDIAN_POLICY_TOKEN", db_path,
         )
     )
+    if ref not in provisioned_secret_refs(tenant):
+        return None
     return os.environ.get(ref) or None
 
 
@@ -471,7 +493,11 @@ def post_execution_event(
     """
     if destination is not None:
         endpoint, secret_ref = destination
-        token = os.environ.get(secret_ref) if secret_ref else None
+        token = (
+            os.environ.get(secret_ref)
+            if secret_ref and secret_ref in provisioned_secret_refs(tenant)
+            else None
+        )
         timeout_s = float(
             _setting(tenant, "bo.exec.guardian_timeout_s", 5, db_path)
         )

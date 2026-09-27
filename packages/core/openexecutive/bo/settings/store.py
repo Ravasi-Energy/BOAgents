@@ -18,7 +18,11 @@ from pathlib import Path
 from typing import Any
 
 from openexecutive.bo.db import get_conn
-from openexecutive.bo.settings.registry import REGISTRY, SettingValidationError
+from openexecutive.bo.settings.registry import (
+    REGISTRY,
+    SettingValidationError,
+    validate_tenant_scope,
+)
 
 
 class UnknownSettingError(KeyError):
@@ -161,6 +165,7 @@ def set_value(
     if spec is None:
         raise UnknownSettingError(key)
     validated = spec.validate(value)  # raises SettingValidationError
+    validated = validate_tenant_scope(tenant, key, validated)
 
     with get_conn(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")

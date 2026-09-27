@@ -1216,6 +1216,39 @@ class TestDestinationBinding:
         assert entry["dest_endpoint"] == "https://admin-guardian.invalid"
         assert entry["dest_ref"] == "BO_GUARDIAN_TOKEN"
 
+    def test_descoped_guardian_ref_refuses_at_delivery(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Coordinator precision: a bound ref re-scoped to ANOTHER tenant
+        (``NAME@other``) must refuse at delivery — the credential never
+        crosses tenant scope even though the env var still exists."""
+        from openexecutive.bo.routing import delivery
+
+        monkeypatch.setenv("BO_GUARDIAN_SECRET_REFS", "G_BOUND")
+        monkeypatch.setenv("G_BOUND", "synthetic-g-bound")
+        calls = self._capture(monkeypatch)
+        adapter = self._http_adapter(
+            monkeypatch, "https://gate.invalid/v1/telemetry",
+            "synthetic-gate-token")
+        versions: dict = {}
+        self._set(TENANT, "bo.exec.guardian_endpoint",
+                  "https://guardian-b.invalid", db, versions)
+        self._set(TENANT, "bo.exec.guardian_secret_ref", "G_BOUND",
+                  db, versions)
+        store.enqueue_outbox(
+            TENANT, "execution", "run-1",
+            {"schemaVersion": "bo.execution-control.event.v1",
+             "eventId": "evt_exec_scope", "tenantRef": TENANT},
+            db_path=db)
+        # Operator re-scopes the ref to another tenant — bound row refuses.
+        monkeypatch.setenv("BO_GUARDIAN_SECRET_REFS", "G_BOUND@other-tenant")
+        res = delivery.deliver_pending(TENANT, adapter=adapter, db_path=db)
+        assert res["sent"] == 0 and res["failed"] == 1
+        assert calls == []
+        entry = store.list_outbox(TENANT, db_path=db)[0]
+        assert entry["delivered"] == 0
+        assert "provisionat" in (entry["last_error"] or "")
+
     def test_sink_bound_row_refuses_later_http_destination(
         self, db: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

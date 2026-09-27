@@ -440,3 +440,91 @@ class TestCredentialBoundToDestination:
         cfg = adapter.resolve("tenant-a")
         assert cfg.credential_state == "configured"
         assert cfg.credential_ref == "BO_TELEMETRY_TOKEN"
+
+
+# --------------------------------------------------------------------------- #
+# PILOT-06 — precizare coordonator: SecretRef scopat per tenant. O intrare
+# ``NAME@tenant`` din allow-list e utilizabilă NUMAI de tenantul ei — un
+# tenant nu poate alege referința celuilalt.
+# --------------------------------------------------------------------------- #
+
+
+class TestSecretRefTenantScope:
+    def test_scoped_telemetry_ref_rejected_for_other_tenant(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        use_tmp_db(tmp_path, monkeypatch)
+        monkeypatch.setenv("BO_TELEMETRY_SECRET_REFS", "TEL_A@tenant-a")
+        monkeypatch.setenv("TEL_A", "synthetic")
+        settings_store.set_value(
+            "tenant-a", "bo.telemetry.token_ref", "TEL_A",
+            expected_version=0, actor="admin@t",
+        )
+        with pytest.raises(SettingValidationError):
+            settings_store.set_value(
+                "tenant-b", "bo.telemetry.token_ref", "TEL_A",
+                expected_version=0, actor="admin@t",
+            )
+
+    def test_bare_ref_usable_by_any_tenant(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        use_tmp_db(tmp_path, monkeypatch)
+        monkeypatch.setenv("BO_TELEMETRY_SECRET_REFS", "SHARED_TEL")
+        for tenant in ("tenant-a", "tenant-b"):
+            settings_store.set_value(
+                tenant, "bo.telemetry.token_ref", "SHARED_TEL",
+                expected_version=0, actor="admin@t",
+            )
+
+    def test_rescoped_ref_reports_unprovisioned_at_resolve(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Ref bare-provisioned at write, later re-scoped to another tenant:
+        resolve reports it unprovisioned — the tenant loses the credential
+        the moment the operator re-scopes it."""
+        use_tmp_db(tmp_path, monkeypatch)
+        monkeypatch.setenv("BO_TELEMETRY_SECRET_REFS", "TEL_B")
+        monkeypatch.setenv("TEL_B", "synthetic-b")
+        settings_store.set_value(
+            "tenant-b", "bo.telemetry.transport", "http",
+            expected_version=0, actor="admin@t",
+        )
+        settings_store.set_value(
+            "tenant-b", "bo.telemetry.endpoint",
+            "https://dest-b.invalid/v1/telemetry",
+            expected_version=0, actor="admin@t",
+        )
+        settings_store.set_value(
+            "tenant-b", "bo.telemetry.token_ref", "TEL_B",
+            expected_version=0, actor="admin@t",
+        )
+        adapter = TelemetryAdapter(enabled=True, transport=NullTransport())
+        assert adapter.resolve("tenant-b").credential_state == "configured"
+        monkeypatch.setenv("BO_TELEMETRY_SECRET_REFS", "TEL_B@tenant-a")
+        cfg = adapter.resolve("tenant-b")
+        assert cfg.credential_state == "unprovisioned"
+        assert cfg.transport is None
+        cfg_a = adapter.resolve("tenant-a")
+        assert cfg_a.credential_state != "unprovisioned"  # scope is t-a's
+
+    def test_scoped_guardian_ref_rejected_for_other_tenant(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        use_tmp_db(tmp_path, monkeypatch)
+        monkeypatch.setenv("BO_GUARDIAN_SECRET_REFS", "G_A@tenant-a")
+        monkeypatch.setenv("G_A", "synthetic-ga")
+        settings_store.set_value(
+            "tenant-a", "bo.exec.guardian_secret_ref", "G_A",
+            expected_version=0, actor="admin@t",
+        )
+        with pytest.raises(SettingValidationError):
+            settings_store.set_value(
+                "tenant-b", "bo.exec.guardian_secret_ref", "G_A",
+                expected_version=0, actor="admin@t",
+            )
+        with pytest.raises(SettingValidationError):
+            settings_store.set_value(
+                "tenant-b", "bo.exec.guardian_policy_secret_ref", "G_A",
+                expected_version=0, actor="admin@t",
+            )

@@ -4160,8 +4160,28 @@ bo:
     concurrent flushes race-safe, bo.router.delivery_batch_size /
     delivery_interval_s / delivery_max_attempts bound it, envelopes past the
     cap are dead-lettered (delivered=2, visible in status/UI), and catalog
-    syncs share the same outbox. A daemon worker drains it every
-    delivery_interval_s seconds (0 = POST /bo/routing/flush only). It NEVER
+    syncs share the same outbox. A daemon worker drains it per tenant —
+    delivery_interval_s is re-read on every wake (0 = POST /bo/routing/flush
+    only, for that tenant only) and the wait is the soonest tenant due time.
+    Every outbox row carries the destination binding resolved at enqueue
+    (dest_endpoint, dest_ref — SecretRef name only, dest_bound); delivery,
+    retry and replay follow only that binding, legacy unbound rows refuse
+    until an audited POST /bo/execution/outbox/rebind — lease-safe and
+    refusing delivered history. A sink binding ("", "") recorded while the
+    transport had no HTTP destination delivers only while the effective
+    transport is still a sink; a later administered HTTP destination
+    refuses until rebind. Telemetry credentials bind to destination+tenant:
+    bo.telemetry.token_ref accepts only operator-provisioned names
+    (BO_TELEMETRY_SECRET_REFS) or built-in bootstrap refs, and an
+    administered endpoint without its own provisioned ref refuses closed —
+    the bootstrap credential never follows an envelope to an administered
+    destination. The Guardian channel is symmetric: bo.exec.guardian_*
+    refs accept only BO_GUARDIAN_SECRET_REFS/built-ins, the persisted ref
+    is the one that would actually supply the token (bootstrap
+    BO_TELEMETRY_TOKEN fallback included, never onto an administered
+    endpoint), and receiver-supplied error detail is redacted before
+    last_error. Telemetry disabled per tenant suspends the telemetry kinds
+    only — kind="execution" envelopes keep draining. It NEVER
     changes the route, never blocks, never calls a provider, and never
     raises into the call path; with bo.router.observe_enabled=false
     (default) it is a no-op. bo.bots imports nothing from bo.routing —

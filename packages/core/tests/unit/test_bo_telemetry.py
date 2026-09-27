@@ -215,10 +215,12 @@ def test_http_without_endpoint_and_token_is_controlled(tmp_path, monkeypatch) ->
 
 
 def test_secret_ref_resolves_env_never_stores_secret(tmp_path, monkeypatch) -> None:  # noqa: ANN001
-    """The administered token_ref names an env var; the secret value itself
-    is never persisted in bo_settings and never surfaces in list_effective."""
+    """The administered token_ref names a PROVISIONED env var; the secret
+    value itself is never persisted in bo_settings and never surfaces in
+    list_effective."""
     use_tmp_db(tmp_path, monkeypatch)
     monkeypatch.setenv("TEL_TOKEN_X", "sekrit-token-material")
+    _provision_refs(monkeypatch, "TEL_TOKEN_X")
     settings_store.set_value(
         "tenant-a", "bo.telemetry.transport", "http",
         expected_version=0, actor="admin@t",
@@ -243,8 +245,9 @@ def test_secret_ref_resolves_env_never_stores_secret(tmp_path, monkeypatch) -> N
 
 
 def test_endpoint_override_gets_fresh_transport(tmp_path, monkeypatch) -> None:  # noqa: ANN001
-    """An administered endpoint builds a NEW transport with the env-referenced
-    token — the bootstrap token is never carried to a new destination."""
+    """An administered endpoint builds a NEW transport ONLY when an
+    administered, provisioned token_ref exists — the bootstrap token is
+    never carried to a new destination."""
     use_tmp_db(tmp_path, monkeypatch)
     monkeypatch.setenv("BO_TELEMETRY_TOKEN", "bootstrap-token")
     bootstrap = HttpTransport("https://env.example/t", "bootstrap-token")
@@ -257,10 +260,24 @@ def test_endpoint_override_gets_fresh_transport(tmp_path, monkeypatch) -> None: 
         "tenant-a", "bo.telemetry.endpoint", "https://admin.example/t",
         expected_version=0, actor="admin@t",
     )
+    # Endpoint override WITHOUT an administered ref: controlled refusal,
+    # no transport built, bootstrap token not attached.
+    cfg = adapter.resolve("tenant-a")
+    assert cfg.transport is None
+    assert cfg.credential_state == "endpoint_without_ref"
+    assert cfg.source["endpoint"] == "tenant"
+
+    _provision_refs(monkeypatch, "TEL_TOKEN_ADMIN")
+    monkeypatch.setenv("TEL_TOKEN_ADMIN", "administered-token")
+    settings_store.set_value(
+        "tenant-a", "bo.telemetry.token_ref", "TEL_TOKEN_ADMIN",
+        expected_version=0, actor="admin@t",
+    )
     cfg = adapter.resolve("tenant-a")
     assert isinstance(cfg.transport, HttpTransport)
     assert cfg.transport is not bootstrap
     assert cfg.transport.endpoint == "https://admin.example/t"
+    assert cfg.transport.token == "administered-token"  # never the bootstrap one
     assert cfg.source["endpoint"] == "tenant"
 
 
@@ -272,12 +289,154 @@ def test_endpoint_override_gets_fresh_transport(tmp_path, monkeypatch) -> None: 
         ("bo.telemetry.transport", "null"),                    # not administrable
         ("bo.telemetry.endpoint", "ftp://x"),                  # not http(s)
         ("bo.telemetry.endpoint", "has space"),                # invalid URL
+        ("bo.telemetry.endpoint",
+         "https://user:pass@host.invalid/t"),                  # userinfo creds
         ("bo.telemetry.token_ref", "not a var name!"),         # not env syntax
         ("bo.telemetry.token_ref", "tok-with-D4sh.payload"),   # secret-shaped
+        ("bo.telemetry.token_ref", "ARBITRARY_ENV_NAME"),      # unprovisioned
+        ("bo.exec.guardian_secret_ref", "ANTHROPIC_API_KEY"),  # unprovisioned
+        ("bo.exec.guardian_policy_secret_ref",
+         "BACKEND_PROXY_SECRET"),                            # unprovisioned
     ],
 )
 def test_invalid_telemetry_settings_rejected(tmp_path, monkeypatch, key, value) -> None:  # noqa: ANN001
     use_tmp_db(tmp_path, monkeypatch)
+    monkeypatch.delenv("BO_TELEMETRY_SECRET_REFS", raising=False)
+    monkeypatch.delenv("BO_GUARDIAN_SECRET_REFS", raising=False)
     with pytest.raises(SettingValidationError):
         settings_store.set_value("tenant-a", key, value,
                                  expected_version=0, actor="admin@t")
+
+
+# --------------------------------------------------------------------------- #
+# PILOT-06 — credential legat de destinație și tenant: referințe provisionate
+# server-side, fără fallback la tokenul bootstrap pe destinații administrate
+# --------------------------------------------------------------------------- #
+
+def _provision_refs(monkeypatch: pytest.MonkeyPatch, *names: str) -> None:
+    """Operator-side provisioning: the only env names an administered
+    ``bo.telemetry.token_ref`` may point at (``BO_TELEMETRY_SECRET_REFS``)."""
+    monkeypatch.setenv("BO_TELEMETRY_SECRET_REFS", ",".join(names))
+
+
+def _capture_http(monkeypatch: pytest.MonkeyPatch) -> list:
+    """Capture the Request objects at the urllib boundary — zero network."""
+    import io
+    import urllib.request
+
+    calls: list = []
+
+    def _capture(req, **kw):  # noqa: ANN001
+        calls.append(req)
+        return io.BytesIO(b'{"status":"RECEIVED"}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", _capture)
+    return calls
+
+
+class TestCredentialBoundToDestination:
+    def test_administered_endpoint_without_ref_refuses_transport(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """PILOT-06/audit: endpoint override alone must NOT carry the
+        bootstrap credential to the new destination — controlled refusal."""
+        use_tmp_db(tmp_path, monkeypatch)
+        monkeypatch.setenv("BO_TELEMETRY_TOKEN", "synthetic-bootstrap-token")
+        calls = _capture_http(monkeypatch)
+        adapter = TelemetryAdapter(
+            enabled=True,
+            transport=HttpTransport("https://boot.invalid/v1/telemetry",
+                                    "synthetic-bootstrap-token"),
+        )
+        settings_store.set_value(
+            "tenant-a", "bo.telemetry.endpoint",
+            "https://administered.invalid/v1/telemetry",
+            expected_version=0, actor="admin@t",
+        )
+        cfg = adapter.resolve("tenant-a")
+        assert cfg.transport is None
+        assert cfg.credential_state == "endpoint_without_ref"
+        with pytest.raises(TelemetryDisabledError):
+            adapter.deliver_event({"eventId": "evt_1"}, tenant="tenant-a")
+        assert calls == []  # nothing left the process — least of all the bootstrap token
+
+    def test_administered_endpoint_uses_only_the_administered_ref(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        use_tmp_db(tmp_path, monkeypatch)
+        monkeypatch.setenv("BO_TELEMETRY_TOKEN", "synthetic-bootstrap-token")
+        monkeypatch.setenv("TEL_DEST_B", "synthetic-tenant-token")
+        _provision_refs(monkeypatch, "TEL_DEST_B")
+        calls = _capture_http(monkeypatch)
+        adapter = TelemetryAdapter(
+            enabled=True,
+            transport=HttpTransport("https://boot.invalid/v1/telemetry",
+                                    "synthetic-bootstrap-token"),
+        )
+        settings_store.set_value(
+            "tenant-a", "bo.telemetry.endpoint",
+            "https://administered.invalid/v1/telemetry",
+            expected_version=0, actor="admin@t",
+        )
+        settings_store.set_value(
+            "tenant-a", "bo.telemetry.token_ref", "TEL_DEST_B",
+            expected_version=0, actor="admin@t",
+        )
+        adapter.deliver_event({"eventId": "evt_1"}, tenant="tenant-a")
+        assert len(calls) == 1
+        req = calls[0]
+        assert req.full_url == "https://administered.invalid/v1/telemetry"
+        assert req.get_header("Authorization") == "Bearer synthetic-tenant-token"
+
+    def test_provisioned_ref_missing_env_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A provisioned ref name whose env is absent fails closed — no
+        fallback to BO_TELEMETRY_TOKEN on an administered destination."""
+        use_tmp_db(tmp_path, monkeypatch)
+        monkeypatch.setenv("BO_TELEMETRY_TOKEN", "synthetic-bootstrap-token")
+        _provision_refs(monkeypatch, "TEL_MISSING")
+        monkeypatch.delenv("TEL_MISSING", raising=False)
+        calls = _capture_http(monkeypatch)
+        adapter = TelemetryAdapter(enabled=True, transport=NullTransport())
+        settings_store.set_value(
+            "tenant-a", "bo.telemetry.transport", "http",
+            expected_version=0, actor="admin@t",
+        )
+        settings_store.set_value(
+            "tenant-a", "bo.telemetry.endpoint",
+            "https://administered.invalid/v1/telemetry",
+            expected_version=0, actor="admin@t",
+        )
+        settings_store.set_value(
+            "tenant-a", "bo.telemetry.token_ref", "TEL_MISSING",
+            expected_version=0, actor="admin@t",
+        )
+        cfg = adapter.resolve("tenant-a")
+        assert cfg.transport is None
+        assert cfg.credential_state == "missing"
+        assert cfg.credential_ref == "TEL_MISSING"   # sanctioned ref, env absent
+        with pytest.raises(TelemetryDisabledError):
+            adapter.deliver_event({"eventId": "evt_1"}, tenant="tenant-a")
+        assert calls == []
+
+    def test_bootstrap_destination_keeps_bootstrap_credential(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unchanged bootstrap config keeps its documented behavior: the
+        bootstrap token serves the bootstrap endpoint."""
+        use_tmp_db(tmp_path, monkeypatch)
+        monkeypatch.setenv("BO_TELEMETRY_TOKEN", "synthetic-bootstrap-token")
+        calls = _capture_http(monkeypatch)
+        adapter = TelemetryAdapter(
+            enabled=True,
+            transport=HttpTransport("https://boot.invalid/v1/telemetry",
+                                    "synthetic-bootstrap-token"),
+        )
+        adapter.deliver_event({"eventId": "evt_1"}, tenant="tenant-a")
+        assert len(calls) == 1
+        assert calls[0].get_header("Authorization") == (
+            "Bearer synthetic-bootstrap-token")
+        cfg = adapter.resolve("tenant-a")
+        assert cfg.credential_state == "configured"
+        assert cfg.credential_ref == "BO_TELEMETRY_TOKEN"

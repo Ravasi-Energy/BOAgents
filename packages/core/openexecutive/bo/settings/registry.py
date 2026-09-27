@@ -116,6 +116,11 @@ def _validate_urlish(v: Any, *, label: str) -> str:
         raise SettingValidationError(
             f"{label}: așteptat URL http(s) valid, max 512 caractere"
         )
+    if "@" in v:
+        raise SettingValidationError(
+            f"{label}: credențialele în URL (userinfo) sunt interzise — "
+            "folosește o referință de secret"
+        )
     return v
 
 
@@ -127,6 +132,41 @@ def _validate_secret_ref(v: Any, *, label: str) -> str:
     if not _SECRET_REF_RE.match(v):
         raise SettingValidationError(
             f"{label}: așteptat nume de variabilă de mediu (ex. BO_GUARDIAN_TOKEN)"
+        )
+    return v
+
+
+def _validate_telemetry_secret_ref(v: Any) -> str:
+    """``bo.telemetry.token_ref`` names a PROVISIONED env var — the operator
+    allow-list ``BO_TELEMETRY_SECRET_REFS`` plus the built-in bootstrap
+    references. An admin can never point the adapter at an arbitrary env
+    var by typing its name here."""
+    v = _validate_secret_ref(v, label="Referința tokenului de telemetrie")
+    from openexecutive.bo.telemetry import adapter
+
+    if v not in adapter.provisioned_secret_refs():
+        raise SettingValidationError(
+            "Referința tokenului de telemetrie: numele nu este provisionat "
+            "(lista operatorului BO_TELEMETRY_SECRET_REFS sau referințele "
+            "bootstrap încorporate)"
+        )
+    return v
+
+
+def _validate_guardian_secret_ref(v: Any) -> str:
+    """``bo.exec.guardian_*_secret_ref`` names a PROVISIONED env var —
+    the operator allow-list ``BO_GUARDIAN_SECRET_REFS`` plus the built-in
+    references. Without this gate an admin could point the Bearer
+    credential at any env var the process holds."""
+    v = _validate_secret_ref(v, label="Referința de secret Guardian")
+    from openexecutive.bo.execution import guardian
+
+    if v not in guardian.provisioned_secret_refs():
+        raise SettingValidationError(
+            "Referința de secret Guardian: numele nu este provisionat "
+            "(lista operatorului BO_GUARDIAN_SECRET_REFS sau referințele "
+            "încorporate BO_GUARDIAN_TOKEN/BO_GUARDIAN_POLICY_TOKEN/"
+            "BO_TELEMETRY_TOKEN)"
         )
     return v
 
@@ -657,15 +697,13 @@ REGISTRY: dict[str, SettingSpec] = {
         tab="telemetrie",
         label_ro="Referința tokenului de telemetrie",
         label_en="Telemetry token reference",
-        help_ro="Numele variabilei de mediu care deține tokenul. Secretul propriu-zis rămâne doar pe server și nu se editează din browser; aici se administrează doar referința.",
+        help_ro="Numele variabilei de mediu care deține tokenul. Secretul propriu-zis rămâne doar pe server și nu se editează din browser; aici se administrează doar referința. Numele trebuie provisionat explicit de operator în BO_TELEMETRY_SECRET_REFS (sau să fie o referință bootstrap încorporată) — o destinație administrată fără referință proprie nu moștenește tokenul bootstrap.",
         owner_role="admin",
         edit_role="admin",
         sensitivity="normal",
-        effect_ro="Se citește variabila indicată la următoarea trimitere http; fallback rămâne BO_TELEMETRY_TOKEN.",
-        acceptance_ro="Doar un nume de variabilă de mediu (litere, cifre, _), niciodată valoarea secretă.",
-        validate=lambda v: _validate_secret_ref(
-            v, label="Referința tokenului de telemetrie"
-        ),
+        effect_ro="Se citește variabila indicată la următoarea trimitere http. Cu endpoint administrat, referința lipsește/neprovisionată înseamnă refuz controlat de livrare, nu fallback la BO_TELEMETRY_TOKEN.",
+        acceptance_ro="Doar un nume de variabilă de mediu provisionat (litere, cifre, _), niciodată valoarea secretă.",
+        validate=_validate_telemetry_secret_ref,
     ),
     "bo.exec.enabled": SettingSpec(
         key="bo.exec.enabled",
@@ -895,7 +933,7 @@ REGISTRY: dict[str, SettingSpec] = {
         sensitivity="normal",
         effect_ro="Clientul Guardian citește tokenul din variabila de mediu numită aici; lipsa ei e tratată ca eroare de configurare.",
         acceptance_ro="Doar numele variabilei e persistat; tokenul se trimite numai în antetul Bearer către Guardian, nu în DB, cereri de Setări sau loguri.",
-        validate=lambda v: _validate_secret_ref(v, label="Referința de secret"),
+        validate=_validate_guardian_secret_ref,
     ),
     "bo.exec.guardian_policy_secret_ref": SettingSpec(
         key="bo.exec.guardian_policy_secret_ref",
@@ -913,7 +951,7 @@ REGISTRY: dict[str, SettingSpec] = {
         sensitivity="normal",
         effect_ro="Prezent: verifică suplimentar acțiunea/resursa în politica curentă. Lipsă: se păstrează verdictul efectiv Guardian, care blochează politici revocate sau mandate în afara politicii.",
         acceptance_ro="Credențialul din env trebuie să aibă execpolicy:read; altfel efectul se oprește (unavailable), nu continuă.",
-        validate=lambda v: _validate_secret_ref(v, label="Referința de secret politică"),
+        validate=_validate_guardian_secret_ref,
     ),
     "bo.exec.guardian_timeout_s": SettingSpec(
         key="bo.exec.guardian_timeout_s",

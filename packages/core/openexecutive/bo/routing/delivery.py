@@ -54,6 +54,7 @@ def deliver_pending(
     db_path: Path | None = None,
     worker_id: str | None = None,
     adapter: Any | None = None,
+    kinds: set[str] | None = None,
 ) -> dict[str, int]:
     """One bounded delivery cycle for a tenant.
 
@@ -63,6 +64,7 @@ def deliver_pending(
     surfaced in status/UI, never retried forever.
     """
     from openexecutive.bo.telemetry.adapter import (
+        CredentialUnavailableError,
         TelemetryDisabledError,
         get_adapter,
     )
@@ -83,9 +85,24 @@ def deliver_pending(
     sent = failed = dead = 0
     claimed = store.claim_outbox(
         tenant, worker_id=worker_id, limit=batch_size, lease_s=lease_s,
-        db_path=db_path,
+        kinds=kinds, db_path=db_path,
     )
     for row in claimed:
+        if not row["dest_bound"]:
+            # Legacy row without a recorded destination association: never
+            # guess — the envelope stays pending until an explicit, audited
+            # rebind (/execution/outbox/rebind) assigns one. The claim
+            # filter lets an unbound row be claimed exactly once, so this
+            # refusal is recorded without burning the attempt cap.
+            store.resolve_outbox(
+                tenant, row["event_id"], kind=row["kind"],
+                ref_id=row["ref_id"],
+                error="plic legacy fără destinație asociată — "
+                      "reautorizare prin rebind",
+                db_path=db_path,
+            )
+            failed += 1
+            continue
         if row["series_attempts"] > max_attempts:
             store.resolve_outbox(
                 tenant, row["event_id"], kind=row["kind"],
@@ -94,17 +111,36 @@ def deliver_pending(
             )
             dead += 1
             continue
+        # Bound rows always carry their recorded (endpoint, secret_ref).
+        # A recorded endpoint sends strictly to that destination; the
+        # ("", "") sink binding follows the current transport only while
+        # it is still a sink — a later http destination refuses until an
+        # explicit rebind.
+        destination = (
+            (row["dest_endpoint"] or "", row["dest_ref"] or "")
+        )
         try:
             ack: dict[str, Any] | None
             if row["kind"] == "execution":
-                ack = _deliver_execution(tenant, row, db_path)
+                ack = _deliver_execution(tenant, row, db_path, destination)
             elif row["kind"] in ("service", "pilot-telemetry"):
                 from openexecutive.bo.pilot.delivery import deliver
-                ack = deliver(tenant, row["envelope"], db_path)
+                ack = deliver(tenant, row["envelope"], db_path,
+                              destination=destination)
             else:
                 ack = adapter.deliver_event(
-                    row["envelope"], tenant=tenant, db_path=db_path
+                    row["envelope"], tenant=tenant, db_path=db_path,
+                    destination=destination,
                 )
+        except CredentialUnavailableError as exc:
+            # Bound destination whose recorded credential ref cannot be
+            # resolved — the refusal reason stays visible, envelope pending.
+            store.resolve_outbox(
+                tenant, row["event_id"], kind=row["kind"],
+                ref_id=row["ref_id"], error=str(exc)[:200],
+                db_path=db_path,
+            )
+            failed += 1
         except TelemetryDisabledError:
             store.resolve_outbox(
                 tenant, row["event_id"], kind=row["kind"],
@@ -155,7 +191,8 @@ class _ExecutionDeadLetter(Exception):
 
 
 def _deliver_execution(
-    tenant: str, row: dict[str, Any], db_path: Path | None
+    tenant: str, row: dict[str, Any], db_path: Path | None,
+    destination: tuple[str, str] | None = None,
 ) -> dict[str, Any]:
     """Route one ``kind="execution"`` envelope to Guardian's real
     ``/v1/execution-events`` receiver — by schema, not by kind alone.
@@ -178,7 +215,7 @@ def _deliver_execution(
         )
     try:
         return guardian.post_execution_event(
-            tenant, envelope, db_path=db_path
+            tenant, envelope, db_path=db_path, destination=destination
         )
     except guardian.GuardianPermanentError as exc:
         raise _ExecutionDeadLetter(str(exc)) from exc
@@ -232,18 +269,34 @@ def _worker_cycle(
         interval = _setting(
             tenant, "bo.router.delivery_interval_s", 30, db_path
         )
-        if interval <= 0 or not _adapter_enabled(adapter, tenant, db_path):
-            # Not auto-deliverable: drop any pending schedule so a later
+        if interval <= 0:
+            # Manual-only tenant: drop any pending schedule so a later
             # re-enable starts a fresh countdown instead of firing at once.
+            due_at.pop(tenant, None)
+            continue
+        if _adapter_enabled(adapter, tenant, db_path):
+            kinds: set[str] | None = None
+        elif store.has_pending_kind(tenant, "execution", db_path):
+            # Telemetry administered off must not stall the Guardian
+            # authority channel — drain only the execution envelopes.
+            kinds = {"execution"}
+        else:
             due_at.pop(tenant, None)
             continue
         target = min(due_at.get(tenant, now + interval), now + interval)
         if target <= now:
-            deliver_pending(tenant, db_path=db_path, adapter=adapter)
+            deliver_pending(
+                tenant, db_path=db_path, adapter=adapter, kinds=kinds
+            )
             due_at[tenant] = time.monotonic() + interval
         else:
             due_at[tenant] = target
-            wait = min(wait, target - now)
+        # The tenant's next due time bounds the wait whether it was just
+        # rescheduled after a send or still pending — a fast tenant's
+        # cadence is never stretched to the recheck bound. The remaining
+        # time subtracts a FRESH clock so batch processing time doesn't
+        # silently stretch the interval.
+        wait = min(wait, max(0.0, due_at[tenant] - time.monotonic()))
     return wait
 
 

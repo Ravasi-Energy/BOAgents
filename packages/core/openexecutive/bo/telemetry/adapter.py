@@ -16,6 +16,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -43,6 +44,31 @@ def opaque_actor_ref(actor: str) -> str:
 class TelemetryDisabledError(RuntimeError):
     """Raised by ``deliver_event`` when the adapter is disabled — the
     envelope stays pending in the outbox for a later flush."""
+
+
+class CredentialUnavailableError(TelemetryDisabledError):
+    """The destination is known but its bound credential reference cannot
+    be resolved — the envelope stays pending; no other credential is ever
+    substituted."""
+
+
+#: SecretRefs that are always allowed — the bootstrap credentials themselves.
+_BUILTIN_REFS = frozenset({"BO_TELEMETRY_TOKEN", "BO_PILOT_OBSERVATION_TOKEN"})
+_REF_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+
+
+def provisioned_secret_refs() -> frozenset[str]:
+    """The env-var names an administered ``bo.telemetry.token_ref`` may
+    point at. Provisioning is operator-side only: ``BO_TELEMETRY_SECRET_REFS``
+    (comma-separated env names) plus the built-in bootstrap references.
+    An admin can never make an arbitrary env var readable by naming it —
+    only names the operator provisioned."""
+    names = set(_BUILTIN_REFS)
+    for raw in os.environ.get("BO_TELEMETRY_SECRET_REFS", "").split(","):
+        name = raw.strip()
+        if name and _REF_NAME_RE.match(name):
+            names.add(name)
+    return frozenset(names)
 
 
 class Transport(Protocol):
@@ -118,7 +144,14 @@ class TelemetryConfig:
     ``source`` records where each effective value came from so the UI can
     distinguish „salvat" from „activ". ``transport`` is the resolved send
     path — ``None`` when http was selected without endpoint+token (rows stay
-    pending, never silently dropped and never marked delivered)."""
+    pending, never silently dropped and never marked delivered).
+
+    ``credential_ref`` is the SecretRef *sanctioned for the resolved
+    endpoint* — empty when no credential may legitimately reach that
+    destination (a tenant-overridden endpoint without an administered,
+    provisioned ``token_ref`` never inherits the bootstrap credential).
+    ``credential_state``: ``configured`` | ``missing`` | ``unprovisioned`` |
+    ``endpoint_without_ref`` | ``none``."""
 
     enabled: bool
     transport_kind: str
@@ -127,6 +160,8 @@ class TelemetryConfig:
     token_configured: bool
     transport: Transport | None
     source: dict[str, str]
+    credential_ref: str
+    credential_state: str
 
 
 _TENANT_OVERRIDES = (
@@ -188,9 +223,30 @@ class TelemetryAdapter:
                     endpoint = str(value)
                 elif attr == "token_ref":
                     token_ref = str(value)
-        token = os.environ.get(token_ref, "") or os.environ.get(
-            "BO_TELEMETRY_TOKEN", ""
-        )
+        # Credential is bound to the destination AND the tenant: a
+        # tenant-administered endpoint requires an administered, provisioned
+        # token_ref — the bootstrap credential never follows the envelope to
+        # a destination it was not explicitly bound to.
+        credential_ref = ""
+        credential_state = "none"
+        token = ""
+        if kind == "http":
+            endpoint_administered = source["endpoint"] == "tenant"
+            ref_administered = source["token_ref"] == "tenant"
+            if endpoint_administered and not ref_administered:
+                credential_state = "endpoint_without_ref"
+            elif ref_administered and (
+                token_ref not in provisioned_secret_refs()
+            ):
+                credential_state = "unprovisioned"
+            else:
+                candidate = token_ref
+                token = os.environ.get(candidate, "")
+                if not token and not ref_administered:
+                    # Bootstrap path keeps its documented fallback only.
+                    token = os.environ.get("BO_TELEMETRY_TOKEN", "")
+                credential_ref = candidate
+                credential_state = "configured" if token else "missing"
         transport: Transport | None
         if kind == "http":
             current = self.transport if isinstance(self.transport, HttpTransport) else None
@@ -198,11 +254,14 @@ class TelemetryAdapter:
                 current is not None
                 and current.endpoint == endpoint
                 and source["token_ref"] == "default"
+                and source["endpoint"] != "tenant"
             ):
                 transport = current
             else:
                 transport = (
-                    HttpTransport(endpoint, token) if endpoint and token else None
+                    HttpTransport(endpoint, token)
+                    if endpoint and token and credential_state == "configured"
+                    else None
                 )
         elif kind == "buffered":
             transport = (
@@ -222,6 +281,8 @@ class TelemetryAdapter:
             token_configured=bool(token),
             transport=transport,
             source=source,
+            credential_ref=credential_ref,
+            credential_state=credential_state,
         )
 
     def __init__(
@@ -335,9 +396,16 @@ class TelemetryAdapter:
         *,
         tenant: str | None = None,
         db_path: Path | None = None,
+        destination: tuple[str, str] | None = None,
     ) -> dict[str, Any] | None:
         """Send an already-built envelope through the tenant's effective
         transport (administered ``bo.telemetry.*`` rows win over bootstrap).
+
+        ``destination=(endpoint, secret_ref)`` delivers through the binding
+        persisted on the outbox row at enqueue time: the envelope goes only
+        to its recorded endpoint, and only the recorded env reference may
+        provide the credential — missing env is a controlled refusal
+        (``CredentialUnavailableError``), never a substitution.
 
         Returns the receiver ack (``RECEIVED``/``DUPLICATE`` both mean the
         receiver holds the event). Raises ``TelemetryDisabledError`` when the
@@ -347,12 +415,39 @@ class TelemetryAdapter:
         if not cfg.enabled:
             self.dropped += 1
             raise TelemetryDisabledError("telemetria este dezactivată")
-        if cfg.transport is None:
+        transport: Transport | None
+        if destination is not None:
+            endpoint, ref = destination
+            if endpoint:
+                token = os.environ.get(ref, "") if ref else ""
+                if not token:
+                    self.dropped += 1
+                    raise CredentialUnavailableError(
+                        "credentialul asociat plicului nu este provisionat "
+                        "în mediul procesului"
+                    )
+                transport = HttpTransport(endpoint, token)
+            elif cfg.transport_kind == "http" and cfg.endpoint:
+                # Bound to "no HTTP destination" at enqueue — a newly
+                # configured endpoint must never receive this envelope;
+                # only an audited rebind may re-associate it.
+                self.dropped += 1
+                raise CredentialUnavailableError(
+                    "plic legat fără destinație http la persistare — "
+                    "reasociere explicită necesară (rebind)"
+                )
+            else:
+                # Bound to the sink at enqueue AND still a sink — deliver
+                # through the current buffered/null transport.
+                transport = cfg.transport
+        else:
+            transport = cfg.transport
+        if transport is None:
             self.dropped += 1
             raise TelemetryDisabledError(
                 "transportul http este incomplet configurat (endpoint/token)"
             )
-        ack = cfg.transport.send(event)
+        ack = transport.send(event)
         self.emitted += 1
         return ack
 

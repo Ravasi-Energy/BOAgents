@@ -144,6 +144,69 @@ fără token disponibil este o stare vizibilă `incomplete` — plicurile rămâ
 outbox, nu sunt marcate livrate. Tokenul bootstrap nu este mutat pe un endpoint
 nou administrat (fără carry-over de secret pe altă destinație).
 
+## Credential legat de destinație, backlog și rutare uniformă (PILOT-06)
+
+**Provisioning explicit.** `bo.telemetry.token_ref` acceptă numai nume
+provisionate de operator prin `BO_TELEMETRY_SECRET_REFS` (CSV de nume env) sau
+referințele bootstrap încorporate (`BO_TELEMETRY_TOKEN`,
+`BO_PILOT_OBSERVATION_TOKEN`). Un nume arbitrar este respins la salvare (422) —
+administratorul nu poate transforma o variabilă de mediu oarecare în secret
+administrabil.
+
+**Legătura credential↔destinație↔tenant.** Un `endpoint` administrat per tenant
+cere și un `token_ref` administrat și provisionat; altfel adaptorul raportează
+`credential_state=endpoint_without_ref|unprovisioned|missing` și livrarea
+refuză controlat (plicul rămâne pending, nimic nu pleacă pe fir). Fallback la
+tokenul bootstrap există numai pe calea bootstrap neatinsă — niciodată pe o
+destinație administrată.
+
+**Legarea persistată în outbox.** Fiecare rând nou poartă `dest_endpoint`,
+`dest_ref` și `dest_bound=1` — fotografia destinației efective de la enqueue.
+O schimbare de setări nu re-rutează plicuri persistate: ele livrează strict pe
+destinația și referința legate, sau refuză dacă referința nu mai are valoare.
+Rândurile legacy pre-migrare (`dest_bound=NULL`) refuză cu motiv vizibil
+(„plic legacy fără destinație asociată — reautorizare prin rebind"), nu sunt
+ghicite și nu ard bugetul de tentative — refuzul se înregistrează o singură
+dată, apoi rândul rămâne pending fără să mai fie revendicat (nu ajunge în
+dead-letter prin capul de attempts, nu înfometează rândurile legate).
+
+**Rebind auditat.** `POST /bo/execution/outbox/rebind` (`execution:write`,
+motiv obligatoriu, opțional `event_ids`) reasociază plicurile nelivrate la
+destinația curent efectivă pe kind-ul lor — singura cale autorizată de a muta
+backlog sau rânduri legacy. Octeții și identitățile plicurilor nu se rescriu;
+audit `bo_outbox_rebind` cu actor/motiv/destinații. Un rând sub lease activ
+(posibil send în curs) este sărit, nu reasociat în zbor; un `event_id` deja
+livrat e conflict (409) — istoricul nu se rescrie. Retry și replay nu schimbă
+destinația — re-trimit octeții pe legătura înregistrată.
+
+**Legătura de sink.** Un plic persistat când transportul nu avea destinație
+HTTP (sink buffered/dezactivat) poartă `("", "")`: livrează numai cât
+transportul efectiv rămâne sink; o destinație HTTP administrată ulterior
+refuză plicul — nu primește un plic legat înainte de a fi configurată.
+
+**Canal Guardian.** `bo.exec.guardian_secret_ref` și
+`guardian_policy_secret_ref` acceptă numai nume provisionate de operator
+(`BO_GUARDIAN_SECRET_REFS`, CSV) sau referințele încorporate
+(`BO_GUARDIAN_TOKEN`, `BO_GUARDIAN_POLICY_TOKEN`, `BO_TELEMETRY_TOKEN`).
+Rândul legat înregistrează referința care alimentează efectiv tokenul —
+inclusiv fallbackul bootstrap `BO_TELEMETRY_TOKEN` pe canalul de bootstrap —
+iar pe un endpoint administrat nu se substituie nimic. Detaliul de eroare
+venit de la receptor este redactat înainte de a ajunge în `last_error` —
+un receptor ostil nu poate reflecta tokenul Bearer înapoi în DB/UI.
+`bo.telemetry.enabled=false` suspendă numai kind-urile de telemetrie —
+plicurile `execution` continuă să se scurgă automat.
+
+**Rutare uniformă.** `pilot/delivery` consumă aceeași configurație efectivă
+ca adaptorul general (`adapter.resolve`) — endpointul și referința administrate
+guvernează observațiile pilot și telemetria derivată (Heartbeat/RunFinished)
+identic. Plicurile `kind="execution"` rămân pe canalul de autoritate
+`bo.exec.*`/`guardian`, legat separat la enqueue — cele două canale nu se
+substituie.
+
+**Cadență corectă.** După o trimitere, workerul reprogramează scadența
+tenantului și așteaptă cel mult până la cea mai apropiată scadență — un send
+nu mai poate întârzia un tenant rapid până la boundul de recheck.
+
 ## Upgrade, dezinstalare și rollback
 
 Opriți workerii proprii înainte de upgrade, salvați SHA/configurație și o copie SQLite

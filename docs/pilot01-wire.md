@@ -65,6 +65,23 @@ PILOT-03 adaugă două suprafețe fără schimbare de contract:
   Idempotent pe `eventId`; fără apel la provider, fără efect nou; plicurile
   dead-letter rămân în fluxul existent de retry cu motiv.
 
+PILOT-06 adaugă legătura credential↔destinație persistată, fără schimbare
+de contract:
+
+- Fiecare rând `bo_telemetry_outbox` nou poartă `dest_endpoint`/`dest_ref`/
+  `dest_bound` — destinația efectivă de la enqueue (canalul telemetriei pentru
+  observații/telemetrie pilot, canalul `bo.exec.*` pentru execution-events).
+  Livrarea, retry-ul și replay-ul folosesc exclusiv legătura înregistrată;
+  o reconfigurare nu re-rutează backlogul.
+- `bo.telemetry.token_ref` acceptă numai referințe provisionate de operator
+  (`BO_TELEMETRY_SECRET_REFS`) sau bootstrap încorporate; endpoint administrat
+  fără referință proprie provisionată = refuz controlat
+  (`credential_state=endpoint_without_ref`), fără carry-over al tokenului
+  bootstrap.
+- Rândurile legacy fără legătură refuză vizibil; `POST
+  /bo/execution/outbox/rebind` (admin, motiv auditat) le reasociază la
+  destinația curent efectivă fără a rescrie octeții.
+
 ## Fixture HTTP locală (nu API ERP propus)
 
 `python -m openexecutive.bo.pilot.fixture package --work DIR` generează pachet și

@@ -20,6 +20,7 @@ import {
   listBoExecRuns,
   listBoOutbox,
   pauseBoRun,
+  rebindBoOutbox,
   reconcileBoRun,
   resumeBoRun,
   retryBoOutbox,
@@ -555,6 +556,42 @@ function OutboxSection({
     }
   }
 
+  async function rebind(e: BoOutboxEntry | null) {
+    const reason = window.prompt(
+      e
+        ? `Reasociez plicul ${e.event_id} la destinația curent efectivă pentru kind-ul ${e.kind}? Singura cale autorizată de a muta backlog sau rânduri legacy; octeții plicului nu se rescriu.\nMotiv (obligatoriu, auditat):`
+        : "Reasociez TOATE plicurile nelivrate la destinația curent efectivă pentru kind-ul lor? Singura cale autorizată de a muta backlog sau rânduri legacy; octeții plicurilor nu se rescriu.\nMotiv (obligatoriu, auditat):",
+    );
+    if (reason === null) return;
+    if (!reason.trim()) {
+      setNotice({ kind: "danger", text: "Reasocierea cere un motiv — operație auditată." });
+      return;
+    }
+    setBusy(true);
+    setNotice(null);
+    try {
+      const out = await rebindBoOutbox(
+        reason.trim(), e ? [e.event_id] : undefined,
+      );
+      setNotice({
+        kind: "ok",
+        text: out.skipped_leased
+          ? `${out.rebound} plic(uri) reasociate; ${out.skipped_leased} sărit(e) — lease activ.`
+          : `${out.rebound} plic(uri) reasociate destinației curente.`,
+      });
+      onChanged();
+    } catch (err) {
+      setNotice({
+        kind: "danger",
+        text: err instanceof BoApiError
+          ? `${err.status} — ${typeof err.detail === "string" ? err.detail : err.code}`
+          : "Reasocierea a eșuat.",
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const dead = entries.filter((e) => e.delivered === 2).length;
   const pending = entries.filter((e) => e.delivered === 0).length;
   return (
@@ -564,13 +601,25 @@ function OutboxSection({
         <div className="bo-row">
           <Pill kind="warn">{pending} în așteptare</Pill>
           <Pill kind={dead ? "danger" : "neutral"}>{dead} dead-letter</Pill>
+          {pending + dead > 0 ? (
+            <button
+              type="button"
+              className="bo-btn"
+              disabled={busy}
+              onClick={() => void rebind(null)}
+            >
+              Reasociază toate
+            </button>
+          ) : null}
         </div>
       </div>
       <p className="bo-hint" style={{ marginTop: 4 }}>
         Plicurile persistate înainte de prima trimitere; retry-urile
         retrimit aceiași octeți. Eșecurile permanente (401/403/409/422)
         ajung în dead-letter — vizibile, inspectabile, niciodată pierdute
-        tăcut.
+        tăcut. Fiecare plic păstrează destinația legată la enqueue —
+        rândurile legacy fără legătură refuză până la o reasociere
+        explicită, auditată.
       </p>
       {entries.length === 0 ? (
         <p className="bo-hint" style={{ marginTop: 8 }}>Coada e goală.</p>
@@ -580,9 +629,14 @@ function OutboxSection({
           return (
             <div key={e.event_id} className="bo-row" style={{ marginTop: 8, flexWrap: "wrap" }}>
               <Pill kind={l.kind}>{l.label}</Pill>
+              {e.delivered !== 1 && !e.dest_bound ? (
+                <Pill kind="warn">fără destinație</Pill>
+              ) : null}
               <span className="bo-hint">
                 {e.event_id.slice(0, 18)}… · {e.kind}/{e.event_type ?? "?"} ·
                 tentative {e.series_attempts} în seria curentă · {e.attempts} total
+                {e.dest_endpoint ? ` → ${e.dest_endpoint.slice(0, 80)}` : ""}
+                {e.dest_ref ? ` · ref ${e.dest_ref.slice(0, 40)}` : ""}
                 {e.last_error ? ` · ${e.last_error.slice(0, 90)}` : ""}
               </span>
               <button
@@ -601,6 +655,16 @@ function OutboxSection({
                   onClick={() => void retry(e)}
                 >
                   Reia autorizat
+                </button>
+              ) : null}
+              {e.delivered !== 1 ? (
+                <button
+                  type="button"
+                  className="bo-btn"
+                  disabled={busy}
+                  onClick={() => void rebind(e)}
+                >
+                  Reasociază destinația
                 </button>
               ) : null}
               {expanded === e.event_id ? (

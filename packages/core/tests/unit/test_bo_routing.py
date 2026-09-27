@@ -784,10 +784,13 @@ class TestPerTenantWorker:
         self._set_interval("tenant-fast", 5, db)
         self._set_interval("tenant-slow", 3600, db)
 
+        clock = [0.0]
+        monkeypatch.setattr(delivery.time, "monotonic", lambda: clock[0])
         due: dict[str, float] = {}
         wait = delivery._worker_cycle(0.0, due, adapter, db)
         assert wait == 5
         assert due["tenant-slow"] == 3600
+        clock[0] = 5.0
         delivery._worker_cycle(5.0, due, adapter, db)
         assert store.outbox_stats("tenant-fast", db_path=db)["outbox_pending"] == 0
         assert store.outbox_stats("tenant-slow", db_path=db)["outbox_pending"] == 1
@@ -805,6 +808,8 @@ class TestPerTenantWorker:
         self._pending("tenant-live", "l1", db)
         self._set_interval("tenant-live", 30, db)
 
+        clock = [0.0]
+        monkeypatch.setattr(delivery.time, "monotonic", lambda: clock[0])
         due: dict[str, float] = {}
         delivery._worker_cycle(0.0, due, adapter, db)
         assert due["tenant-live"] == 30
@@ -812,6 +817,7 @@ class TestPerTenantWorker:
         # 30 → 0 while the schedule is pending: the tenant is excluded and
         # the stale due entry is dropped — its envelope stays pending.
         self._set_interval("tenant-live", 0, db)
+        clock[0] = 40.0
         delivery._worker_cycle(40.0, due, adapter, db)   # would have been due
         assert "tenant-live" not in due
         assert store.outbox_stats("tenant-live", db_path=db)["outbox_pending"] == 1
@@ -819,9 +825,11 @@ class TestPerTenantWorker:
         # 0 → 10 re-enables automatic delivery with a FRESH countdown —
         # the envelope does not fire instantly on the stale schedule.
         self._set_interval("tenant-live", 10, db)
+        clock[0] = 50.0
         delivery._worker_cycle(50.0, due, adapter, db)
         assert due["tenant-live"] == 60.0
         assert store.outbox_stats("tenant-live", db_path=db)["outbox_pending"] == 1
+        clock[0] = 61.0
         delivery._worker_cycle(61.0, due, adapter, db)
         assert store.outbox_stats("tenant-live", db_path=db)["outbox_pending"] == 0
 
@@ -839,8 +847,11 @@ class TestPerTenantWorker:
             "tenant-off", "bo.telemetry.enabled", False,
             expected_version=0, actor="admin@t", db_path=db,
         )
+        clock = [0.0]
+        monkeypatch.setattr(delivery.time, "monotonic", lambda: clock[0])
         due: dict[str, float] = {}
         delivery._worker_cycle(0.0, due, adapter, db)
+        clock[0] = 40.0
         delivery._worker_cycle(40.0, due, adapter, db)   # past the 30s mark
         assert "tenant-off" not in due
         assert store.outbox_stats("tenant-off", db_path=db)["outbox_pending"] == 1
@@ -883,6 +894,446 @@ class TestPerTenantWorker:
         self._pending("tenant-live", "t2", db)
         time.sleep(2.5)  # several ticks at the 1s cadence would have fired
         assert store.outbox_stats("tenant-live", db_path=db)["outbox_pending"] == 1
+
+    def test_wait_after_send_covers_rescheduled_due(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """PILOT-06/S-01: after a tenant drains, its RESCHEDULED due time
+        must bound the wait — a 5s tenant is delivered again at ~t+5, not
+        after the 30s recheck bound."""
+        from openexecutive.bo.routing import delivery
+
+        adapter = self._adapter(monkeypatch)
+        self._pending("tenant-fast", "f", db)
+        self._pending("tenant-slow", "s", db)
+        self._set_interval("tenant-fast", 5, db)
+        self._set_interval("tenant-slow", 3600, db)
+
+        clock = [0.0]
+        monkeypatch.setattr(delivery.time, "monotonic", lambda: clock[0])
+        due: dict[str, float] = {}
+        clock[0] = 100.0
+        assert delivery._worker_cycle(100.0, due, adapter, db) == 5
+
+        clock[0] = 105.0  # fast due → drains; next due reschedules to 110
+        wait = delivery._worker_cycle(105.0, due, adapter, db)
+        assert wait == pytest.approx(5, abs=0.5)  # NOT the 30s recheck bound
+        assert store.outbox_stats("tenant-fast", db_path=db)["outbox_pending"] == 0
+
+        # Second delivery lands at ~110, not ~135.
+        self._pending("tenant-fast", "f2", db)
+        due["tenant-fast"] = 110.0
+        clock[0] = 110.0
+        delivery._worker_cycle(110.0, due, adapter, db)
+        assert store.outbox_stats("tenant-fast", db_path=db)["outbox_pending"] == 0
+        assert store.outbox_stats("tenant-slow", db_path=db)["outbox_pending"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# PILOT-06 — outbox destination binding: the destination + SecretRef resolved
+# at enqueue time travel with the envelope; a settings change never re-routes
+# persisted rows, and legacy unbound rows need an explicit audited rebind.
+# --------------------------------------------------------------------------- #
+
+class TestDestinationBinding:
+    def _http_adapter(self, monkeypatch: pytest.MonkeyPatch, endpoint: str,
+                      token: str):
+        from openexecutive.bo.telemetry import adapter as tel
+
+        ad = tel.TelemetryAdapter(
+            enabled=True, transport=tel.HttpTransport(endpoint, token))
+        monkeypatch.setattr(tel, "_adapter", ad)
+        return ad
+
+    def _capture(self, monkeypatch: pytest.MonkeyPatch) -> list:
+        import io
+        import urllib.request
+
+        calls: list = []
+
+        def cap(req, **kw):  # noqa: ANN001
+            calls.append(req)
+            resp = io.BytesIO(b'{"status":"RECEIVED"}')
+            resp.status = 200  # guardian._request reads resp.status
+            return resp
+
+        monkeypatch.setattr(urllib.request, "urlopen", cap)
+        return calls
+
+    def _set(self, tenant: str, key: str, value, db: Path,
+             versions: dict) -> None:
+        version = versions.get((tenant, key), 0)
+        settings_store.set_value(tenant, key, value, expected_version=version,
+                                 actor="admin@t", db_path=db)
+        versions[tenant, key] = version + 1
+
+    def test_backlog_keeps_enqueue_time_destination(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An envelope persisted under destination A keeps going to A with
+        credential A even after the tenant endpoint is re-administered to B."""
+        from openexecutive.bo.routing import delivery
+
+        monkeypatch.setenv("BO_TELEMETRY_TOKEN", "synthetic-token-a")
+        monkeypatch.setenv("TEL_DEST_B", "synthetic-token-b")
+        monkeypatch.setenv("BO_TELEMETRY_SECRET_REFS", "TEL_DEST_B")
+        calls = self._capture(monkeypatch)
+        adapter = self._http_adapter(
+            monkeypatch, "https://dest-a.invalid/v1/telemetry",
+            "synthetic-token-a")
+
+        store.enqueue_outbox(
+            TENANT, "models", "ref-old",
+            {"schemaVersion": "bo.model-observation.v1",
+             "eventId": "evt_old", "tenantRef": TENANT},
+            db_path=db)
+
+        # Admin re-destines the tenant — WITH a provisioned credential.
+        versions: dict = {}
+        self._set(TENANT, "bo.telemetry.endpoint",
+                  "https://dest-b.invalid/v1/telemetry", db, versions)
+        self._set(TENANT, "bo.telemetry.token_ref", "TEL_DEST_B", db, versions)
+        store.enqueue_outbox(
+            TENANT, "models", "ref-new",
+            {"schemaVersion": "bo.model-observation.v1",
+             "eventId": "evt_new", "tenantRef": TENANT},
+            db_path=db)
+
+        res = delivery.deliver_pending(TENANT, adapter=adapter, db_path=db)
+        assert res["sent"] == 2 and res["failed"] == 0
+        assert len(calls) == 2
+        by_event = {json.loads(c.data)["eventId"]: c for c in calls}
+        # Old row: ORIGINAL destination + ORIGINAL credential — not the new one.
+        assert by_event["evt_old"].full_url == "https://dest-a.invalid/v1/telemetry"
+        assert by_event["evt_old"].get_header("Authorization") == \
+            "Bearer synthetic-token-a"
+        # New row: the administered destination + the administered credential.
+        assert by_event["evt_new"].full_url == "https://dest-b.invalid/v1/telemetry"
+        assert by_event["evt_new"].get_header("Authorization") == \
+            "Bearer synthetic-token-b"
+
+    def test_endpoint_override_without_ref_blocks_new_not_backlog(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Endpoint override without token_ref: the OLD bound row still
+        delivers to its recorded destination; NEW envelopes bind to the
+        administered endpoint but are refused — no bootstrap credential."""
+        from openexecutive.bo.routing import delivery
+
+        monkeypatch.setenv("BO_TELEMETRY_TOKEN", "synthetic-token-a")
+        monkeypatch.delenv("BO_TELEMETRY_SECRET_REFS", raising=False)
+        calls = self._capture(monkeypatch)
+        adapter = self._http_adapter(
+            monkeypatch, "https://dest-a.invalid/v1/telemetry",
+            "synthetic-token-a")
+
+        store.enqueue_outbox(
+            TENANT, "models", "ref-old",
+            {"schemaVersion": "bo.model-observation.v1",
+             "eventId": "evt_old", "tenantRef": TENANT},
+            db_path=db)
+        self._set(TENANT, "bo.telemetry.endpoint",
+                  "https://dest-b.invalid/v1/telemetry", db, {})
+        store.enqueue_outbox(
+            TENANT, "models", "ref-new",
+            {"schemaVersion": "bo.model-observation.v1",
+             "eventId": "evt_new", "tenantRef": TENANT},
+            db_path=db)
+
+        res = delivery.deliver_pending(TENANT, adapter=adapter, db_path=db)
+        assert res["sent"] == 1 and res["failed"] == 1
+        assert [json.loads(c.data)["eventId"] for c in calls] == ["evt_old"]
+        assert calls[0].full_url == "https://dest-a.invalid/v1/telemetry"
+        assert calls[0].get_header("Authorization") == \
+            "Bearer synthetic-token-a"
+        pending = [e for e in store.list_outbox(TENANT, db_path=db)
+                   if e["delivered"] == 0]
+        assert [e["event_id"] for e in pending] == ["evt_new"]
+
+    def test_legacy_unbound_row_refuses_until_audited_rebind(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch, audit: list[dict]
+    ) -> None:
+        """Rows persisted before the binding columns exist get NO implicit
+        destination — controlled refusal until an admin rebinds explicitly."""
+        from openexecutive.bo.routing import delivery
+
+        monkeypatch.setenv("BO_TELEMETRY_TOKEN", "synthetic-token-a")
+        calls = self._capture(monkeypatch)
+        adapter = self._http_adapter(
+            monkeypatch, "https://dest-a.invalid/v1/telemetry",
+            "synthetic-token-a")
+
+        store.enqueue_outbox(
+            TENANT, "models", "ref-legacy",
+            {"schemaVersion": "bo.model-observation.v1",
+             "eventId": "evt_legacy", "tenantRef": TENANT},
+            db_path=db)
+        # Simulate a pre-migration row: no destination association at all.
+        with bo_db.get_conn(db) as conn:
+            conn.execute(
+                "UPDATE bo_telemetry_outbox SET dest_bound = NULL, "
+                "dest_endpoint = NULL, dest_ref = NULL")
+
+        res = delivery.deliver_pending(TENANT, adapter=adapter, db_path=db)
+        assert res["sent"] == 0 and res["failed"] == 1
+        assert calls == []  # never delivered to ANY guessed destination
+        entry = store.list_outbox(TENANT, db_path=db)[0]
+        assert entry["delivered"] == 0
+        assert "rebind" in (entry["last_error"] or "")
+
+        # Explicit, audited rebind to the tenant's CURRENT effective config.
+        out = store.rebind_outbox(
+            TENANT, actor="admin@t", reason="destinație nouă după migrare",
+            db_path=db)
+        assert out["rebound"] == 1
+        assert any(a["event_type"] == "bo_outbox_rebind" for a in audit)
+
+        res = delivery.deliver_pending(TENANT, adapter=adapter, db_path=db)
+        assert res["sent"] == 1
+        assert calls[0].full_url == "https://dest-a.invalid/v1/telemetry"
+
+    def test_bound_row_with_missing_credential_never_sends(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bound to B + provisioned ref; the env vanishes before delivery →
+        controlled refusal, and the bootstrap token is never substituted."""
+        from openexecutive.bo.routing import delivery
+
+        monkeypatch.setenv("BO_TELEMETRY_TOKEN", "synthetic-token-a")
+        monkeypatch.setenv("TEL_DEST_B", "synthetic-token-b")
+        monkeypatch.setenv("BO_TELEMETRY_SECRET_REFS", "TEL_DEST_B")
+        calls = self._capture(monkeypatch)
+        adapter = self._http_adapter(
+            monkeypatch, "https://dest-a.invalid/v1/telemetry",
+            "synthetic-token-a")
+
+        versions: dict = {}
+        self._set(TENANT, "bo.telemetry.endpoint",
+                  "https://dest-b.invalid/v1/telemetry", db, versions)
+        self._set(TENANT, "bo.telemetry.token_ref", "TEL_DEST_B", db, versions)
+        store.enqueue_outbox(
+            TENANT, "models", "ref-b",
+            {"schemaVersion": "bo.model-observation.v1",
+             "eventId": "evt_b", "tenantRef": TENANT},
+            db_path=db)
+
+        monkeypatch.delenv("TEL_DEST_B")  # credential de-provisioned
+        res = delivery.deliver_pending(TENANT, adapter=adapter, db_path=db)
+        assert res["sent"] == 0 and res["failed"] == 1
+        assert calls == []  # zero network, zero credential substitution
+        entry = store.list_outbox(TENANT, db_path=db)[0]
+        assert entry["delivered"] == 0
+        assert entry["dest_endpoint"] == "https://dest-b.invalid/v1/telemetry"
+        assert entry["dest_ref"] == "TEL_DEST_B"
+
+    def test_execution_rows_bind_guardian_destination(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """execution-kind envelopes bind the GUARDIAN channel (bo.exec.*),
+        not the telemetry one — authority separation preserved."""
+        from openexecutive.bo.routing import delivery
+
+        monkeypatch.setenv("BO_GUARDIAN_TOKEN", "synthetic-guardian-token")
+        monkeypatch.delenv("BO_TELEMETRY_ENDPOINT", raising=False)
+        calls = self._capture(monkeypatch)
+        adapter = self._http_adapter(
+            monkeypatch, "https://dest-a.invalid/v1/telemetry",
+            "synthetic-token-a")
+        versions: dict = {}
+        self._set(TENANT, "bo.exec.guardian_endpoint",
+                  "https://guardian.invalid", db, versions)
+
+        store.enqueue_outbox(
+            TENANT, "execution", "run-1",
+            {"schemaVersion": "bo.execution-control.event.v1",
+             "eventId": "evt_exec", "tenantRef": TENANT},
+            db_path=db)
+        res = delivery.deliver_pending(TENANT, adapter=adapter, db_path=db)
+        assert res["sent"] == 1
+        assert calls[0].full_url == \
+            "https://guardian.invalid/v1/execution-events"
+        assert calls[0].get_header("Authorization") == \
+            "Bearer synthetic-guardian-token"
+
+    def test_execution_binding_records_effective_bootstrap_ref(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Gate deployment: only BO_TELEMETRY_* provisioned, no
+        BO_GUARDIAN_TOKEN. The bound row must record the ref that
+        actually supplies the token — not a ref that never resolves."""
+        from openexecutive.bo.routing import delivery
+
+        monkeypatch.delenv("BO_GUARDIAN_TOKEN", raising=False)
+        monkeypatch.setenv("BO_TELEMETRY_TOKEN", "synthetic-gate-token")
+        monkeypatch.setenv(
+            "BO_TELEMETRY_ENDPOINT", "https://gate.invalid/v1/telemetry")
+        calls = self._capture(monkeypatch)
+        adapter = self._http_adapter(
+            monkeypatch, "https://gate.invalid/v1/telemetry",
+            "synthetic-gate-token")
+
+        store.enqueue_outbox(
+            TENANT, "execution", "run-1",
+            {"schemaVersion": "bo.execution-control.event.v1",
+             "eventId": "evt_exec", "tenantRef": TENANT},
+            db_path=db)
+        row = store.list_outbox(TENANT, db_path=db)[0]
+        assert row["dest_ref"] == "BO_TELEMETRY_TOKEN"
+        res = delivery.deliver_pending(TENANT, adapter=adapter, db_path=db)
+        assert res["sent"] == 1
+        assert calls[0].full_url == \
+            "https://gate.invalid/v1/execution-events"
+        assert calls[0].get_header("Authorization") == \
+            "Bearer synthetic-gate-token"
+
+    def test_administered_guardian_endpoint_never_inherits_bootstrap(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Administered Guardian endpoint + guardian ref missing from env:
+        the bootstrap BO_TELEMETRY_TOKEN is NEVER substituted — the row
+        stays pending until the recorded ref is provisioned or rebound."""
+        from openexecutive.bo.routing import delivery
+
+        monkeypatch.delenv("BO_GUARDIAN_TOKEN", raising=False)
+        monkeypatch.setenv("BO_TELEMETRY_TOKEN", "synthetic-gate-token")
+        calls = self._capture(monkeypatch)
+        adapter = self._http_adapter(
+            monkeypatch, "https://gate.invalid/v1/telemetry",
+            "synthetic-gate-token")
+        self._set(TENANT, "bo.exec.guardian_endpoint",
+                  "https://admin-guardian.invalid", db, {})
+
+        store.enqueue_outbox(
+            TENANT, "execution", "run-1",
+            {"schemaVersion": "bo.execution-control.event.v1",
+             "eventId": "evt_exec", "tenantRef": TENANT},
+            db_path=db)
+        res = delivery.deliver_pending(TENANT, adapter=adapter, db_path=db)
+        assert res["sent"] == 0 and res["failed"] == 1
+        assert calls == []  # zero network — credential never substituted
+        entry = store.list_outbox(TENANT, db_path=db)[0]
+        assert entry["delivered"] == 0
+        assert entry["dest_endpoint"] == "https://admin-guardian.invalid"
+        assert entry["dest_ref"] == "BO_GUARDIAN_TOKEN"
+
+    def test_sink_bound_row_refuses_later_http_destination(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An envelope queued while telemetry was a sink is bound to
+        ('', ''): a LATER administered http destination must not receive
+        it — controlled refusal until an explicit rebind."""
+        from openexecutive.bo.routing import delivery
+        from openexecutive.bo.telemetry import adapter as adapter_mod
+
+        adapter = adapter_mod.TelemetryAdapter(
+            enabled=True, transport=adapter_mod.BufferedTransport())
+        monkeypatch.setattr(adapter_mod, "_adapter", adapter)
+        store.enqueue_outbox(
+            TENANT, "models", "ref-sink",
+            {"schemaVersion": "bo.model-observation.v1",
+             "eventId": "evt_sink", "tenantRef": TENANT},
+            db_path=db)
+        row = store.list_outbox(TENANT, db_path=db)[0]
+        assert row["dest_endpoint"] == "" and row["dest_bound"] == 1
+
+        # Admin now configures a real HTTP destination.
+        monkeypatch.setenv("TEL_DEST_B", "synthetic-token-b")
+        monkeypatch.setenv("BO_TELEMETRY_SECRET_REFS", "TEL_DEST_B")
+        calls = self._capture(monkeypatch)
+        versions: dict = {}
+        self._set(TENANT, "bo.telemetry.transport", "http", db, versions)
+        self._set(TENANT, "bo.telemetry.endpoint",
+                  "https://dest-b.invalid/v1/telemetry", db, versions)
+        self._set(TENANT, "bo.telemetry.token_ref", "TEL_DEST_B", db, versions)
+
+        res = delivery.deliver_pending(TENANT, adapter=adapter, db_path=db)
+        assert res["sent"] == 0 and res["failed"] == 1
+        assert calls == []  # never re-routed to the new destination
+        entry = store.list_outbox(TENANT, db_path=db)[0]
+        assert "rebind" in (entry["last_error"] or "")
+
+    def test_unbound_legacy_row_claimed_once_no_attempt_burn(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A permanently-undeliverable legacy row records its refusal once
+        and is then left alone — no attempt-cap burn, no queue starvation."""
+        from openexecutive.bo.routing import delivery
+
+        monkeypatch.setenv("BO_TELEMETRY_TOKEN", "synthetic-token-a")
+        calls = self._capture(monkeypatch)
+        adapter = self._http_adapter(
+            monkeypatch, "https://dest-a.invalid/v1/telemetry",
+            "synthetic-token-a")
+        store.enqueue_outbox(
+            TENANT, "models", "ref-legacy",
+            {"schemaVersion": "bo.model-observation.v1",
+             "eventId": "evt_legacy", "tenantRef": TENANT},
+            db_path=db)
+        store.enqueue_outbox(
+            TENANT, "models", "ref-ok",
+            {"schemaVersion": "bo.model-observation.v1",
+             "eventId": "evt_ok", "tenantRef": TENANT},
+            db_path=db)
+        with bo_db.get_conn(db) as conn:
+            conn.execute(
+                "UPDATE bo_telemetry_outbox SET dest_bound = NULL, "
+                "dest_endpoint = NULL, dest_ref = NULL "
+                "WHERE event_id = 'evt_legacy'")
+
+        res = delivery.deliver_pending(TENANT, adapter=adapter, db_path=db)
+        assert res["sent"] == 1 and res["failed"] == 1
+        res = delivery.deliver_pending(TENANT, adapter=adapter, db_path=db)
+        assert res["claimed"] == 0  # refusal recorded once, then left alone
+        assert len(calls) == 1
+
+    def test_rebind_conflicts_and_lease_safety(
+        self, db: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Store-level guards: reason mandatory, delivered rows conflict,
+        actively-leased rows are skipped instead of rebound mid-flight."""
+        monkeypatch.setenv("BO_TELEMETRY_TOKEN", "synthetic-token-a")
+        self._capture(monkeypatch)
+        adapter = self._http_adapter(
+            monkeypatch, "https://dest-a.invalid/v1/telemetry",
+            "synthetic-token-a")
+        store.enqueue_outbox(
+            TENANT, "models", "ref-1",
+            {"schemaVersion": "bo.model-observation.v1",
+             "eventId": "evt_1", "tenantRef": TENANT},
+            db_path=db)
+        store.enqueue_outbox(
+            TENANT, "models", "ref-2",
+            {"schemaVersion": "bo.model-observation.v1",
+             "eventId": "evt_2", "tenantRef": TENANT},
+            db_path=db)
+
+        with pytest.raises(store.ConflictError):
+            store.rebind_outbox(
+                TENANT, actor="admin@t", reason="   ", db_path=db)
+
+        # Delivered rows are history — naming one is a conflict.
+        from openexecutive.bo.routing import delivery
+
+        res = delivery.deliver_pending(TENANT, adapter=adapter, db_path=db)
+        assert res["sent"] == 2
+        with pytest.raises(store.ConflictError):
+            store.rebind_outbox(
+                TENANT, event_ids=["evt_1"], actor="admin@t",
+                reason="test", db_path=db)
+
+        # A row under an active lease is skipped, not rebound mid-flight.
+        store.enqueue_outbox(
+            TENANT, "models", "ref-3",
+            {"schemaVersion": "bo.model-observation.v1",
+             "eventId": "evt_3", "tenantRef": TENANT},
+            db_path=db)
+        claimed = store.claim_outbox(
+            TENANT, worker_id="w1", limit=10, lease_s=300, db_path=db)
+        assert [r["event_id"] for r in claimed] == ["evt_3"]
+        out = store.rebind_outbox(
+            TENANT, event_ids=["evt_3"], actor="admin@t",
+            reason="test", db_path=db)
+        assert out["rebound"] == 0 and out["skipped_leased"] == 1
 
 
 # --------------------------------------------------------------------------- #

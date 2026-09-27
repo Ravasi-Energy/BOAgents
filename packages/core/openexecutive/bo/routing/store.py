@@ -127,6 +127,10 @@ def initialize_db(db_path: Path | None = None) -> None:
                 last_error   TEXT,
                 lease_owner  TEXT,
                 lease_until  TEXT,
+                retry_base   INTEGER NOT NULL DEFAULT 0,
+                dest_bound   INTEGER,
+                dest_endpoint TEXT,
+                dest_ref     TEXT,
                 PRIMARY KEY (tenant, event_id)
             )
             """
@@ -134,6 +138,17 @@ def initialize_db(db_path: Path | None = None) -> None:
         columns = {r[1] for r in conn.execute("PRAGMA table_info(bo_telemetry_outbox)")}
         if "retry_base" not in columns:
             conn.execute("ALTER TABLE bo_telemetry_outbox ADD COLUMN retry_base INTEGER NOT NULL DEFAULT 0")
+        # PILOT-06: persistent destination binding. Rows carry the endpoint +
+        # SecretRef resolved at enqueue time; a settings change never
+        # re-routes a persisted envelope. dest_bound NULL = pre-migration
+        # legacy row — refused at delivery until an explicit audited rebind.
+        if "dest_bound" not in columns:
+            conn.execute(
+                "ALTER TABLE bo_telemetry_outbox ADD COLUMN dest_bound INTEGER")
+            conn.execute(
+                "ALTER TABLE bo_telemetry_outbox ADD COLUMN dest_endpoint TEXT")
+            conn.execute(
+                "ALTER TABLE bo_telemetry_outbox ADD COLUMN dest_ref TEXT")
         conn.execute("""CREATE TABLE IF NOT EXISTS bo_outbox_retries (
             tenant TEXT NOT NULL, event_id TEXT NOT NULL, series INTEGER NOT NULL,
             attempts_before INTEGER NOT NULL, last_error TEXT, reason TEXT NOT NULL,
@@ -374,6 +389,35 @@ def update_entry(
 # Observations
 # --------------------------------------------------------------------------- #
 
+def _dest_binding(tenant: str, kind: str, db_path: Path | None) -> tuple[str, str]:
+    """The (endpoint, secret_ref) an envelope of ``kind`` is bound to.
+
+    Recorded on the row at enqueue time: delivery can only ever reach that
+    destination, with a credential resolved strictly from that reference —
+    a later settings change does not re-route a persisted envelope, and no
+    other credential is ever substituted.
+
+    ``kind="execution"`` binds the Guardian authority channel
+    (``bo.exec.*``); every other kind binds the telemetry channel
+    (``bo.telemetry.*`` effective resolution). ``("", "")`` means "no HTTP
+    destination recorded at enqueue" (disabled/sink transport) — delivery
+    then follows the current effective config at send time. Never raises:
+    a resolution hiccup binds ``("", "")`` rather than losing the envelope."""
+    try:
+        if kind == "execution":
+            from openexecutive.bo.execution import guardian
+
+            return guardian.binding_for(tenant, db_path)
+        from openexecutive.bo.telemetry.adapter import get_adapter
+
+        cfg = get_adapter().resolve(tenant, db_path)
+        if cfg.transport_kind == "http" and cfg.endpoint:
+            return cfg.endpoint, cfg.credential_ref
+        return "", ""
+    except Exception:  # noqa: BLE001 — enqueue must survive config hiccups
+        return "", ""
+
+
 def record_observation(
     tenant: str,
     obs: dict[str, Any],
@@ -385,6 +429,7 @@ def record_observation(
     atomically — BEFORE any send attempt (REM-01). The persisted envelope,
     including its ``eventId``, is what every retry re-sends unchanged."""
     obs_id = f"obs_{uuid.uuid4().hex[:20]}"
+    dest_endpoint, dest_ref = _dest_binding(tenant, "routing", db_path)
     with get_conn(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         conn.execute(
@@ -425,12 +470,14 @@ def record_observation(
         conn.execute(
             """
             INSERT INTO bo_telemetry_outbox (
-                event_id, tenant, kind, ref_id, envelope, created_at
-            ) VALUES (?, ?, 'routing', ?, ?, ?)
+                event_id, tenant, kind, ref_id, envelope, created_at,
+                dest_endpoint, dest_ref, dest_bound
+            ) VALUES (?, ?, 'routing', ?, ?, ?, ?, ?, 1)
             """,
             (
                 envelope["eventId"], tenant, obs_id,
                 json.dumps(envelope), obs["occurred_at"],
+                dest_endpoint, dest_ref,
             ),
         )
     return obs_id
@@ -448,20 +495,23 @@ def enqueue_outbox(
     *,
     db_path: Path | None = None,
 ) -> bool:
-    """Queue an envelope for delivery. Returns False when an identical
+    """Queue an envelope for delivery — bound to the destination and
+    SecretRef effective at enqueue time. Returns False when an identical
     pending (tenant, kind, ref_id) row already exists — catalog syncs for
     the same catalog version coalesce instead of queueing up."""
+    dest_endpoint, dest_ref = _dest_binding(tenant, kind, db_path)
     try:
         with get_conn(db_path) as conn:
             conn.execute(
                 """
                 INSERT INTO bo_telemetry_outbox (
-                    event_id, tenant, kind, ref_id, envelope, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    event_id, tenant, kind, ref_id, envelope, created_at,
+                    dest_endpoint, dest_ref, dest_bound
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
                 """,
                 (
                     envelope["eventId"], tenant, kind, ref_id,
-                    json.dumps(envelope), _now(),
+                    json.dumps(envelope), _now(), dest_endpoint, dest_ref,
                 ),
             )
     except sqlite3.IntegrityError:
@@ -475,29 +525,41 @@ def claim_outbox(
     worker_id: str,
     limit: int,
     lease_s: int,
+    kinds: set[str] | None = None,
     db_path: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Atomically lease up to ``limit`` pending envelopes for this worker.
 
     ``BEGIN IMMEDIATE`` makes the claim race-safe across threads AND
     processes: a second flush sees either rows already leased (skipped) or
-    rows whose lease expired (crash between receive and confirm)."""
+    rows whose lease expired (crash between receive and confirm).
+
+    Legacy rows without a destination binding (``dest_bound`` NULL) are
+    claimed exactly once — long enough to record the refusal reason —
+    then left alone: a permanently-undeliverable row must not burn the
+    attempt cap nor starve bound rows ahead of it in the queue."""
     now = _now()
     until = (datetime.now(UTC) + timedelta(seconds=lease_s)).isoformat(
         timespec="milliseconds"
     ).replace("+00:00", "Z")
+    query = (
+        "SELECT event_id, kind, ref_id, envelope, attempts, retry_base,"
+        "       dest_endpoint, dest_ref, dest_bound"
+        " FROM bo_telemetry_outbox"
+        " WHERE tenant = ? AND delivered = 0"
+        "   AND (lease_until IS NULL OR lease_until < ?)"
+        "   AND (COALESCE(dest_bound, 0) = 1 OR attempts = 0)"
+    )
+    params: list[Any] = [tenant, now]
+    if kinds is not None:
+        placeholders = ",".join("?" for _ in kinds)
+        query += f" AND kind IN ({placeholders})"
+        params += sorted(kinds)
+    query += " ORDER BY created_at LIMIT ?"
+    params.append(limit)
     with get_conn(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
-        rows = conn.execute(
-            """
-            SELECT event_id, kind, ref_id, envelope, attempts, retry_base
-            FROM bo_telemetry_outbox
-            WHERE tenant = ? AND delivered = 0
-              AND (lease_until IS NULL OR lease_until < ?)
-            ORDER BY created_at LIMIT ?
-            """,
-            (tenant, now, limit),
-        ).fetchall()
+        rows = conn.execute(query, params).fetchall()
         for row in rows:
             conn.execute(
                 "UPDATE bo_telemetry_outbox SET lease_owner = ?, "
@@ -513,6 +575,9 @@ def claim_outbox(
             "envelope": json.loads(r["envelope"]),
             "attempts": int(r["attempts"]) + 1,
             "series_attempts": int(r["attempts"]) + 1 - int(r["retry_base"]),
+            "dest_endpoint": r["dest_endpoint"],
+            "dest_ref": r["dest_ref"],
+            "dest_bound": bool(r["dest_bound"]),
         }
         for r in rows
     ]
@@ -562,7 +627,8 @@ def list_outbox(
     that would be re-sent (conflict/debugging surface)."""
     query = (
         "SELECT event_id, kind, ref_id, envelope, created_at, attempts, retry_base, "
-        "delivered, last_error, lease_owner, lease_until "
+        "delivered, last_error, lease_owner, lease_until, "
+        "dest_endpoint, dest_ref, dest_bound "
         "FROM bo_telemetry_outbox WHERE tenant = ?"
     )
     params: list[Any] = [tenant]
@@ -604,6 +670,11 @@ def list_outbox(
             "last_error": r["last_error"],
             "lease_owner": r["lease_owner"],
             "lease_until": r["lease_until"],
+            # Destination binding recorded at enqueue — the SecretRef NAME,
+            # never the credential value.
+            "dest_endpoint": r["dest_endpoint"],
+            "dest_ref": r["dest_ref"],
+            "dest_bound": bool(r["dest_bound"]),
         })
     return out
 
@@ -677,12 +748,100 @@ def outbox_state(
     return {r["event_id"]: int(r["delivered"]) for r in rows}
 
 
+def rebind_outbox(
+    tenant: str,
+    *,
+    event_ids: list[str] | None = None,
+    actor: str,
+    reason: str,
+    db_path: Path | None = None,
+) -> dict[str, Any]:
+    """Explicit, audited re-association of undelivered envelopes with the
+    tenant's CURRENT effective destination for their kind — the only
+    authorized way to move backlog or legacy rows that carry no binding.
+
+    Targets pending and dead-lettered rows (``delivered`` 0/2); already
+    delivered envelopes are history and never move — naming one is a
+    conflict. Rows held by an active lease (a send may be in flight to
+    the recorded binding) are skipped, not touched. Envelope bytes and
+    identities are untouched — only ``dest_endpoint``/``dest_ref``/
+    ``dest_bound`` are rewritten. ``event_ids`` scopes the operation;
+    omitted means every undelivered row of the tenant."""
+    if not reason.strip():
+        raise ConflictError("motivul reasocierii este obligatoriu")
+    now = _now()
+    skipped = 0
+    with get_conn(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if event_ids is None:
+            rows = conn.execute(
+                "SELECT event_id, kind FROM bo_telemetry_outbox "
+                "WHERE tenant = ? AND delivered <> 1 "
+                "AND (lease_until IS NULL OR lease_until < ?)",
+                (tenant, now),
+            ).fetchall()
+        else:
+            rows = []
+            if event_ids:
+                placeholders = ",".join("?" for _ in event_ids)
+                found_rows = conn.execute(
+                    "SELECT event_id, kind, delivered, lease_until "
+                    "FROM bo_telemetry_outbox "
+                    f"WHERE tenant = ? AND event_id IN ({placeholders})",
+                    (tenant, *event_ids),
+                ).fetchall()
+                found = {r["event_id"] for r in found_rows}
+                missing = [e for e in event_ids if e not in found]
+                if missing:
+                    raise NotFoundError(missing[0])
+                if any(int(r["delivered"]) == 1 for r in found_rows):
+                    raise ConflictError(
+                        "plic deja livrat — istoricul nu se reasociază"
+                    )
+                for r in found_rows:
+                    if r["lease_until"] is not None and r["lease_until"] > now:
+                        skipped += 1
+                    else:
+                        rows.append({"event_id": r["event_id"],
+                                     "kind": r["kind"]})
+        destinations: dict[str, set[str]] = {}
+        for row in rows:
+            endpoint, ref = _dest_binding(tenant, row["kind"], db_path)
+            conn.execute(
+                "UPDATE bo_telemetry_outbox SET dest_endpoint = ?, "
+                "dest_ref = ?, dest_bound = 1, lease_owner = NULL, "
+                "lease_until = NULL WHERE tenant = ? AND event_id = ?",
+                (endpoint, ref, tenant, row["event_id"]),
+            )
+            destinations.setdefault(row["kind"], set()).add(
+                f"{endpoint or 'sink'}|{ref or 'n/a'}")
+    from openexecutive.bo.execution.store import _audit as audit
+
+    audit(
+        tenant,
+        "bo_outbox_rebind",
+        {
+            "rebound": len(rows),
+            "skipped_leased": skipped,
+            "reason": reason[:300],
+            # SecretRef names + endpoints only — never credential material.
+            "destinations": {k: sorted(v) for k, v in destinations.items()},
+            "event_ids": list(event_ids) if event_ids is not None else None,
+        },
+        actor=actor,
+    )
+    return {"rebound": len(rows), "skipped_leased": skipped}
+
+
 def outbox_stats(tenant: str, db_path: Path | None = None) -> dict[str, Any]:
     with get_conn(db_path) as conn:
         row = conn.execute(
             "SELECT COUNT(*) AS total, "
             "SUM(CASE WHEN delivered = 0 THEN 1 ELSE 0 END) AS pending, "
             "SUM(CASE WHEN delivered = 2 THEN 1 ELSE 0 END) AS dead, "
+            "SUM(CASE WHEN delivered <> 1 AND "
+            "         COALESCE(dest_bound, 0) = 0 THEN 1 ELSE 0 END)"
+            " AS unbound, "
             "SUM(attempts) AS attempts "
             "FROM bo_telemetry_outbox WHERE tenant = ?",
             (tenant,),
@@ -696,6 +855,7 @@ def outbox_stats(tenant: str, db_path: Path | None = None) -> dict[str, Any]:
         "outbox_total": int(row["total"] or 0),
         "outbox_pending": int(row["pending"] or 0),
         "outbox_dead": int(row["dead"] or 0),
+        "outbox_unbound": int(row["unbound"] or 0),
         "outbox_attempts": int(row["attempts"] or 0),
         "outbox_last_error": last["last_error"] if last else None,
     }
@@ -709,6 +869,21 @@ def outbox_tenants(db_path: Path | None = None) -> list[str]:
             "WHERE delivered = 0"
         ).fetchall()
     return [r["tenant"] for r in rows]
+
+
+def has_pending_kind(
+    tenant: str, kind: str, db_path: Path | None = None
+) -> bool:
+    """True when the tenant holds at least one pending row of ``kind`` —
+    lets the worker drain Guardian-authority envelopes even while the
+    telemetry channel is administered off."""
+    with get_conn(db_path) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM bo_telemetry_outbox "
+            "WHERE tenant = ? AND kind = ? AND delivered = 0 LIMIT 1",
+            (tenant, kind),
+        ).fetchone()
+    return row is not None
 
 
 def _obs_from_row(row: Any) -> dict[str, Any]:
@@ -839,9 +1014,12 @@ __all__ = [
     "list_catalog",
     "list_observations",
     "observation_stats",
+    "list_outbox",
     "outbox_state",
     "outbox_stats",
     "outbox_tenants",
+    "retry_outbox_entry",
+    "rebind_outbox",
     "record_observation",
     "resolve_outbox",
     "sweep_observations",

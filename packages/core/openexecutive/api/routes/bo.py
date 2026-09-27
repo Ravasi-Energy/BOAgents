@@ -372,6 +372,11 @@ def telemetry_status(ident: BoIdentity) -> Any:
             "endpoint": cfg.endpoint or None,
             "token_ref": cfg.token_ref,
             "token_configured": cfg.token_configured,
+            # Credential↔destination binding state — the SecretRef NAME
+            # only, never the secret. „endpoint_without_ref"/
+            # „unprovisioned"/„missing" mean delivery refuses closed.
+            "credential_ref": cfg.credential_ref,
+            "credential_state": cfg.credential_state,
             "incomplete": cfg.enabled
             and cfg.transport_kind == "http"
             and cfg.transport is None,
@@ -949,6 +954,29 @@ def retry_outbox(
 
     return routing_store.retry_outbox_entry(
         ident.tenant, event_id, reason=body.reason, actor=ident.actor,
+    )
+
+
+class _RebindBody(BaseModel):
+    reason: str = Field(min_length=1, max_length=300)
+    event_ids: list[Annotated[str, Field(max_length=128)]] | None = Field(
+        default=None, max_length=200
+    )
+
+
+@router.post("/execution/outbox/rebind")
+def rebind_outbox(body: _RebindBody, ident: BoIdentity) -> Any:
+    """Explicit, audited re-association of undelivered envelopes with the
+    tenant's CURRENT destination for their kind — the only authorized way
+    to move backlog or legacy rows that carry no recorded binding.
+    Envelope bytes and identities are never rewritten; delivered rows are
+    untouched. Admin-only, reason mandatory."""
+    bo_identity.require(ident, "execution:write")
+    from openexecutive.bo.routing import store as routing_store
+
+    return routing_store.rebind_outbox(
+        ident.tenant, event_ids=body.event_ids, actor=ident.actor,
+        reason=body.reason,
     )
 
 

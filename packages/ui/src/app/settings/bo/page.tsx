@@ -348,7 +348,7 @@ export default function BoSettingsPage() {
         </div>
         <p className="bo-hint" style={{ marginTop: 8 }}>
           {telemetry?.effective
-            ? `Activ acum: ${telemetry.effective.enabled ? "pornit" : "oprit"} · transport ${telemetry.effective.transport}${telemetry.effective.endpoint ? ` → ${telemetry.effective.endpoint}` : ""} · token ${telemetry.effective.token_ref}: ${telemetry.effective.token_configured ? "configurat pe server" : "lipsă"}.`
+            ? `Activ acum: ${telemetry.effective.enabled ? "pornit" : "oprit"} · transport ${telemetry.effective.transport}${telemetry.effective.endpoint ? ` → ${telemetry.effective.endpoint}` : ""} · token ${telemetry.effective.token_ref}: ${telemetry.effective.token_configured ? "configurat pe server" : "lipsă"}${telemetry.effective.credential_state && telemetry.effective.credential_state !== "configured" && telemetry.effective.credential_state !== "none" ? ` · credential: ${telemetry.effective.credential_state}` : ""}.`
             : telemetry
               ? `${telemetry.transport} · emise: ${telemetry.emitted} · respinse: ${telemetry.rejected}.`
               : "Starea adaptorului nu a putut fi citită."}
@@ -357,6 +357,25 @@ export default function BoSettingsPage() {
           <InlineAlert kind="warn">
             Transport http ales fără endpoint sau token — plicurile rămân în
             coadă până la completarea configurației.
+          </InlineAlert>
+        ) : null}
+        {telemetry?.effective?.credential_state === "endpoint_without_ref" ? (
+          <InlineAlert kind="warn">
+            Endpoint administrat fără referință de credential proprie —
+            livrarea refuză controlat; tokenul bootstrap nu urmează
+            plicurile pe destinații administrate. Salvează o referință
+            provisionată (BO_TELEMETRY_SECRET_REFS).
+          </InlineAlert>
+        ) : null}
+        {telemetry?.effective?.credential_state === "unprovisioned" ||
+        telemetry?.effective?.credential_state === "missing" ? (
+          <InlineAlert kind="warn">
+            Referința de credential{" "}
+            {telemetry.effective.credential_state === "unprovisioned"
+              ? "nu este în lista provisionată de operator"
+              : "nu are valoare în mediul procesului"}{" "}
+            — livrarea rămâne refuzată până la provisionare; niciun alt
+            token nu este substituit.
           </InlineAlert>
         ) : null}
         <p className="bo-hint" style={{ marginTop: 8 }}>

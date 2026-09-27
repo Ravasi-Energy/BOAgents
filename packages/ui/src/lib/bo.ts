@@ -254,6 +254,12 @@ export interface BoTelemetryStatus {
     endpoint: string | null;
     token_ref: string;
     token_configured: boolean;
+    /** Legătura credential↔destinație: numele SecretRef-ului sancționat
+     *  pentru endpointul efectiv (gol = niciun credential nu poate ajunge
+     *  acolo) și starea ei — „endpoint_without_ref"/„unprovisioned"/
+     *  „missing" înseamnă refuz controlat de livrare. Niciodată secretul. */
+    credential_ref?: string;
+    credential_state?: string;
     incomplete: boolean;
     source: Record<string, string>;
   };
@@ -458,6 +464,7 @@ export interface BoRoutingStatus {
   outbox_total: number;
   outbox_pending: number;
   outbox_dead: number;
+  outbox_unbound?: number;
   outbox_attempts: number;
   outbox_last_error: string | null;
   delivery: {
@@ -814,11 +821,17 @@ export interface BoOutboxEntry {
   last_error: string | null;
   lease_owner: string | null;
   lease_until: string | null;
+  /** Destinația înregistrată la enqueue: endpoint + NUMELE SecretRef-ului
+   *  (niciodată secretul). dest_bound=false = rând legacy pre-migrare —
+   *  livrarea refuză până la un rebind explicit, auditat. */
+  dest_endpoint: string | null;
+  dest_ref: string | null;
+  dest_bound: boolean;
 }
 
 export function listBoOutbox(
   delivered?: number,
-): Promise<{ entries: BoOutboxEntry[]; stats: Record<string, number> }> {
+): Promise<{ entries: BoOutboxEntry[]; stats: Record<string, number | string | null> }> {
   return req(
     `/execution/outbox${delivered !== undefined ? `?delivered=${delivered}` : ""}`,
   );
@@ -832,6 +845,20 @@ export function retryBoOutbox(
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ reason }),
+  });
+}
+
+/** Reasociere explicită, auditată: plicurile nelivrate (inclusiv rândurile
+ *  legacy fără legătură) primesc destinația curent efectivă pe kind-ul lor.
+ *  Octeții și identitățile nu se rescriu. Doar admin. */
+export function rebindBoOutbox(
+  reason: string,
+  eventIds?: string[],
+): Promise<{ rebound: number; skipped_leased?: number }> {
+  return req("/execution/outbox/rebind", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ reason, event_ids: eventIds ?? null }),
   });
 }
 

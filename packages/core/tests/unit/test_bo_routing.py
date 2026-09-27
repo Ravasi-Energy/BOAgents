@@ -1655,14 +1655,112 @@ class TestRebindAuditDurability:
         intent = store.pending_audit_intents(db_path=db)
         assert intent == []  # delivered
         # Simulate the crash window: journal has the row, intent reverts to
-        # pending (mark never committed).
+        # pending (mark never committed); the dead drainer's lease expired.
         with bo_db.get_conn(db) as conn:
             conn.execute(
                 "UPDATE bo_audit_intents SET status = 'pending', "
-                "delivered_at = NULL")
+                "delivered_at = NULL, drain_owner = NULL, "
+                "drain_until = '2020-01-01T00:00:00Z'")
         res = store.drain_audit_intents(db_path=db)
         assert res["delivered"] == 1
         with audit_logger._get_conn(journal._db_path) as conn:
             assert conn.execute(
                 "SELECT COUNT(*) FROM audit_log "
                 "WHERE event_type = 'bo_outbox_rebind'").fetchone()[0] == 1
+
+    def test_drain_claim_is_exclusive(
+        self, db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """PILOT-08/AA-A01-02: the atomic claim — not the journal read —
+        is the single-emitter gate. An intent held by a live drain lease
+        is skipped, never emitted twice."""
+        from openexecutive.audit import logger as audit_logger
+
+        journal = self._journal(tmp_path, monkeypatch)
+        self._legacy_row(db)
+        # Journal down at rebind time → intent stays pending for the test.
+        monkeypatch.setattr(
+            audit_logger.AuditLogger, "log", lambda *a, **kw: None)
+        store.rebind_outbox(
+            TENANT, actor="admin@t", reason="claim", db_path=db)
+        monkeypatch.undo()
+        journal = self._journal(tmp_path, monkeypatch)
+        iid = store.pending_audit_intents(db_path=db)[0]["intent_id"]
+        now = datetime.now(UTC).isoformat(
+            timespec="milliseconds").replace("+00:00", "Z")
+        # Another drainer holds a live claim.
+        with bo_db.get_conn(db) as conn:
+            assert store._claim_audit_intent(conn, iid, "other", now)
+            assert not store._claim_audit_intent(conn, iid, "me", now)
+        res = store.drain_audit_intents(db_path=db, owner="me")
+        assert res["delivered"] == 0 and res["skipped"] == 1
+        with audit_logger._get_conn(journal._db_path) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM audit_log").fetchone()[0] == 0
+        # Lease expired → reclaimable; emit happens exactly once now.
+        with bo_db.get_conn(db) as conn:
+            conn.execute(
+                "UPDATE bo_audit_intents SET drain_until = '2020-01-01T00:00:00Z'")
+        res = store.drain_audit_intents(db_path=db, owner="me")
+        assert res["delivered"] == 1
+        with audit_logger._get_conn(journal._db_path) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM audit_log").fetchone()[0] == 1
+
+    def test_failed_intents_parked_then_requeued(
+        self, db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A dead journal parks the intent as ``failed`` after the
+        administered attempt budget — excluded from auto-drain (no
+        unlimited loop), durable evidence; the explicit requeue recovers
+        it once the journal is back."""
+        from openexecutive.audit import logger as audit_logger
+
+        journal = self._journal(tmp_path, monkeypatch)
+        self._legacy_row(db)
+        monkeypatch.setattr(
+            audit_logger.AuditLogger, "log", lambda *a, **kw: None)
+        out = store.rebind_outbox(
+            TENANT, actor="admin@t", reason="down", db_path=db)
+        assert out["audit"] == "pending"
+        # Attempt budget: 3 by default → 2 more drains park it.
+        store.drain_audit_intents(db_path=db)
+        res = store.drain_audit_intents(db_path=db)
+        assert res["failed"] == 1
+        intents = store.pending_audit_intents(db_path=db)
+        assert [i["status"] for i in intents] == ["failed"]
+        # Auto-drain must NOT loop on a parked intent.
+        res = store.drain_audit_intents(db_path=db)
+        assert res == {"delivered": 0, "failed": 0, "skipped": 0}
+        # Journal restored; explicit requeue → delivered, audited.
+        monkeypatch.undo()
+        journal = self._journal(tmp_path, monkeypatch)
+        out = store.requeue_failed_audit_intents(
+            TENANT, actor="admin@t", db_path=db)
+        assert out["requeued"] == 1
+        assert store.pending_audit_intents(db_path=db) == []
+        with audit_logger._get_conn(journal._db_path) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM audit_log").fetchone()[0] == 2
+
+    def test_drain_attempts_setting_bound(
+        self, db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The failed-threshold is administered per tenant via
+        ``bo.router.audit_drain_attempts`` (1–10) — here budget 1 parks
+        after the very first emit failure."""
+        from openexecutive.audit import logger as audit_logger
+        from openexecutive.bo.settings import store as settings_store
+
+        self._journal(tmp_path, monkeypatch)
+        settings_store.set_value(
+            TENANT, "bo.router.audit_drain_attempts", 1,
+            expected_version=0, actor="admin@t", db_path=db)
+        self._legacy_row(db)
+        monkeypatch.setattr(
+            audit_logger.AuditLogger, "log", lambda *a, **kw: None)
+        store.rebind_outbox(
+            TENANT, actor="admin@t", reason="budget", db_path=db)
+        # rebind's own drain already burned the single attempt.
+        assert [i["status"] for i in
+                store.pending_audit_intents(db_path=db)] == ["failed"]

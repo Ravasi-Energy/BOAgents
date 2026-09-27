@@ -611,6 +611,26 @@ REGISTRY: dict[str, SettingSpec] = {
             v, minimum=1, maximum=500, label="Batch-ul de livrare"
         ),
     ),
+    "bo.router.audit_drain_attempts": SettingSpec(
+        key="bo.router.audit_drain_attempts",
+        type="integer",
+        default=3,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="routing",
+        label_ro="Tentative emitere audit (drain)",
+        label_en="Audit drain emit attempts",
+        help_ro="Câte tentative de emitere către jurnal primește o intență de audit înainte de „failed” — rândul rămâne probă durabilă, nu se buclează nelimitat.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Următoarea rundă de reconciliere folosește noul prag.",
+        acceptance_ro="Intenția „failed” nu se mai reia automat — requeue explicit, auditat.",
+        validate=lambda v: _validate_int(
+            v, minimum=1, maximum=10, label="Pragul tentative audit"
+        ),
+    ),
     "bo.router.delivery_max_attempts": SettingSpec(
         key="bo.router.delivery_max_attempts",
         type="integer",

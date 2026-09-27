@@ -980,6 +980,19 @@ def rebind_outbox(body: _RebindBody, ident: BoIdentity) -> Any:
     )
 
 
+@router.post("/execution/outbox/audit-requeue")
+def audit_requeue(ident: BoIdentity) -> Any:
+    """Explicit operator recovery for parked (``failed``) audit intents —
+    they go back to ``pending`` and the drain retries them against the
+    (restored) journal. Audited like the mutation it is. Admin-only."""
+    bo_identity.require(ident, "execution:write")
+    from openexecutive.bo.routing import store as routing_store
+
+    return routing_store.requeue_failed_audit_intents(
+        ident.tenant, actor=ident.actor,
+    )
+
+
 class _WorkBody(BaseModel):
     limit: int = Field(default=5, ge=1, le=50)
     worker_id: str | None = Field(default=None, max_length=80)

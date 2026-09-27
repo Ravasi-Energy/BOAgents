@@ -22,6 +22,7 @@ import {
   pauseBoRun,
   rebindBoOutbox,
   reconcileBoRun,
+  requeueBoAuditIntents,
   resumeBoRun,
   retryBoOutbox,
   revokeBoMandate,
@@ -604,6 +605,33 @@ function OutboxSection({
     }
   }
 
+  async function requeueAudit() {
+    if (!window.confirm(
+      "Reiei intențiile de audit parcate („failed”)? Drain-ul le reemite către jurnal; operația e auditată.",
+    )) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      const out = await requeueBoAuditIntents();
+      setNotice({
+        kind: out.requeued > 0 ? "ok" : "danger",
+        text: out.requeued > 0
+          ? `${out.requeued} intenție(i) de audit relansate — reconcilierea rulează.`
+          : "Nicio intenție parcată de relansat.",
+      });
+      onChanged();
+    } catch (err) {
+      setNotice({
+        kind: "danger",
+        text: err instanceof BoApiError
+          ? `${err.status} — ${typeof err.detail === "string" ? err.detail : err.code}`
+          : "Relansarea auditului a eșuat.",
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const dead = entries.filter((e) => e.delivered === 2).length;
   const pending = entries.filter((e) => e.delivered === 0).length;
   const auditPending = Number(stats.audit_pending ?? 0);
@@ -620,6 +648,16 @@ function OutboxSection({
           ) : null}
           {auditPending > 0 ? (
             <Pill kind="warn">{auditPending} audit în așteptare</Pill>
+          ) : null}
+          {auditFailed > 0 ? (
+            <button
+              type="button"
+              className="bo-btn"
+              disabled={busy}
+              onClick={() => void requeueAudit()}
+            >
+              Reia audit eșuat
+            </button>
           ) : null}
           {pending + dead > 0 ? (
             <button

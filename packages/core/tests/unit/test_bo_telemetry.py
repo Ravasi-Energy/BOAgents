@@ -554,6 +554,38 @@ class TestSecretRefTenantScope:
         assert len(calls) == 1
         assert calls[0].get_header("Authorization") == "Bearer synthetic-new"
 
+    def test_service_bound_row_ref_rescoped_away_refuses(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AA-A01-01: the pilot/service bound path must re-check the ref
+        scope exactly like the model path — a re-scoped NAME@tenant means
+        zero traffic on the bound destination even though env exists."""
+        use_tmp_db(tmp_path, monkeypatch)
+        from openexecutive.bo.pilot import delivery as pilot_delivery
+
+        monkeypatch.setenv("BO_TELEMETRY_SECRET_REFS", "TEL_B")
+        monkeypatch.setenv("TEL_B", "synthetic-b")
+        monkeypatch.setenv("BO_TELEMETRY_TOKEN", "synthetic-bootstrap")
+        opened: list = []
+
+        def _opener(*a, **kw):  # noqa: ANN001
+            opened.append(a)
+            raise AssertionError("wire must never be reached")
+
+        monkeypatch.setattr(pilot_delivery, "build_opener", _opener)
+        envelope = {
+            "schemaVersion": "bo.service-observation.v1",
+            "eventId": "obs-revoked", "tenantRef": "tenant-b",
+        }
+        adapter = TelemetryAdapter(enabled=True, transport=NullTransport())
+        monkeypatch.setattr(pilot_delivery, "get_adapter", lambda: adapter)
+        bound = ("https://dest-b.invalid/v1/telemetry", "TEL_B")
+        monkeypatch.setenv("BO_TELEMETRY_SECRET_REFS", "TEL_B@tenant-a")
+        with pytest.raises(CredentialUnavailableError):
+            pilot_delivery.deliver(
+                "tenant-b", envelope, destination=bound)
+        assert opened == []
+
     def test_scoped_guardian_ref_rejected_for_other_tenant(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -171,8 +171,20 @@ def initialize_db(db_path: Path | None = None) -> None:
             created_at   TEXT NOT NULL,
             delivered_at TEXT,
             attempts     INTEGER NOT NULL DEFAULT 0,
-            last_error   TEXT
+            last_error   TEXT,
+            drain_owner  TEXT,
+            drain_until  TEXT
         )""")
+        # PILOT-08: drain-lease columns for pre-existing DBs — an atomic
+        # claim before emit is the only way two concurrent drains can't
+        # both emit the same intent (check-then-write is not unique).
+        ai_cols = {r[1] for r in conn.execute(
+            "PRAGMA table_info(bo_audit_intents)")}
+        if "drain_owner" not in ai_cols:
+            conn.execute(
+                "ALTER TABLE bo_audit_intents ADD COLUMN drain_owner TEXT")
+            conn.execute(
+                "ALTER TABLE bo_audit_intents ADD COLUMN drain_until TEXT")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS bo_outbox_pending "
             "ON bo_telemetry_outbox (tenant, delivered, lease_until)"
@@ -935,28 +947,93 @@ def audit_intents_status(
     return out
 
 
+_DRAIN_LEASE_S = 60
+
+
+def _drain_max_attempts(tenant: str, db_path: Path | None) -> int:
+    """Operator-tunable emit-attempt budget before an intent is parked as
+    ``failed`` (durable evidence, excluded from auto-drain)."""
+    try:
+        from openexecutive.bo.settings import store as settings_store
+
+        return int(settings_store.get_effective_value(
+            tenant, "bo.router.audit_drain_attempts", db_path=db_path))
+    except Exception:
+        return 3
+
+
+def _claim_audit_intent(
+    conn: sqlite3.Connection, intent_id: str, owner: str, now: str
+) -> bool:
+    """Atomically lease the intent for this drainer — the UPDATE succeeds
+    only if nobody else holds a live claim, so exactly one process may
+    emit the intent in any window. Exact-once under concurrency comes
+    from this claim, not from the journal read-back."""
+    until = (datetime.now(UTC) + timedelta(seconds=_DRAIN_LEASE_S)
+             ).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    cur = conn.execute(
+        "UPDATE bo_audit_intents SET drain_owner = ?, drain_until = ? "
+        "WHERE intent_id = ? AND status = 'pending' "
+        "AND (drain_until IS NULL OR drain_until < ?)",
+        (owner, until, intent_id, now),
+    )
+    return cur.rowcount == 1
+
+
 def drain_audit_intents(
-    db_path: Path | None = None, *, tenant: str | None = None
+    db_path: Path | None = None, *, tenant: str | None = None,
+    owner: str | None = None,
 ) -> dict[str, Any]:
     """Replay persisted audit intents into the central journal.
 
-    Idempotent: the journal is queried for ``intent_id`` before emitting,
-    so a crash between journal-write and mark-delivered never double-logs.
-    ``AuditLogger.log`` returns the row id or ``None`` on failure — a
-    failed emit keeps the intent pending (``failed`` after 3 attempts),
-    never pretends delivered.
+    Exact-once under concurrency: each intent is claimed with an atomic
+    lease BEFORE the journal check/emit — two drains can never both pass
+    ``has_detail`` for the same intent. A crash after emit leaves a stale
+    claim; once it expires, a later drain re-claims, finds the row in the
+    journal via ``intent_id`` and only marks it delivered — no re-emit.
+
+    ``failed`` (attempts ≥ ``bo.router.audit_drain_attempts``) is parked —
+    durable evidence, excluded from auto-drain so a dead journal never
+    loops; ``requeue_failed_audit_intents`` is the explicit operator path.
     """
     from openexecutive.audit import log_event
     from openexecutive.audit.logger import get_audit_logger
 
-    journal = get_audit_logger()
-    delivered = failed = 0
-    for intent in pending_audit_intents(db_path, tenant=tenant):
+    me = owner or f"drain-{uuid.uuid4()}"
+    now = _now()
+    where = "status = 'pending'"
+    params: list[Any] = []
+    if tenant is not None:
+        where += " AND tenant = ?"
+        params.append(tenant)
+    with get_conn(db_path) as conn:
+        candidates = [
+            dict(r) for r in conn.execute(
+                "SELECT intent_id, tenant, event, actor, summary, "
+                "details_json FROM bo_audit_intents "
+                f"WHERE {where} ORDER BY created_at", params)
+        ]
+    delivered = failed = skipped = 0
+    for intent in candidates:
         iid = intent["intent_id"]
+        with get_conn(db_path) as conn:
+            if not _claim_audit_intent(conn, iid, me, now):
+                skipped += 1
+                continue
         try:
-            if journal.has_detail("intent_id", iid):
-                emitted = True  # already in journal — reconcile, no re-emit
-            else:
+            # The logger resolves/opens its DB lazily — an unreachable
+            # journal must fail the intent, not the whole drain.
+            journal = get_audit_logger()
+            # A failing read (fresh file without schema, corrupt) must not
+            # skip the emit — the emit itself creates the schema/row.
+            try:
+                emitted = journal.has_detail("intent_id", iid)
+            except Exception:  # noqa: BLE001
+                emitted = False
+            if not emitted:
+                # The journal may have been restored as an empty/new file —
+                # ``log`` only INSERTs, so the drain must ensure the schema.
+                journal.initialize_db()
                 details = json.loads(intent["details_json"])
                 # Emit through the module seam (tests patch log_event), then
                 # CONFIRM by reading the journal back — log_event swallows
@@ -969,24 +1046,55 @@ def drain_audit_intents(
                 emitted = journal.has_detail("intent_id", iid)
         except Exception:  # noqa: BLE001 — journal unreachable/corrupt
             emitted = False
+        budget = _drain_max_attempts(intent["tenant"], db_path)
         with get_conn(db_path) as conn:
             if emitted:
                 conn.execute(
                     "UPDATE bo_audit_intents SET status='delivered', "
-                    "delivered_at=? WHERE intent_id=?",
+                    "delivered_at=?, drain_owner=NULL, drain_until=NULL "
+                    "WHERE intent_id=?",
                     (_now(), iid),
                 )
                 delivered += 1
             else:
+                # Release the claim immediately on failure — the next drain
+                # may retry right away; the attempt budget parks it.
                 conn.execute(
                     "UPDATE bo_audit_intents SET attempts=attempts+1, "
                     "last_error='journal unreachable', "
-                    "status = CASE WHEN attempts+1 >= 3 THEN 'failed' "
+                    "drain_owner=NULL, drain_until=NULL, "
+                    "status = CASE WHEN attempts+1 >= ? THEN 'failed' "
                     "ELSE 'pending' END WHERE intent_id=?",
-                    (iid,),
+                    (budget, iid),
                 )
                 failed += 1
-    return {"delivered": delivered, "failed": failed}
+    return {"delivered": delivered, "failed": failed, "skipped": skipped}
+
+
+def requeue_failed_audit_intents(
+    tenant: str, *, actor: str, db_path: Path | None = None
+) -> dict[str, Any]:
+    """Explicit operator recovery: parked ``failed`` intents go back to
+    ``pending`` so the next drain retries them against a restored journal.
+    Audited like the mutation it is — the intent is recorded in the same
+    transaction, then drained."""
+    with get_conn(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute(
+            "UPDATE bo_audit_intents SET status='pending', "
+            "drain_owner=NULL, drain_until=NULL "
+            "WHERE tenant = ? AND status = 'failed'",
+            (tenant,),
+        )
+        count = cur.rowcount
+        if count:
+            _insert_audit_intent(
+                conn, tenant, "bo_audit_intents_requeue", actor,
+                f"bo_audit_intents_requeue: {count} relansate",
+                {"requeued": count},
+            )
+    drain_audit_intents(db_path=db_path, tenant=tenant)
+    return {"requeued": count}
 
 
 def outbox_stats(tenant: str, db_path: Path | None = None) -> dict[str, Any]:

@@ -14,6 +14,7 @@ from openexecutive.bo.telemetry.adapter import (
     NullTransport,
     TelemetryDisabledError,
     get_adapter,
+    provisioned_secret_refs,
 )
 
 
@@ -73,7 +74,18 @@ def deliver(
     if destination is not None:
         endpoint, ref = destination
         if endpoint:
-            token = os.environ.get(ref, "") if ref else ""
+            # Same rule as the telemetry adapter bound path: the persisted
+            # ref is re-checked against the CURRENT tenant scope — a
+            # re-scoped/removed NAME@tenant revokes the credential even
+            # though the env var still exists. ``or ""`` — a missing tenant
+            # never satisfies a scoped entry.
+            token = (
+                os.environ.get(ref, "")
+                if ref and ref in provisioned_secret_refs(
+                    tenant or envelope.get("tenantRef") or ""
+                )
+                else ""
+            )
             if not token:
                 raise CredentialUnavailableError(
                     "credentialul asociat plicului nu este provisionat "

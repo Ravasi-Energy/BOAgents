@@ -864,6 +864,12 @@ export function rebindBoOutbox(
   });
 }
 
+/** Relansare explicită a intențiilor de audit parcate („failed”) — drain-ul
+ *  le reia către jurnal. Admin-only, auditat. */
+export function requeueBoAuditIntents(): Promise<{ requeued: number }> {
+  return req("/execution/outbox/audit-requeue", { method: "POST" });
+}
+
 export function getBoExecStatus(): Promise<BoExecStatus> {
   return req("/execution/status");
 }

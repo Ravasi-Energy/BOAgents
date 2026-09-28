@@ -63,8 +63,12 @@ export function InlineAlert({
 }) {
   const defaultIcon: BoIconName =
     kind === "danger" ? "alert" : kind === "warn" ? "shield-alert" : "info";
+  // danger = eroare acționabilă → alert (asertiv); restul → status (polite).
   return (
-    <div className={`bo-alert bo-alert--${kind}`} role="status">
+    <div
+      className={`bo-alert bo-alert--${kind}`}
+      role={kind === "danger" ? "alert" : "status"}
+    >
       <IconBO name={icon ?? defaultIcon} size={16} />
       <div>{children}</div>
     </div>

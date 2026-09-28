@@ -8,7 +8,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import IconBO from "@/components/bo/IconBO";
-import { InlineAlert, Pill, StateBlock } from "@/components/bo/ui";
+import { BoPage, InlineAlert, Pill, StateBlock } from "@/components/bo/ui";
 import {
   BoApiError,
   cancelBoRun,
@@ -268,6 +268,7 @@ function MandatesSection({
         <button
           type="button"
           className="bo-btn"
+          aria-expanded={open}
           onClick={() => setOpen((v) => !v)}
         >
           {open ? "Închide formularul" : "Mandat nou"}
@@ -455,7 +456,12 @@ function SubmitRunForm({
     <div className="bo-card" style={{ marginTop: 12 }}>
       <div className="bo-spread">
         <h3 className="bo-card-title">Trimitere controlată</h3>
-        <button type="button" className="bo-btn" onClick={() => setOpen((v) => !v)}>
+        <button
+          type="button"
+          className="bo-btn"
+          aria-expanded={open}
+          onClick={() => setOpen((v) => !v)}
+        >
           {open ? "Închide" : "Execuție nouă"}
         </button>
       </div>
@@ -709,6 +715,7 @@ function OutboxSection({
                 className="bo-btn bo-btn--icon"
                 onClick={() => setExpanded(expanded === e.event_id ? null : e.event_id)}
                 aria-label="Plic persistat"
+                aria-expanded={expanded === e.event_id}
               >
                 <IconBO name="file-json" size={14} />
               </button>
@@ -1474,29 +1481,37 @@ export default function BoExecutionsPage() {
   }
 
   if (state.kind === "loading") {
-    return <StateBlock state="loading" title="Se încarcă execuțiile" />;
+    return (
+      <BoPage title="Execuții delegate">
+        <StateBlock state="loading" title="Se încarcă execuțiile" />
+      </BoPage>
+    );
   }
   if (state.kind === "forbidden") {
     return (
-      <StateBlock
-        state="forbidden"
-        title="Acces interzis"
-        detail="Contul tău nu are drept de citire pe execuțiile BOAgents."
-      />
+      <BoPage title="Execuții delegate">
+        <StateBlock
+          state="forbidden"
+          title="Acces interzis"
+          detail="Contul tău nu are drept de citire pe execuțiile BOAgents."
+        />
+      </BoPage>
     );
   }
   if (state.kind === "error") {
     return (
-      <StateBlock
-        state="error"
-        title="Eroare la încărcare"
-        detail={state.message}
-        action={
-          <button type="button" className="bo-btn" onClick={load}>
-            <IconBO name="refresh" size={15} /> Reîncearcă
-          </button>
-        }
-      />
+      <BoPage title="Execuții delegate">
+        <StateBlock
+          state="error"
+          title="Eroare la încărcare"
+          detail={state.message}
+          action={
+            <button type="button" className="bo-btn" onClick={load}>
+              <IconBO name="refresh" size={15} /> Reîncearcă
+            </button>
+          }
+        />
+      </BoPage>
     );
   }
 
@@ -1504,7 +1519,7 @@ export default function BoExecutionsPage() {
   const canOperate = true; // server enforcește RBAC; controalele cer 403 explicit
 
   return (
-    <div className="bo-scope" style={{ marginTop: 20 }}>
+    <BoPage title="Execuții delegate">
       <div className="bo-row" style={{ marginBottom: 16, flexWrap: "wrap" }}>
         <Pill kind={status.enabled ? "ok" : "warn"} icon="shield-check">
           execuție {status.enabled ? "pornită" : "oprită"}
@@ -1596,6 +1611,7 @@ export default function BoExecutionsPage() {
                 cursor: "pointer",
               }}
               onClick={() => void open(r.run_id)}
+              aria-expanded={selected === r.run_id}
             >
               <div className="bo-spread">
                 <div>
@@ -1626,6 +1642,6 @@ export default function BoExecutionsPage() {
           onChanged={() => void load()}
         />
       ) : null}
-    </div>
+    </BoPage>
   );
 }

@@ -1,0 +1,441 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bo.model-observation.v1",
+  "title": "bo.model-observation.v1",
+  "description": "Observație minimizată de inventar modele/dependențe (+ observație opțională de rutare) emisă de produsele BO către Guardian. Câmpurile corpului NU înlocuiesc identitatea autentificată — conflictul tenant/producer/installation cu credențialul se refuză la receptor.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "eventId",
+    "producerId",
+    "product",
+    "installationId",
+    "tenantRef",
+    "observedAt"
+  ],
+  "anyOf": [
+    {
+      "required": [
+        "models"
+      ]
+    },
+    {
+      "required": [
+        "routing"
+      ]
+    }
+  ],
+  "definitions": {
+    "opaqueRef": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[^@\\s]+$"
+    },
+    "utcTs": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T([01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(\\.\\d+)?(Z|\\+00:00)$"
+    },
+    "dateOnly": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+    },
+    "modelRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "modelId"
+      ],
+      "properties": {
+        "provider": {
+          "$ref": "#/definitions/opaqueRef"
+        },
+        "modelId": {
+          "$ref": "#/definitions/opaqueRef"
+        },
+        "modelVersion": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^@\\s]+$"
+        }
+      }
+    },
+    "money": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "amount",
+        "currency",
+        "validUntil"
+      ],
+      "properties": {
+        "amount": {
+          "type": "string",
+          "pattern": "^\\d+(\\.\\d{1,6})?$",
+          "description": "șir zecimal — niciodată float monetar"
+        },
+        "currency": {
+          "type": "string",
+          "pattern": "^[A-Z]{3}$"
+        },
+        "validUntil": {
+          "$ref": "#/definitions/dateOnly"
+        }
+      }
+    },
+    "quality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "methodology",
+        "taskKind",
+        "evalSetRef",
+        "evalSetVersion",
+        "observedAt",
+        "sampleCount"
+      ],
+      "properties": {
+        "score": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1,
+          "description": "NULL = necunoscut, nu zero"
+        },
+        "methodology": {
+          "$ref": "#/definitions/opaqueRef"
+        },
+        "taskKind": {
+          "$ref": "#/definitions/opaqueRef"
+        },
+        "evalSetRef": {
+          "$ref": "#/definitions/opaqueRef"
+        },
+        "evalSetVersion": {
+          "$ref": "#/definitions/opaqueRef"
+        },
+        "observedAt": {
+          "$ref": "#/definitions/utcTs"
+        },
+        "sampleCount": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "dependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target",
+        "edge"
+      ],
+      "properties": {
+        "target": {
+          "$ref": "#/definitions/modelRef"
+        },
+        "edge": {
+          "enum": [
+            "DECLARED",
+            "INFERRED",
+            "VERIFIED"
+          ]
+        },
+        "evidenceRef": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/opaqueRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "if": {
+        "properties": {
+          "edge": {
+            "const": "VERIFIED"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "evidenceRef"
+        ]
+      }
+    },
+    "modelObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "modelId",
+        "ownerRef",
+        "purpose",
+        "source",
+        "state",
+        "lastSeen"
+      ],
+      "properties": {
+        "provider": {
+          "$ref": "#/definitions/opaqueRef"
+        },
+        "modelId": {
+          "$ref": "#/definitions/opaqueRef"
+        },
+        "modelVersion": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^@\\s]+$"
+        },
+        "ownerRef": {
+          "$ref": "#/definitions/opaqueRef"
+        },
+        "purpose": {
+          "$ref": "#/definitions/opaqueRef"
+        },
+        "source": {
+          "$ref": "#/definitions/opaqueRef"
+        },
+        "state": {
+          "enum": [
+            "ACTIVE",
+            "DISABLED",
+            "DEPRECATED",
+            "UNKNOWN"
+          ]
+        },
+        "lastSeen": {
+          "$ref": "#/definitions/utcTs"
+        },
+        "quality": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/quality"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dependencies": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/definitions/dependency"
+          }
+        }
+      }
+    },
+    "routeChoice": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "modelId"
+      ],
+      "properties": {
+        "provider": {
+          "$ref": "#/definitions/opaqueRef"
+        },
+        "modelId": {
+          "$ref": "#/definitions/opaqueRef"
+        },
+        "modelVersion": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^@\\s]+$"
+        }
+      }
+    },
+    "measuredUsage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "inputTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "outputTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "requests": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "wallMs": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  },
+  "properties": {
+    "schemaVersion": {
+      "const": "bo.model-observation.v1"
+    },
+    "eventId": {
+      "$ref": "#/definitions/opaqueRef"
+    },
+    "producerId": {
+      "$ref": "#/definitions/opaqueRef"
+    },
+    "product": {
+      "enum": [
+        "BOAgents",
+        "Hire"
+      ]
+    },
+    "installationId": {
+      "$ref": "#/definitions/opaqueRef"
+    },
+    "tenantRef": {
+      "$ref": "#/definitions/opaqueRef"
+    },
+    "observedAt": {
+      "$ref": "#/definitions/utcTs"
+    },
+    "sync": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "syncId",
+        "complete"
+      ],
+      "properties": {
+        "syncId": {
+          "$ref": "#/definitions/opaqueRef"
+        },
+        "complete": {
+          "type": "boolean"
+        }
+      }
+    },
+    "models": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/definitions/modelObservation"
+      }
+    },
+    "routing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "correlationId",
+        "policyVersion",
+        "catalogVersion",
+        "taskKind",
+        "metBar",
+        "reasons"
+      ],
+      "properties": {
+        "correlationId": {
+          "$ref": "#/definitions/opaqueRef"
+        },
+        "policyVersion": {
+          "$ref": "#/definitions/opaqueRef"
+        },
+        "catalogVersion": {
+          "$ref": "#/definitions/opaqueRef"
+        },
+        "taskKind": {
+          "$ref": "#/definitions/opaqueRef"
+        },
+        "recommendation": {
+          "$ref": "#/definitions/routeChoice"
+        },
+        "actualRoute": {
+          "$ref": "#/definitions/routeChoice"
+        },
+        "metBar": {
+          "type": "boolean"
+        },
+        "reasons": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[A-Z0-9_:-]+$"
+          }
+        },
+        "costEstimate": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/money"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "measuredUsage": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/measuredUsage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "billedCost": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "amount",
+                "currency",
+                "validUntil",
+                "evidenceRef"
+              ],
+              "properties": {
+                "amount": {
+                  "type": "string",
+                  "pattern": "^\\d+(\\.\\d{1,6})?$"
+                },
+                "currency": {
+                  "type": "string",
+                  "pattern": "^[A-Z]{3}$"
+                },
+                "validUntil": {
+                  "$ref": "#/definitions/dateOnly"
+                },
+                "evidenceRef": {
+                  "$ref": "#/definitions/opaqueRef"
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -150,6 +150,22 @@ def log_model_usage(
         )
     except Exception:  # noqa: BLE001 — audit is fire-and-forget
         return counts
+    try:
+        # VAL3-01 observe hook: records what the administered catalog would
+        # have recommended vs the model actually used. Strictly observe-only —
+        # never changes the route, never raises, zero work unless the tenant
+        # enabled bo.router.observe_enabled.
+        from openexecutive.bo.routing.observe import observe_call
+
+        observe_call(
+            model=model,
+            actor=actor,
+            counts=counts,
+            session_id=session_id,
+            turn_id=turn_id,
+        )
+    except Exception:  # noqa: BLE001 — observation must never break the call
+        pass
     return counts
 
 

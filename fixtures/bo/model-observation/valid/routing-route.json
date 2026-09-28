@@ -1,0 +1,45 @@
+{
+  "schemaVersion": "bo.model-observation.v1",
+  "eventId": "evt_b0ea67a9950443dba9ae90c6",
+  "producerId": "boagents",
+  "product": "BOAgents",
+  "installationId": "local-installation",
+  "tenantRef": "tenant-fixture",
+  "observedAt": "2026-09-24T09:45:01.542Z",
+  "routing": {
+    "correlationId": "turn-fixture-001",
+    "policyVersion": "pol_fixture01",
+    "catalogVersion": "cat_v3",
+    "taskKind": "specialist",
+    "metBar": true,
+    "reasons": [
+      "MODEL_DISABLED"
+    ],
+    "recommendation": {
+      "provider": "anthropic",
+      "modelId": "claude-fixture-a",
+      "modelVersion": "2026-09-01"
+    },
+    "actualRoute": {
+      "provider": "anthropic",
+      "modelId": "claude-fixture-a",
+      "modelVersion": "2026-09-01"
+    },
+    "costEstimate": {
+      "amount": "0.008100",
+      "currency": "USD",
+      "validUntil": "2027-12-31"
+    },
+    "measuredUsage": {
+      "inputTokens": 1200,
+      "outputTokens": 300,
+      "requests": 1
+    },
+    "billedCost": {
+      "amount": "0.0081",
+      "currency": "USD",
+      "validUntil": "2026-09-24",
+      "evidenceRef": "provider:usage.cost"
+    }
+  }
+}

@@ -1,0 +1,47 @@
+[
+  {
+    "probe": "titlu Modele \u0219i rutare",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "probe": "eticheta observare vizibil\u0103",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "probe": "catalog afi\u0219at",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "probe": "observa\u021bii afi\u0219ate",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "probe": "f\u0103r\u0103 pretins\u0103 economie realizat\u0103",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "probe": "f\u0103r\u0103 erori JS",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "probe": "no-overflow-light",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "probe": "no-overflow-dark",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "probe": "neautentificat \u2192 redirect signin",
+    "ok": true,
+    "detail": ""
+  }
+]

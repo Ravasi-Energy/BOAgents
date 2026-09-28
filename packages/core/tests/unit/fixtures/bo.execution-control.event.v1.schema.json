@@ -1,0 +1,296 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bo.execution-control.event.v1",
+  "title": "bo.execution-control.event.v1",
+  "description": "Eveniment de execuție emis de produsele BO către Guardian: checkpoint (stare de execuție, NU dovadă de efect extern) sau receipt (intrare în ledgerul efectelor). Plicul poartă identitate declarativă care NU înlocuiește credențialul — conflictul tenant/producer/installation cu contextul autenticat se refuză la receptor. Dovezile exclud conținutul prompturilor, payload-urilor și datelor de business: numai digesturi și ref-uri.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "eventId",
+    "producerId",
+    "product",
+    "installationId",
+    "tenantRef",
+    "observedAt",
+    "correlationId",
+    "eventType"
+  ],
+  "not": {
+    "required": [
+      "checkpoint",
+      "receipt"
+    ],
+    "description": "Un eveniment poartă o singură ramură."
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "eventType": {
+            "const": "checkpoint"
+          }
+        },
+        "required": [
+          "eventType"
+        ]
+      },
+      "then": {
+        "required": [
+          "checkpoint"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "eventType": {
+            "const": "receipt"
+          }
+        },
+        "required": [
+          "eventType"
+        ]
+      },
+      "then": {
+        "required": [
+          "receipt"
+        ]
+      }
+    }
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "bo.execution-control.event.v1"
+    },
+    "eventId": {
+      "$ref": "#/definitions/opaqueRef"
+    },
+    "producerId": {
+      "$ref": "#/definitions/opaqueRef"
+    },
+    "product": {
+      "enum": [
+        "BOAgents",
+        "Hire"
+      ]
+    },
+    "installationId": {
+      "$ref": "#/definitions/opaqueRef"
+    },
+    "tenantRef": {
+      "$ref": "#/definitions/opaqueRef"
+    },
+    "observedAt": {
+      "$ref": "#/definitions/utcTs"
+    },
+    "correlationId": {
+      "$ref": "#/definitions/opaqueRef"
+    },
+    "eventType": {
+      "enum": [
+        "checkpoint",
+        "receipt"
+      ]
+    },
+    "checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "executionRef",
+        "mandateRef",
+        "step",
+        "state",
+        "policyVersion"
+      ],
+      "properties": {
+        "executionRef": {
+          "$ref": "#/definitions/opaqueRef"
+        },
+        "mandateRef": {
+          "$ref": "#/definitions/opaqueRef"
+        },
+        "parentRef": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/opaqueRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "step": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000,
+          "description": "Numărul pasului de execuție — ordonare și detecția reordonării."
+        },
+        "state": {
+          "enum": [
+            "PENDING",
+            "CLAIMED",
+            "SUCCEEDED",
+            "FAILED",
+            "UNKNOWN",
+            "RECONCILIATION_REQUIRED"
+          ],
+          "description": "Stare de execuție: UNKNOWN nu e dovadă de eșec și nu dispare printr-un eveniment vechi."
+        },
+        "policyVersion": {
+          "$ref": "#/definitions/opaqueRef"
+        },
+        "lease": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/lease"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Obligatoriu pentru CLAIMED; fencingToken monoton crescător per executionRef."
+        },
+        "checkpointDigest": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/digestRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Digest al stării persistate — NU conținutul stării."
+        },
+        "failureReason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[A-Za-z0-9_:. /-]+$"
+        },
+        "fencingToken": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "executionRef",
+        "intentRef",
+        "payloadDigest",
+        "provider",
+        "status",
+        "occurredAt"
+      ],
+      "properties": {
+        "executionRef": {
+          "$ref": "#/definitions/opaqueRef"
+        },
+        "mandateRef": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/opaqueRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "intentRef": {
+          "$ref": "#/definitions/opaqueRef",
+          "description": "Ref al intenției de efect — cheie de deduplicare cu payloadDigest."
+        },
+        "idempotencyKey": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/opaqueRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "null = provider fără idempotență → exact-once NU e promis."
+        },
+        "payloadDigest": {
+          "$ref": "#/definitions/digestRef",
+          "description": "Digest al payload-ului trimis providerului — refolosirea cheii cu alt digest = conflict."
+        },
+        "provider": {
+          "$ref": "#/definitions/opaqueRef"
+        },
+        "status": {
+          "enum": [
+            "ACCEPTED",
+            "CONFIRMED",
+            "FAILED",
+            "UNKNOWN"
+          ],
+          "description": "CONFIRMED doar cu receiptRef al providerului; UNKNOWN = efect trimis, rezultat necunoscut."
+        },
+        "receiptRef": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/opaqueRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "effectKind": {
+          "$ref": "#/definitions/opaqueRef",
+          "description": "Clasa efectului (ex. counter.increment) — metadată, nu payload."
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "occurredAt": {
+          "$ref": "#/definitions/utcTs"
+        }
+      }
+    }
+  },
+  "definitions": {
+    "opaqueRef": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[^@\\s]+$"
+    },
+    "utcTs": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T([01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(\\.\\d+)?(Z|\\+00:00)$"
+    },
+    "digestRef": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "lease": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ownerRef",
+        "fencingToken",
+        "expiresAt"
+      ],
+      "properties": {
+        "ownerRef": {
+          "$ref": "#/definitions/opaqueRef"
+        },
+        "fencingToken": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Monoton crescător per executionRef — un token mai mic decât curentul nu mai poate raporta."
+        },
+        "expiresAt": {
+          "$ref": "#/definitions/utcTs"
+        }
+      }
+    }
+  }
+}

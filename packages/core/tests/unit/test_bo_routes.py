@@ -10,11 +10,12 @@ from fastapi.testclient import TestClient
 
 from openexecutive.api.routes import bo as bo_route
 from openexecutive.bo.bots import examples
+from openexecutive.bo.settings.registry import REGISTRY
 
 from .bo_testkit import capture_audit, use_tmp_db
 
-ADMIN = {"x-caller-email": "admin@test"}
-VIEWER = {"x-caller-email": "viewer@test"}
+ADMIN = {"x-caller-email": "admin@test", "x-caller-proxy-secret": "test-proxy-only"}
+VIEWER = {"x-caller-email": "viewer@test", "x-caller-proxy-secret": "test-proxy-only"}
 OPERATOR = {"x-api-key": "svc-key"}  # service identity, no user email
 OTHER_TENANT = {**ADMIN, "x-bo-tenant": "tenant-b"}
 
@@ -24,6 +25,7 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     use_tmp_db(tmp_path, monkeypatch)
     monkeypatch.setenv("BO_TENANT_ID", "tenant-a")
     monkeypatch.setenv("BO_ADMIN_EMAILS", "admin@test")
+    monkeypatch.setenv("BACKEND_PROXY_SECRET", "test-proxy-only")
     capture_audit(monkeypatch)
     app = FastAPI()
     app.include_router(bo_route.router)
@@ -52,7 +54,7 @@ def test_settings_list_viewer_ok(client: TestClient) -> None:
     body = resp.json()
     assert body["tenant"] == "tenant-a"
     assert body["role"] == "viewer"
-    assert len(body["settings"]) == 9
+    assert len(body["settings"]) == len(REGISTRY)
     assert all(s["origin"] == "default" for s in body["settings"])
 
 

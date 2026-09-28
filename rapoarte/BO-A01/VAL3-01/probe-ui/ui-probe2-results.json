@@ -1,0 +1,27 @@
+[
+  {
+    "probe": "detaliu observa\u021bie: motive afi\u0219ate",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "probe": "filtru aplicabil",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "probe": "editor catalog deschis",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "probe": "set\u0103ri router \u00een UI",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "probe": "chei bo.router vizibile",
+    "ok": true,
+    "detail": ""
+  }
+]

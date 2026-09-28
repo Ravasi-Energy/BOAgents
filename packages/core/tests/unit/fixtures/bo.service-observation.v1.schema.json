@@ -1,0 +1,164 @@
+{
+  "$defs": {
+    "Service": {
+      "additionalProperties": false,
+      "properties": {
+        "serviceRef": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[^@\\s]+$",
+          "title": "Serviceref",
+          "type": "string"
+        },
+        "ownerRef": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[^@\\s]+$",
+          "title": "Ownerref",
+          "type": "string"
+        },
+        "version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[^@\\s]+$",
+          "title": "Version",
+          "type": "string"
+        },
+        "synthetic": {
+          "const": true,
+          "title": "Synthetic",
+          "type": "boolean"
+        },
+        "queuePending": {
+          "maximum": 1000000,
+          "minimum": 0,
+          "title": "Queuepending",
+          "type": "integer"
+        },
+        "oldestPendingAt": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Oldestpendingat"
+        },
+        "executionRef": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[^@\\s]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Executionref"
+        },
+        "evidenceRefs": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[^@\\s]+$",
+            "type": "string"
+          },
+          "maxItems": 16,
+          "minItems": 1,
+          "title": "Evidencerefs",
+          "type": "array"
+        }
+      },
+      "required": [
+        "serviceRef",
+        "ownerRef",
+        "version",
+        "synthetic",
+        "queuePending",
+        "oldestPendingAt",
+        "executionRef",
+        "evidenceRefs"
+      ],
+      "title": "Service",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "const": "bo.service-observation.v1",
+      "title": "Schemaversion",
+      "type": "string"
+    },
+    "eventId": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[^@\\s]+$",
+      "title": "Eventid",
+      "type": "string"
+    },
+    "producerId": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[^@\\s]+$",
+      "title": "Producerid",
+      "type": "string"
+    },
+    "installationId": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[^@\\s]+$",
+      "title": "Installationid",
+      "type": "string"
+    },
+    "tenantRef": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[^@\\s]+$",
+      "title": "Tenantref",
+      "type": "string"
+    },
+    "product": {
+      "enum": [
+        "BOAgents",
+        "Hire"
+      ],
+      "title": "Product",
+      "type": "string"
+    },
+    "observedAt": {
+      "format": "date-time",
+      "title": "Observedat",
+      "type": "string"
+    },
+    "correlationId": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[^@\\s]+$",
+      "title": "Correlationid",
+      "type": "string"
+    },
+    "service": {
+      "$ref": "#/$defs/Service"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "eventId",
+    "producerId",
+    "installationId",
+    "tenantRef",
+    "product",
+    "observedAt",
+    "correlationId",
+    "service"
+  ],
+  "title": "ServiceObservation",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

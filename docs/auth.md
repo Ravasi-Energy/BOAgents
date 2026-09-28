@@ -13,6 +13,17 @@ Two independent layers. Either one alone would be insufficient; together they fa
 | **UI: Auth.js v5 + Google OAuth** | Anyone hitting the public UI is redirected to `/signin`. Only Google accounts on the allow-list can complete sign-in — the **union** of `ALLOWED_EMAILS` and the People roster (see below). | [packages/ui/src/auth.ts](../packages/ui/src/auth.ts), [packages/ui/src/middleware.ts](../packages/ui/src/middleware.ts), [packages/ui/src/app/signin/page.tsx](../packages/ui/src/app/signin/page.tsx) |
 | **API: shared-secret header** | The FastAPI backend is reachable over the network. It rejects every request whose `x-api-key` header doesn't match `BACKEND_SHARED_SECRET`. The UI proxy stamps this header on every upstream call. | [packages/core/openexecutive/api/main.py](../packages/core/openexecutive/api/main.py), [packages/ui/src/app/api/backend/[...path]/route.ts](../packages/ui/src/app/api/backend/%5B...path%5D/route.ts) |
 
+### Delegated BO user identity
+
+The session proxy and API must also share `BACKEND_PROXY_SECRET`, a separate
+server-only credential distinct from `BACKEND_SHARED_SECRET`. Generate a new
+random value and configure it on both processes; never expose it as a
+`NEXT_PUBLIC_*` variable or provision it to service clients. Restart both after
+rotation. The proxy strips incoming `x-caller-*` headers and stamps the session
+email and `x-caller-proxy-secret`. Missing/reused configuration returns 503 from
+the proxy; untrusted delegated identity returns 401 from BO routes. A service
+key by itself remains an operator and cannot write BO settings or mandates.
+
 ### Who is on the allow-list
 
 Two **additive** sources. An email is admitted if it appears in *either*:
@@ -82,7 +93,7 @@ Put everything in the repo-root `.env` (the file the README quickstart has you
 create from `.env.example`). Both `make dev` and `make docker` load it into the
 API **and** the UI:
 
-Generate the two random secrets first and paste their **output** — never put
+Generate the three independent random secrets first and paste their **output** — never put
 `$(...)` inside the file itself: the file is parsed as plain text by Docker
 Compose and the backend's dotenv loader, so command substitutions become the
 literal (publicly known) string instead of a secret.
@@ -90,6 +101,7 @@ literal (publicly known) string instead of a secret.
 ```bash
 openssl rand -base64 32   # → paste as AUTH_SECRET
 openssl rand -hex 32      # → paste as BACKEND_SHARED_SECRET
+openssl rand -hex 32      # → paste as BACKEND_PROXY_SECRET (a new value)
 ```
 
 ```bash
@@ -100,6 +112,8 @@ AUTH_TRUST_HOST=true
 # AUTH_URL stays blank for local dev — set it only on public deployments.
 ALLOWED_EMAILS=you@example.com,teammate@example.com
 BACKEND_SHARED_SECRET=<paste the hex output>
+BACKEND_PROXY_SECRET=<paste the separate proxy hex output>
+BO_ADMIN_EMAILS=you@example.com
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
@@ -122,11 +136,15 @@ Plain `npm run dev` in `packages/ui` (without `make dev`) reads only
 
 ### Production
 
-Generate both secrets once and set them on the two containers. `BACKEND_SHARED_SECRET` **must be byte-identical on the UI and the API** — a mismatch silently breaks every API call with `401`, so generate it once and paste the same value, rather than running the generator twice.
+Generate three independent secrets. Share the service value between UI/API and
+the separate proxy value between UI/API; AUTH_SECRET belongs only to the UI.
+A service-key mismatch breaks API calls with 401. A proxy-key mismatch rejects
+delegated identities with 401. Never provision the proxy key to service clients.
 
 ```bash
 SHARED=$(openssl rand -hex 32)
 AUTH=$(openssl rand -base64 32)
+PROXY=$(openssl rand -hex 32)
 ```
 
 **UI:**
@@ -139,12 +157,15 @@ ALLOWED_EMAILS=alice@x.com,bob@y.com
 AUTH_TRUST_HOST=true
 AUTH_URL=https://exec.example.com
 BACKEND_SHARED_SECRET=$SHARED
+BACKEND_PROXY_SECRET=$PROXY
 ```
 
-**API** — the same `$SHARED` value:
+**API** — the same `$SHARED` and `$PROXY` values:
 
 ```
 BACKEND_SHARED_SECRET=$SHARED
+BACKEND_PROXY_SECRET=$PROXY
+BO_ADMIN_EMAILS=alice@x.com
 BACKEND_ALLOWED_ORIGINS=https://exec.example.com
 OE_PUBLIC_DEPLOYMENT=1
 ```
@@ -244,7 +265,9 @@ curl -sv -H "x-api-key: $SHARED" https://api.example.com/sessions           # 20
 - Missing-secret deploys silently exposing the API (the `OE_PUBLIC_DEPLOYMENT` fail-closed guard)
 
 **Does not mitigate:**
-- A compromised `BACKEND_SHARED_SECRET` — anyone who learns it can hit the API as if they were the UI. Rotate if leaked.
+- A compromised `BACKEND_SHARED_SECRET` grants service access, including BO
+  operator controls. It cannot delegate BO admin without the separate proxy
+  credential. Rotate a leaked credential.
 - A compromised Google account on the allow-list — that user has full access to all shared data. The product is currently a **shared workspace**; there is no per-user data isolation.
 - A compromised deploy credential — attacker can change secrets, redeploy, or read logs. Rotate deploy credentials if a CI workflow is compromised.
 - Browser-side XSS — Auth.js sessions are httpOnly cookies, so JS can't read them, but a successful XSS could make authenticated requests from the victim's browser. Standard same-origin protections apply.

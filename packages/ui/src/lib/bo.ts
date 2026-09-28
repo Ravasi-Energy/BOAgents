@@ -18,7 +18,7 @@ export class BoApiError extends Error {
   }
 }
 
-async function req<T>(
+export async function req<T>(
   path: string,
   init?: RequestInit,
 ): Promise<T> {
@@ -245,6 +245,24 @@ export interface BoTelemetryStatus {
   dropped: number;
   rejected: number;
   schema_version: string;
+  /** Configurația efectivă pentru tenantul curent: rândurile salvate
+   *  bo.telemetry.* câștigă față de bootstrap-ul de mediu. Tokenul rămâne
+   *  server-only — aici vedem doar referința și starea configured/missing. */
+  effective?: {
+    enabled: boolean;
+    transport: string;
+    endpoint: string | null;
+    token_ref: string;
+    token_configured: boolean;
+    /** Legătura credential↔destinație: numele SecretRef-ului sancționat
+     *  pentru endpointul efectiv (gol = niciun credential nu poate ajunge
+     *  acolo) și starea ei — „endpoint_without_ref"/„unprovisioned"/
+     *  „missing" înseamnă refuz controlat de livrare. Niciodată secretul. */
+    credential_ref?: string;
+    credential_state?: string;
+    incomplete: boolean;
+    source: Record<string, string>;
+  };
   note: string;
 }
 
@@ -357,4 +375,563 @@ export function createBoPackageApproval(payload: {
 
 export function revokeBoPackageApproval(id: string): Promise<{ ok: boolean }> {
   return req(`/packages-approvals/${id}/revoke`, { method: "POST" });
+}
+
+// ---------------------------------------------------------------------------
+// Routing (VAL3-01) — administered catalog + observe-mode observations
+// ---------------------------------------------------------------------------
+
+export interface BoModelCost {
+  input_per_million: string | null;
+  output_per_million: string | null;
+  currency: string | null;
+  valid_until: string | null;
+}
+
+export interface BoModelQuality {
+  score: number | null;
+  methodology: string;
+  task_kind: string;
+  eval_set_ref: string;
+  eval_set_version: string;
+  observed_at: string;
+  sample_count: number;
+}
+
+export interface BoCatalogEntry {
+  entry_id: string;
+  provider: string;
+  model_id: string;
+  model_version: string | null;
+  state: "ACTIVE" | "DISABLED" | "DEPRECATED";
+  capabilities: string[];
+  regions: string[];
+  cost: BoModelCost;
+  quality: BoModelQuality | null;
+  purpose: string;
+  source: string;
+  version: number;
+  updated_by: string | null;
+  updated_at: string | null;
+}
+
+export interface BoRouteChoice {
+  provider: string;
+  modelId: string;
+  modelVersion: string | null;
+}
+
+export interface BoRouteObservation {
+  obs_id: string;
+  occurred_at: string;
+  correlation_id: string;
+  task_kind: string;
+  actor_ref: string;
+  policy_version: string;
+  catalog_version: string;
+  decision: "ROUTE" | "REFUSE";
+  met_bar: boolean;
+  reasons: string[];
+  recommendation: BoRouteChoice | null;
+  actual_route: BoRouteChoice | null;
+  cost_estimate: { amount: string; currency: string; validUntil: string } | null;
+  measured: Record<string, number> | null;
+  billed: Record<string, unknown> | null;
+  detail: {
+    candidates: {
+      ref: BoRouteChoice;
+      eligible: boolean;
+      reason: string | null;
+      estimated_cost: string | null;
+      score: number | null;
+    }[];
+  };
+  /** 0 = în așteptare, 1 = livrat, 2 = eșuat definitiv (cap de tentative). */
+  delivered: number;
+  delivery_error: string | null;
+  event_id: string | null;
+}
+
+export interface BoRoutingStatus {
+  observe_enabled: boolean;
+  mode: string;
+  catalog_version: string;
+  total: number;
+  pending_delivery: number;
+  dead_delivery: number;
+  met_bar: number;
+  last_at: string | null;
+  outbox_total: number;
+  outbox_pending: number;
+  outbox_dead: number;
+  outbox_unbound?: number;
+  outbox_attempts: number;
+  outbox_last_error: string | null;
+  delivery: {
+    interval_s: number;
+    batch_size: number;
+    max_attempts: number;
+  };
+  note: string;
+}
+
+export function getBoRoutingCatalog(): Promise<{
+  catalog_version: string;
+  entries: BoCatalogEntry[];
+  role: string;
+}> {
+  return req("/routing/catalog");
+}
+
+export function createBoCatalogEntry(payload: {
+  provider: string;
+  model_id: string;
+  model_version?: string | null;
+  state?: string;
+  capabilities?: string[];
+  regions?: string[];
+  cost?: Partial<BoModelCost>;
+  quality?: Partial<BoModelQuality> | null;
+  purpose: string;
+  source: string;
+}): Promise<{ entry: BoCatalogEntry }> {
+  return req("/routing/catalog", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateBoCatalogEntry(
+  id: string,
+  payload: {
+    provider: string;
+    model_id: string;
+    model_version?: string | null;
+    state?: string;
+    capabilities?: string[];
+    regions?: string[];
+    cost?: Partial<BoModelCost>;
+    quality?: Partial<BoModelQuality> | null;
+    purpose: string;
+    source: string;
+    expected_version: number;
+  },
+): Promise<{ entry: BoCatalogEntry }> {
+  return req(`/routing/catalog/${id}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function listBoRouteObservations(params?: {
+  decision?: string;
+  task_kind?: string;
+  met_bar?: boolean;
+  limit?: number;
+}): Promise<{ observations: BoRouteObservation[] }> {
+  const q = new URLSearchParams();
+  if (params?.decision) q.set("decision", params.decision);
+  if (params?.task_kind) q.set("task_kind", params.task_kind);
+  if (params?.met_bar !== undefined) q.set("met_bar", String(params.met_bar));
+  if (params?.limit) q.set("limit", String(params.limit));
+  const qs = q.toString();
+  return req(`/routing/observations${qs ? `?${qs}` : ""}`);
+}
+
+export function getBoRoutingStatus(): Promise<BoRoutingStatus> {
+  return req("/routing/status");
+}
+
+export function flushBoRoutingObservations(): Promise<{
+  sent: number;
+  failed: number;
+}> {
+  return req("/routing/flush", { method: "POST" });
+}
+
+// ---------------------------------------------------------------------------
+// Delegated execution (VAL4-01)
+// ---------------------------------------------------------------------------
+
+export interface BoMandate {
+  mandate_id: string;
+  parent_mandate_id: string | null;
+  principal_ref: string;
+  depth: number;
+  allowed_resources: string[];
+  allowed_actions: string[];
+  budget_limit: string;
+  concurrency_limit: number;
+  max_steps: number;
+  max_depth: number;
+  expires_at: string;
+  policy_version: number;
+  state: string;
+  revoked_at: string | null;
+  revoked_reason: string | null;
+  guardian_ref: string | null;
+  created_by: string;
+  created_at: string;
+}
+
+export interface BoGuardianInfo {
+  bound_ref: string | null;
+  chain_refs: string[];
+  endpoint_configured: boolean;
+  credential_configured: boolean;
+  auth_required: boolean;
+  policy_layer: boolean;
+}
+
+export interface BoAuthorityCheck {
+  authorized: boolean;
+  mode: "guardian" | "standalone" | "denied" | "unavailable";
+  kind: string | null;
+  detail: string | null;
+  guardian: BoGuardianInfo;
+}
+
+export interface BoExecRun {
+  run_id: string;
+  mandate_id: string;
+  parent_run_id: string | null;
+  state: string;
+  steps: { action: string; resource: string; payload?: Record<string, unknown> }[];
+  current_step: number;
+  budget_reserved: string;
+  concurrency_slots: number;
+  policy_version: number;
+  correlation_id: string;
+  lease_owner: string | null;
+  lease_until: string | null;
+  pause_requested: boolean;
+  cancel_requested: boolean;
+  block_reason: string | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  finished_at: string | null;
+}
+
+export interface BoCheckpoint {
+  step: number;
+  checkpoint_version: number;
+  state: Record<string, unknown>;
+  payload_digest: string;
+  created_at: string;
+}
+
+export interface BoLedgerEntry {
+  entry_id: string;
+  run_id: string;
+  step: number;
+  intent_ref: string;
+  idempotency_key: string;
+  payload_digest: string;
+  provider: string;
+  action: string;
+  resource: string;
+  status: string;
+  receipt_ref: string | null;
+  receipt: Record<string, unknown> | null;
+  fence_version: number;
+  attempts: number;
+  policy_version: number;
+  correlation_id: string;
+  submitted_at: string | null;
+  finalized_at: string | null;
+  created_at: string;
+}
+
+export interface BoRunDetail {
+  run: BoExecRun;
+  kind: "execution";
+  mandate: BoMandate;
+  chain: BoMandate[];
+  children: BoExecRun[];
+  checkpoints: BoCheckpoint[];
+  ledger: BoLedgerEntry[];
+  reservation: {
+    amount: string;
+    slots: number;
+    state: string;
+  } | null;
+  guardian: BoGuardianInfo;
+  limits_note: string;
+}
+
+export interface BoExecStatus {
+  enabled: boolean;
+  runs_total: number;
+  by_state: Record<string, number>;
+  synthetic_effect_total: number;
+  guardian: BoGuardianInfo;
+  limits: Record<string, unknown>;
+  note: string;
+}
+
+export function getBoMandates(): Promise<{ mandates: BoMandate[] }> {
+  return req("/execution/mandates");
+}
+
+export function createBoMandate(payload: {
+  parent_mandate_id?: string;
+  guardian_ref?: string;
+  allowed_resources: string[];
+  allowed_actions: string[];
+  budget_limit: string;
+  concurrency_limit: number;
+  max_steps: number;
+  max_depth: number;
+  expires_at: string;
+}): Promise<{ mandate: BoMandate }> {
+  return req("/execution/mandates", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function revokeBoMandate(
+  id: string,
+  reason: string,
+): Promise<{ mandate: BoMandate }> {
+  return req(`/execution/mandates/${id}/revoke`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ reason }),
+  });
+}
+
+export function listBoExecRuns(state?: string): Promise<{ runs: BoExecRun[] }> {
+  return req(`/execution/runs${state ? `?state=${state}` : ""}`);
+}
+
+export function submitBoRun(payload: {
+  mandate_id: string;
+  steps: Record<string, unknown>[];
+  budget_amount: string;
+  parent_run_id?: string;
+}): Promise<{ run: BoExecRun }> {
+  return req("/execution/runs", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getBoRunDetail(runId: string): Promise<BoRunDetail> {
+  return req(`/execution/runs/${runId}`);
+}
+
+export function pauseBoRun(
+  runId: string,
+  reason?: string,
+): Promise<{ run: BoExecRun }> {
+  return req(`/execution/runs/${runId}/pause`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(reason ? { reason } : {}),
+  });
+}
+
+export function cancelBoRun(
+  runId: string,
+  reason: string,
+): Promise<{ run: BoExecRun }> {
+  return req(`/execution/runs/${runId}/cancel`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ reason }),
+  });
+}
+
+export function getBoRunAuthority(runId: string): Promise<BoAuthorityCheck> {
+  return req(`/execution/runs/${runId}/authority`);
+}
+
+export function resumeBoRun(runId: string): Promise<{ run: BoExecRun }> {
+  return req(`/execution/runs/${runId}/resume`, { method: "POST" });
+}
+
+export function reconcileBoRun(
+  runId: string,
+  resolution: "receipt" | "mark_failed",
+): Promise<{ run: BoExecRun; resolved: number; pending: number }> {
+  return req(`/execution/runs/${runId}/reconcile`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ resolution }),
+  });
+}
+
+export function workBoRuns(workerId?: string): Promise<{
+  worker_id: string;
+  claimed: number;
+  outcomes: { run_id: string; state: string; block_reason?: string }[];
+}> {
+  return req("/execution/work", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(workerId ? { worker_id: workerId } : {}),
+  });
+}
+
+// Postura telemetriei unei rulări pilot, raportată de GET /bo/pilot. Nu este
+// starea execuției: receiptul rămâne dovada efectului; aici urmărim doar
+// dacă observația persistată a ajuns în outboxul durabil.
+export interface BoRunTelemetry {
+  status: "ok" | "pending" | "degraded" | "dead" | "incident" | "unavailable" | "corrupt" | "none";
+  marker: string | null;
+  error: string | null;
+  expected: number;
+  queued: number;
+  delivered: number;
+  dead: number;
+  missing: number;
+  replayable: boolean;
+}
+
+export function replayBoRunTelemetry(runId: string): Promise<{
+  run_id: string;
+  enqueued: number;
+  existing: number;
+  telemetry: BoRunTelemetry;
+}> {
+  return req(`/pilot/runs/${encodeURIComponent(runId)}/telemetry/replay`, {
+    method: "POST",
+  });
+}
+
+export interface BoOutboxEntry {
+  event_id: string;
+  kind: string;
+  ref_id: string | null;
+  event_type: string | null;
+  schema_version: string | null;
+  envelope: Record<string, unknown>;
+  created_at: string;
+  attempts: number;
+  series_attempts: number;
+  retry_history: { series: number; attempts_before: number; last_error: string | null;
+    reason: string; actor: string; created_at: string }[];
+  delivered: number; // 0 pending · 1 livrat · 2 dead-letter
+  last_error: string | null;
+  lease_owner: string | null;
+  lease_until: string | null;
+  /** Destinația înregistrată la enqueue: endpoint + NUMELE SecretRef-ului
+   *  (niciodată secretul). dest_bound=false = rând legacy pre-migrare —
+   *  livrarea refuză până la un rebind explicit, auditat. */
+  dest_endpoint: string | null;
+  dest_ref: string | null;
+  dest_bound: boolean;
+}
+
+export function listBoOutbox(
+  delivered?: number,
+): Promise<{ entries: BoOutboxEntry[]; stats: Record<string, number | string | null> }> {
+  return req(
+    `/execution/outbox${delivered !== undefined ? `?delivered=${delivered}` : ""}`,
+  );
+}
+
+export function retryBoOutbox(
+  eventId: string,
+  reason: string,
+): Promise<{ event_id: string; requeued: boolean }> {
+  return req(`/execution/outbox/${encodeURIComponent(eventId)}/retry`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ reason }),
+  });
+}
+
+/** Reasociere explicită, auditată: plicurile nelivrate (inclusiv rândurile
+ *  legacy fără legătură) primesc destinația curent efectivă pe kind-ul lor.
+ *  Octeții și identitățile nu se rescriu. Doar admin.
+ *  `audit` = starea reală a livrării evenimentului de audit către jurnal
+ *  (delivered/pending/failed) — intența e persistată atomic cu mutația. */
+export function rebindBoOutbox(
+  reason: string,
+  eventIds?: string[],
+): Promise<{ rebound: number; skipped_leased?: number; audit?: string }> {
+  return req("/execution/outbox/rebind", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ reason, event_ids: eventIds ?? null }),
+  });
+}
+
+/** Relansare explicită a intențiilor de audit parcate („failed”) — drain-ul
+ *  le reia către jurnal. Admin-only, auditat. */
+export function requeueBoAuditIntents(): Promise<{ requeued: number }> {
+  return req("/execution/outbox/audit-requeue", { method: "POST" });
+}
+
+// ---------------------------------------------------------------------------
+// Audit intents — dovadă operator (PILOT-10/11)
+// ---------------------------------------------------------------------------
+
+export interface BoAuditIntent {
+  intent_id: string;
+  event: string;
+  actor: string;
+  summary: string;
+  status: "pending" | "delivered" | "failed" | string;
+  created_at: string;
+  delivered_at: string | null;
+  attempts: number;
+  last_error: string | null;
+  drain_owner: string | null;
+  drain_until: string | null;
+  /** Id-ul rândului audit_log referit de marcajul dedup — null = jurnalul
+   *  nu are marcaj (dovada lipsește sau jurnalul e indisponibil). */
+  audit_row_id: number | null;
+  /** Marcajul pointează la un rând real? false = marcaj orfan. */
+  journal_row_present: boolean | null;
+  /** Marcajul poartă fingerprint de conținut? false = marcaj legacy
+   *  (pre-PILOT-10) — conținutul nu e verificabil; nu e conflict dovedit. */
+  content_verifiable: boolean | null;
+  /** Citirea marcajului acestui rând a eșuat — necunoscut, NU absent:
+   *  dovada poate exista; recuperarea nu se oferă. */
+  journal_read_error: boolean;
+}
+
+export function listBoAuditIntents(opts?: {
+  status?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<{
+  intents: BoAuditIntent[];
+  total: number;
+  journal_reachable: boolean;
+}> {
+  const q = new URLSearchParams();
+  if (opts?.status) q.set("status", opts.status);
+  if (opts?.limit) q.set("limit", String(opts.limit));
+  if (opts?.offset) q.set("offset", String(opts.offset));
+  const suffix = q.toString() ? `?${q}` : "";
+  return req(`/execution/audit-intents${suffix}`);
+}
+
+/** Recuperare explicită, individuală: demotează o intență `delivered` a
+ *  cărei dovadă a dispărut din jurnal (restaurare/reparare) — serverul
+ *  refuză 409 câtă vreme dovada e vie. Admin-only, auditat. */
+export function requeueBoAuditIntent(
+  intentId: string,
+  reason?: string,
+): Promise<{ requeued: number }> {
+  return req("/execution/outbox/audit-requeue", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(
+      reason ? { intent_id: intentId, reason } : { intent_id: intentId },
+    ),
+  });
+}
+
+export function getBoExecStatus(): Promise<BoExecStatus> {
+  return req("/execution/status");
 }

@@ -1,0 +1,63 @@
+{
+  "schemaVersion": "bo.model-observation.v1",
+  "eventId": "evt_b824b1db13d24bfaa7cfea11",
+  "producerId": "boagents",
+  "product": "BOAgents",
+  "installationId": "local-installation",
+  "tenantRef": "tenant-fixture",
+  "observedAt": "2026-09-24T09:45:01.542Z",
+  "sync": {
+    "syncId": "sync_fixture_001",
+    "complete": true
+  },
+  "models": [
+    {
+      "provider": "anthropic",
+      "modelId": "claude-fixture-a",
+      "modelVersion": "2026-09-01",
+      "ownerRef": "tenant:tenant-fixture",
+      "purpose": "specialist-analysis",
+      "source": "admin",
+      "state": "ACTIVE",
+      "lastSeen": "2026-09-24T09:45:01.542Z",
+      "quality": {
+        "score": 0.91,
+        "methodology": "synthetic-pairwise",
+        "taskKind": "specialist",
+        "evalSetRef": "calib-01",
+        "evalSetVersion": "v1",
+        "observedAt": "2026-09-21T09:45:01.542Z",
+        "sampleCount": 128
+      }
+    },
+    {
+      "provider": "anthropic",
+      "modelId": "claude-fixture-b",
+      "modelVersion": null,
+      "ownerRef": "tenant:tenant-fixture",
+      "purpose": "specialist-analysis",
+      "source": "admin",
+      "state": "ACTIVE",
+      "lastSeen": "2026-09-24T09:45:01.542Z",
+      "quality": {
+        "score": 0.55,
+        "methodology": "synthetic-pairwise",
+        "taskKind": "specialist",
+        "evalSetRef": "calib-01",
+        "evalSetVersion": "v1",
+        "observedAt": "2026-09-21T09:45:01.542Z",
+        "sampleCount": 128
+      }
+    },
+    {
+      "provider": "openrouter",
+      "modelId": "fixture-cheap",
+      "modelVersion": null,
+      "ownerRef": "tenant:tenant-fixture",
+      "purpose": "batch",
+      "source": "admin",
+      "state": "DISABLED",
+      "lastSeen": "2026-09-24T09:45:01.542Z"
+    }
+  ]
+}

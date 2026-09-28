@@ -23,6 +23,17 @@ type LoadState =
   | { kind: "forbidden" }
   | { kind: "data"; data: BoSettingsResponse; telemetry: BoTelemetryStatus | null };
 
+// Gruparea pe taburi — registrul marchează fiecare parametru; tabul
+// „exec" e suprafața de execuție/recuperare cerută de VAL4-03.
+const TAB_ORDER = ["general", "routing", "telemetrie", "exec", "pilot"] as const;
+const TAB_LABEL: Record<string, string> = {
+  general: "General",
+  routing: "Rutare modele",
+  telemetrie: "Telemetrie",
+  exec: "Execuție și recuperare",
+  pilot: "Pilot ERP sintetic",
+};
+
 function SettingEditor({
   setting,
   canEdit,
@@ -62,7 +73,7 @@ function SettingEditor({
         kind: "ok",
         text: res.applied
           ? "Salvat și aplicat imediat."
-          : "Salvat — se aplică la următoarea simulare.",
+          : `Salvat. ${setting.effect_ro}`,
       });
     } catch (err) {
       if (err instanceof BoApiError && err.status === 409) {
@@ -122,6 +133,12 @@ function SettingEditor({
                     <option value="false">Oprit</option>
                     <option value="true">Pornit</option>
                   </>
+                ) : setting.key === "bo.pilot.profile" ? (
+                  <><option value="disabled">Dezactivat</option><option value="synthetic-loopback">Sintetic loopback</option></>
+                ) : setting.key === "bo.pilot.supervision" ? (
+                  <><option value="standalone">Standalone</option><option value="required">Guardian obligatoriu</option></>
+                ) : setting.key === "bo.telemetry.transport" ? (
+                  <><option value="buffered">Buffered (memorie, preview)</option><option value="http">HTTP către endpointul administrat</option></>
                 ) : (
                   <>
                     <option value="ro">Română</option>
@@ -237,6 +254,11 @@ export default function BoSettingsPage() {
 
   const { data, telemetry } = state;
   const canEdit = data.role === "admin";
+  const grouped: Record<string, BoSetting[]> = {};
+  for (const s of data.settings) {
+    const t = s.tab || "general";
+    (grouped[t] ??= []).push(s);
+  }
 
   return (
     <div className="bo-scope" style={{ marginTop: 20 }}>
@@ -261,51 +283,105 @@ export default function BoSettingsPage() {
         </div>
       ) : null}
 
-      <div className="bo-grid">
-        {data.settings.map((s) => (
-          <SettingEditor
-            key={s.key}
-            setting={s}
-            canEdit={canEdit}
-            onSaved={(updated) =>
-              setState((prev) =>
-                prev.kind === "data"
-                  ? {
-                      kind: "data",
-                      telemetry: prev.telemetry,
-                      data: {
-                        ...prev.data,
-                        config_version: Math.max(
-                          prev.data.config_version,
-                          updated.version,
-                        ),
-                        settings: prev.data.settings.map((x) =>
-                          x.key === updated.key ? { ...x, ...updated } : x,
-                        ),
-                      },
-                    }
-                  : prev,
-              )
-            }
-          />
-        ))}
-      </div>
+      {TAB_ORDER.filter((t) => grouped[t]?.length).map((tab) => (
+        <section key={tab} style={{ marginTop: 20 }}>
+          <h3 className="bo-card-title" style={{ marginBottom: 4 }}>
+            {TAB_LABEL[tab] ?? tab}
+          </h3>
+          {tab === "exec" ? (
+            <p className="bo-hint" style={{ marginBottom: 8 }}>
+              Parametrii de execuție și recuperare. Controalele
+              obligatorii (checkpoint, autorizarea Guardian pentru
+              mandate legate) nu pot fi dezactivate de agent — oprirea
+              lor nu poate produce efecte nedeclarate.
+            </p>
+          ) : null}
+          <div className="bo-grid">
+            {grouped[tab].map((s) => (
+              <SettingEditor
+                key={s.key}
+                setting={s}
+                canEdit={canEdit}
+                onSaved={(updated) =>
+                  setState((prev) =>
+                    prev.kind === "data"
+                      ? {
+                          kind: "data",
+                          telemetry: prev.telemetry,
+                          data: {
+                            ...prev.data,
+                            config_version: Math.max(
+                              prev.data.config_version,
+                              updated.version,
+                            ),
+                            settings: prev.data.settings.map((x) =>
+                              x.key === updated.key ? { ...x, ...updated } : x,
+                            ),
+                          },
+                        }
+                      : prev,
+                  )
+                }
+              />
+            ))}
+          </div>
+        </section>
+      ))}
 
       <div className="bo-card" style={{ marginTop: 16 }}>
         <div className="bo-spread">
-          <h3 className="bo-card-title">Telemetrie produs</h3>
+          <h3 className="bo-card-title">Telemetrie produs — stare activă</h3>
           {telemetry ? (
-            <Pill kind={telemetry.enabled ? "warn" : "ok"} icon="activity">
-              {telemetry.enabled ? "activă" : "oprită (implicit)"}
+            <Pill
+              kind={telemetry.effective?.incomplete ? "warn" : telemetry.effective?.enabled ?? telemetry.enabled ? "info" : "neutral"}
+              icon="activity"
+            >
+              {telemetry.effective?.incomplete
+                ? "incomplet configurată"
+                : (telemetry.effective?.enabled ?? telemetry.enabled)
+                  ? "activă"
+                  : "oprită"}
             </Pill>
           ) : (
             <Pill kind="neutral">nemăsurat</Pill>
           )}
         </div>
         <p className="bo-hint" style={{ marginTop: 8 }}>
-          {telemetry
-            ? `${telemetry.transport} · emise: ${telemetry.emitted} · respinse: ${telemetry.rejected}. ${telemetry.note}`
-            : "Starea adaptorului nu a putut fi citită."}
+          {telemetry?.effective
+            ? `Activ acum: ${telemetry.effective.enabled ? "pornit" : "oprit"} · transport ${telemetry.effective.transport}${telemetry.effective.endpoint ? ` → ${telemetry.effective.endpoint}` : ""} · token ${telemetry.effective.token_ref}: ${telemetry.effective.token_configured ? "configurat pe server" : "lipsă"}${telemetry.effective.credential_state && telemetry.effective.credential_state !== "configured" && telemetry.effective.credential_state !== "none" ? ` · credential: ${telemetry.effective.credential_state}` : ""}.`
+            : telemetry
+              ? `${telemetry.transport} · emise: ${telemetry.emitted} · respinse: ${telemetry.rejected}.`
+              : "Starea adaptorului nu a putut fi citită."}
+        </p>
+        {telemetry?.effective?.incomplete ? (
+          <InlineAlert kind="warn">
+            Transport http ales fără endpoint sau token — plicurile rămân în
+            coadă până la completarea configurației.
+          </InlineAlert>
+        ) : null}
+        {telemetry?.effective?.credential_state === "endpoint_without_ref" ? (
+          <InlineAlert kind="warn">
+            Endpoint administrat fără referință de credential proprie —
+            livrarea refuză controlat; tokenul bootstrap nu urmează
+            plicurile pe destinații administrate. Salvează o referință
+            provisionată (BO_TELEMETRY_SECRET_REFS).
+          </InlineAlert>
+        ) : null}
+        {telemetry?.effective?.credential_state === "unprovisioned" ||
+        telemetry?.effective?.credential_state === "missing" ? (
+          <InlineAlert kind="warn">
+            Referința de credential{" "}
+            {telemetry.effective.credential_state === "unprovisioned"
+              ? "nu este în lista provisionată de operator"
+              : "nu are valoare în mediul procesului"}{" "}
+            — livrarea rămâne refuzată până la provisionare; niciun alt
+            token nu este substituit.
+          </InlineAlert>
+        ) : null}
+        <p className="bo-hint" style={{ marginTop: 8 }}>
+          Contoare proces: emise {telemetry?.emitted ?? "—"} · respinse{" "}
+          {telemetry?.rejected ?? "—"} · omise {telemetry?.dropped ?? "—"}.{" "}
+          {telemetry?.note}
         </p>
       </div>
     </div>

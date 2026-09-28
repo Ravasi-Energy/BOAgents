@@ -40,67 +40,125 @@ class PersistedEmbeddingConfigError(RuntimeError):
     function configuration this store never writes.
 
     ChromaDB 1.5.9 defers embedding-function instantiation from persisted
-    collection config to the first embed call (``CollectionCommon._embed``
-    → ``load_collection_configuration_from_json`` →
-    ``known_embedding_functions[name].build_from_config``). A tampered
-    ``schema_str`` row in ``chroma.sqlite3`` can therefore turn the next
-    ``add``/``query`` into arbitrary code loading (e.g.
-    ``sentence_transformer`` with ``trust_remote_code``). This check is the
-    only safe pre-embed gate: ``configuration_json`` is a raw dict read
-    that performs no builds, while ``collection.configuration``,
-    ``collection.schema``, ``add`` and ``query`` all instantiate from the
-    persisted config.
+    collection schema to embed/schema access: ``_embed`` and
+    ``_get_sparse_embedding_targets`` reach ``self.schema`` /
+    ``self.configuration``, whose deserialization calls
+    ``known_embedding_functions[name].build_from_config`` for every
+    ``embedding_function`` node (dense ``vector_index`` AND sparse /
+    ``defaults`` keys — including nodes the projected
+    ``configuration_json`` never surfaces). A tampered ``schema_str`` row
+    in ``chroma.sqlite3`` can therefore turn the next ``add``/``query``
+    into arbitrary code loading (e.g. ``sentence_transformer`` or
+    ``huggingface_sparse`` with ``trust_remote_code``).
+
+    The pre-embed gate must inspect ``col._model.serialized_schema``: the
+    raw schema dict the Rust backend returns, read with zero builds
+    (probe-verified). ``collection.configuration``, ``collection.schema``,
+    ``add`` and ``query`` all deserialize/build — they are the effectful
+    side, never the inspection side.
     """
 
 
-# Embedding functions this store ever persists. Anything else found in a
-# collection's persisted configuration is rejected before the first embed
-# can build it into running code.
+# Embedding functions this store ever persists in a collection schema.
+# Anything else found at any embedding_function node is rejected before
+# the first schema deserialize can build it into running code.
 _ALLOWED_EF_NAMES = frozenset({"default", "onnx_mini_lm_l6_v2"})
 
 
-def _validate_persisted_ef_config(
-    collection_name: str, configuration_json: dict[str, Any]
-) -> None:
-    """Reject a persisted collection whose embedding-function config this
-    store did not write. Reads only ``configuration_json`` — a raw
-    ``self._model.configuration_json`` dict that builds nothing (verified
-    against chromadb 1.5.9). ``ef`` shape follows upstream
-    ``load_collection_configuration_from_json``: ``"legacy"`` configs are
-    skipped by upstream too, ``"known"`` is built from
-    ``known_embedding_functions[name]``, and any other/malformed ``type``
-    reaches the same name lookup at embed time — so only the exact shapes
-    this store produces are allowed.
+def _iter_ef_nodes(node: Any, path: tuple[str, ...] = ()) -> Any:
+    """Yield ``(json_path, ef_node)`` for every ``embedding_function`` key
+    at any depth of the serialized schema — ``defaults`` and all
+    ``keys.*`` included, so no schema branch hides a node."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "embedding_function":
+                yield path + (key,), value
+            else:
+                yield from _iter_ef_nodes(value, path + (key,))
+    elif isinstance(node, list):
+        for i, item in enumerate(node):
+            yield from _iter_ef_nodes(item, path + (str(i),))
+
+
+def _validate_ef_node(collection_name: str, path: tuple[str, ...], ef: Any) -> None:
+    """Validate one persisted ``embedding_function`` node with exact
+    upstream semantics (chromadb 1.5.9 ``_deserialize_*_value_type``):
+
+    - ``None`` / ``{"type": "legacy"}`` / ``{"type": "unknown"}`` without
+      a name never reach ``build_from_config`` — allowed.
+    - ``{"type": "known", ...}`` builds at deserialize; only
+      ``default``/``onnx_mini_lm_l6_v2`` with an empty config are shapes
+      this store writes.
+    - A ``"known"``-shaped node under a dense ``vector_index`` builds
+      even when typed ``"unknown"`` (the dense branch only skips
+      ``"legacy"``), so any node carrying a registered ``name`` outside
+      the whitelist is rejected regardless of its declared ``type``.
     """
-    ef = configuration_json.get("embedding_function")
+    where = f"{collection_name!r} schema {'.'.join(path)}"
     if ef is None:
         return
     if not isinstance(ef, dict):
         raise PersistedEmbeddingConfigError(
-            f"knowledge collection {collection_name!r}: persisted "
-            "embedding_function is not a mapping"
+            f"knowledge collection {where}: persisted embedding_function "
+            "is not a mapping"
         )
     ef_type = ef.get("type")
+    name = ef.get("name")
+    if name is not None and name not in _ALLOWED_EF_NAMES:
+        raise PersistedEmbeddingConfigError(
+            f"knowledge collection {where}: persisted embedding function "
+            f"{name!r} is not one this store writes"
+        )
     if ef_type == "legacy":
+        return
+    if ef_type == "unknown":
+        # Upstream treats unknown as None only in the sparse branch; a
+        # named node can still build on the dense path — reject any
+        # unknown node that carries a name or a config payload.
+        if name is not None or ef.get("config"):
+            raise PersistedEmbeddingConfigError(
+                f"knowledge collection {where}: persisted "
+                "embedding_function 'unknown' node carries name/config"
+            )
         return
     if ef_type != "known":
         raise PersistedEmbeddingConfigError(
-            f"knowledge collection {collection_name!r}: persisted "
+            f"knowledge collection {where}: persisted "
             f"embedding_function type {ef_type!r} is not 'known'"
         )
-    name = ef.get("name")
     if name not in _ALLOWED_EF_NAMES:
         raise PersistedEmbeddingConfigError(
-            f"knowledge collection {collection_name!r}: persisted "
-            f"embedding function {name!r} is not one this store writes"
+            f"knowledge collection {where}: persisted "
+            f"embedding_function 'known' node has no name"
         )
-    # This store's legitimate collections persist an empty EF config. Any
-    # payload here (e.g. kwargs.trust_remote_code) is rejected outright.
     if ef.get("config"):
         raise PersistedEmbeddingConfigError(
-            f"knowledge collection {collection_name!r}: persisted "
+            f"knowledge collection {where}: persisted "
             "embedding_function carries a non-empty config"
         )
+
+
+def _serialized_schema(collection: Any) -> dict[str, Any]:
+    """Return the raw serialized schema — the zero-build read.
+
+    ``_model`` is chromadb-internal; if a future chromadb renames the
+    attribute or changes the shape, this fails closed instead of silently
+    skipping validation.
+    """
+    model = getattr(collection, "_model", None)
+    schema = getattr(model, "serialized_schema", None)
+    if not isinstance(schema, dict):
+        raise PersistedEmbeddingConfigError(
+            f"knowledge collection {getattr(collection, 'name', '?')!r}: "
+            "cannot inspect persisted schema — failing closed"
+        )
+    return schema
+
+
+def _validate_collection_schema(collection: Any) -> None:
+    name = getattr(collection, "name", "?")
+    for path, ef in _iter_ef_nodes(_serialized_schema(collection)):
+        _validate_ef_node(name, path, ef)
 
 
 class ChromaDBStore(KnowledgeStore):
@@ -144,23 +202,17 @@ class ChromaDBStore(KnowledgeStore):
         )
         # Validate every already-persisted collection at construction:
         # opening a DB performs no embedding-function builds, but the first
-        # embed against a tampered collection config would. See
+        # embed/schema access against a tampered schema_str would. See
         # PersistedEmbeddingConfigError.
         for col in self._client.list_collections():
-            cfg = col.configuration_json
-            if not isinstance(cfg, dict):
-                raise PersistedEmbeddingConfigError(
-                    f"knowledge collection {col.name!r}: persisted "
-                    "configuration_json is not a mapping"
-                )
-            _validate_persisted_ef_config(col.name, cfg)
+            _validate_collection_schema(col)
 
     def _get_or_create_collection(self, name: str) -> Any:
         # Re-validate before handing out a collection handle: the DB can be
         # modified on disk after construction, and ``get_collection`` /
-        # ``configuration_json`` are the probe-verified zero-build reads.
-        # Only a missing collection falls through; any other failure is
-        # re-raised rather than silently skipping validation.
+        # ``_model.serialized_schema`` are the probe-verified zero-build
+        # reads. Only a missing collection falls through; any other failure
+        # is re-raised rather than silently skipping validation.
         from chromadb.errors import NotFoundError
 
         try:
@@ -168,13 +220,7 @@ class ChromaDBStore(KnowledgeStore):
         except NotFoundError:
             existing = None
         if existing is not None:
-            cfg = existing.configuration_json
-            if not isinstance(cfg, dict):
-                raise PersistedEmbeddingConfigError(
-                    f"knowledge collection {name!r}: persisted "
-                    "configuration_json is not a mapping"
-                )
-            _validate_persisted_ef_config(name, cfg)
+            _validate_collection_schema(existing)
         return self._client.get_or_create_collection(
             name=name,
             metadata={"hnsw:space": "cosine"},

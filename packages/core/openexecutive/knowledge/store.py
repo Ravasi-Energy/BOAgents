@@ -35,6 +35,74 @@ class KnowledgeStore(ABC):
     def delete_documents(self, collection: str, where: dict[str, Any]) -> None: ...
 
 
+class PersistedEmbeddingConfigError(RuntimeError):
+    """Raised when a persisted ChromaDB collection carries an embedding
+    function configuration this store never writes.
+
+    ChromaDB 1.5.9 defers embedding-function instantiation from persisted
+    collection config to the first embed call (``CollectionCommon._embed``
+    → ``load_collection_configuration_from_json`` →
+    ``known_embedding_functions[name].build_from_config``). A tampered
+    ``schema_str`` row in ``chroma.sqlite3`` can therefore turn the next
+    ``add``/``query`` into arbitrary code loading (e.g.
+    ``sentence_transformer`` with ``trust_remote_code``). This check is the
+    only safe pre-embed gate: ``configuration_json`` is a raw dict read
+    that performs no builds, while ``collection.configuration``,
+    ``collection.schema``, ``add`` and ``query`` all instantiate from the
+    persisted config.
+    """
+
+
+# Embedding functions this store ever persists. Anything else found in a
+# collection's persisted configuration is rejected before the first embed
+# can build it into running code.
+_ALLOWED_EF_NAMES = frozenset({"default", "onnx_mini_lm_l6_v2"})
+
+
+def _validate_persisted_ef_config(
+    collection_name: str, configuration_json: dict[str, Any]
+) -> None:
+    """Reject a persisted collection whose embedding-function config this
+    store did not write. Reads only ``configuration_json`` — a raw
+    ``self._model.configuration_json`` dict that builds nothing (verified
+    against chromadb 1.5.9). ``ef`` shape follows upstream
+    ``load_collection_configuration_from_json``: ``"legacy"`` configs are
+    skipped by upstream too, ``"known"`` is built from
+    ``known_embedding_functions[name]``, and any other/malformed ``type``
+    reaches the same name lookup at embed time — so only the exact shapes
+    this store produces are allowed.
+    """
+    ef = configuration_json.get("embedding_function")
+    if ef is None:
+        return
+    if not isinstance(ef, dict):
+        raise PersistedEmbeddingConfigError(
+            f"knowledge collection {collection_name!r}: persisted "
+            "embedding_function is not a mapping"
+        )
+    ef_type = ef.get("type")
+    if ef_type == "legacy":
+        return
+    if ef_type != "known":
+        raise PersistedEmbeddingConfigError(
+            f"knowledge collection {collection_name!r}: persisted "
+            f"embedding_function type {ef_type!r} is not 'known'"
+        )
+    name = ef.get("name")
+    if name not in _ALLOWED_EF_NAMES:
+        raise PersistedEmbeddingConfigError(
+            f"knowledge collection {collection_name!r}: persisted "
+            f"embedding function {name!r} is not one this store writes"
+        )
+    # This store's legitimate collections persist an empty EF config. Any
+    # payload here (e.g. kwargs.trust_remote_code) is rejected outright.
+    if ef.get("config"):
+        raise PersistedEmbeddingConfigError(
+            f"knowledge collection {collection_name!r}: persisted "
+            "embedding_function carries a non-empty config"
+        )
+
+
 class ChromaDBStore(KnowledgeStore):
     BUILTIN_COLLECTION = "builtin_knowledge"
     COMPANY_COLLECTION = "company_docs"
@@ -74,8 +142,39 @@ class ChromaDBStore(KnowledgeStore):
             path=str(persist_directory),
             settings=Settings(anonymized_telemetry=False),
         )
+        # Validate every already-persisted collection at construction:
+        # opening a DB performs no embedding-function builds, but the first
+        # embed against a tampered collection config would. See
+        # PersistedEmbeddingConfigError.
+        for col in self._client.list_collections():
+            cfg = col.configuration_json
+            if not isinstance(cfg, dict):
+                raise PersistedEmbeddingConfigError(
+                    f"knowledge collection {col.name!r}: persisted "
+                    "configuration_json is not a mapping"
+                )
+            _validate_persisted_ef_config(col.name, cfg)
 
     def _get_or_create_collection(self, name: str) -> Any:
+        # Re-validate before handing out a collection handle: the DB can be
+        # modified on disk after construction, and ``get_collection`` /
+        # ``configuration_json`` are the probe-verified zero-build reads.
+        # Only a missing collection falls through; any other failure is
+        # re-raised rather than silently skipping validation.
+        from chromadb.errors import NotFoundError
+
+        try:
+            existing = self._client.get_collection(name)
+        except NotFoundError:
+            existing = None
+        if existing is not None:
+            cfg = existing.configuration_json
+            if not isinstance(cfg, dict):
+                raise PersistedEmbeddingConfigError(
+                    f"knowledge collection {name!r}: persisted "
+                    "configuration_json is not a mapping"
+                )
+            _validate_persisted_ef_config(name, cfg)
         return self._client.get_or_create_collection(
             name=name,
             metadata={"hnsw:space": "cosine"},

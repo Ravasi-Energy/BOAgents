@@ -108,7 +108,7 @@ def test_f10_dead_letter_retry_new_series(db, monkeypatch):
         conn.execute('UPDATE bo_telemetry_outbox SET attempts=26, delivered=2')
     calls = []
     class Adapter:
-        def deliver_event(self, envelope):
+        def deliver_event(self, envelope, **_kwargs):
             calls.append(envelope)
             return {'status': 'RECEIVED'}
     outbox.retry_outbox_entry(TENANT, 'evt-synthetic', reason='transport restored', actor='admin')

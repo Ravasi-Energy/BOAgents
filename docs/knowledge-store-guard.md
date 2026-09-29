@@ -65,20 +65,42 @@ suspect until proven otherwise.
 Preflighting refuses before the first mutation, so a rejected store leaves
 the previous client fully live. One residual window remains: if the volume
 is tampered *between* preflight and the rebuild calls, a mid-restore
-refusal can still leave DB/docs swapped to the target while the sentinel
-names the previous client. Detect it: `get_active_client()` reports A but
-the UI/API show B's data.
+refusal can still leave the live DB/docs swapped to the target while the
+`.active_client` sentinel names the previous client. Detect it by
+comparing the sentinel file against the live profile/decisions in the
+logs or SQLite — do not browse B's data in the UI as a diagnostic step;
+the UI follows the live state, which is the very thing under suspicion.
 
-Recovery is save-back-free — the target's last good slot copy is intact:
+Recovery is save-back-free and was exercised end-to-end synthetically —
+the target's last good slot copy is never touched:
 
-1. `rm <clients_root>/.active_client` — clear the sentinel **without**
-   calling `park_active_client` or `activate_client_slot` for A, which
-   would save the half-restored live state over A's good slot copy.
-2. Activate A again. With no sentinel, activation restores A's slot copy
-   verbatim and rewrites the sentinel.
-3. Fix the vector volume first (above) or the restore refuses again —
-   with live state still partial, since preflight refuses before touching
-   it.
+1. **Stop all writers** (API/scheduler down) before changing anything.
+2. **Verify the good slot copy first**: `<clients_root>/<sentinel_slug>/`
+   must contain `state.db`, `profile.yaml`, `docs/`. If it does not, there
+   is nothing verified to restore — stop here; recovery of that client is
+   undemonstrated and needs a backup, not improvisation.
+3. **Repair or replace the vector volume BEFORE re-activation** (procedure
+   above: quarantine suspect dir, fresh `VECTOR_STORE_PATH`). Skipping
+   this just makes the re-activation refuse at preflight again — though
+   harmlessly, since the partial live state stays untouched.
+4. **Quarantine the sentinel, never delete it**: rename
+   `<clients_root>/.active_client` to `.active_client.refused-<date>`.
+   Do **not** call `park_active_client` or `activate_client_slot` for A
+   while it still reads A — either would save the half-restored live
+   state over A's good slot copy.
+5. **Re-activate A** through the normal path (`activate_client_slot` /
+   the clients UI). With no sentinel, activation restores A's slot copy
+   and rewrites the sentinel — nothing is saved back. Note: the
+   pre-activation `_user_backup` snapshot only runs when `_user_backup/`
+   is absent; if it was already created (normal for client-mode users)
+   it is untouched — verify its existence first, since a missing one
+   would capture the partial live state.
+6. **Validate before resuming traffic**: sentinel names A, live decisions
+   /profile/docs match the slot copy, `app_state.store` serves queries,
+   and the slot copy itself is byte-identical (it was the source, not the
+   destination). The rebuilt vector index is *reconstructed*, not
+   byte-verbatim — re-ingest produces equivalent search, not the old
+   chunk ids.
 
 ## Situation B — private interface incompatible
 

@@ -48,7 +48,7 @@ so the UI origin is the only one that *needs* to be public. See [auth.md](auth.m
 
 One volume, mounted at `/data`:
 
-- `/data/chroma_db/` — ChromaDB vector index (built-in knowledge + uploaded company docs)
+- `/data/chroma_db/` — ChromaDB vector index (built-in knowledge + uploaded company docs). Guarded: refused schemas → [knowledge-store-guard.md](knowledge-store-guard.md)
 - `/data/episodic_memory.db` — SQLite: episodic memory, people, alerts, scheduled actions, audit log
 - `/data/company/profile.yaml` + `/data/company/docs/` — onboarding output + uploaded docs
 - `/data/company/mcp_servers.json` — MCP gateway config. Placing this file is what **enables** MCP when `MCP_ENABLED` is unset; set `MCP_ENABLED=false` to keep MCP off with the file in place. A config defining no servers under `mcpServers`, or a gateway that fails to start, is logged and skipped — the API boots without MCP tools (and without the email poller) rather than failing to boot.
@@ -212,6 +212,7 @@ the host — a plain file copy of a live SQLite database can be torn.
 | Browser console shows CORS errors | UI origin missing from `BACKEND_ALLOWED_ORIGINS` | Add the exact scheme + host |
 | Scheduled actions firing twice | More than one API replica | Scale the API to exactly 1 (see the warning at the top) |
 | Onboarding wizard says "no company profile" | Empty volume on first boot | Expected — complete the wizard; output lands at `/data/company/profile.yaml` |
+| Boot or a job fails with `PersistedEmbeddingConfigError` | Persisted collection schema refused by the integrity guard (tampered or written by a different ChromaDB) | [knowledge-store-guard.md](knowledge-store-guard.md) — preserve the volume, rebuild from trusted sources; do not delete or hand-edit `chroma.sqlite3` |
 
 ---
 

@@ -48,7 +48,7 @@ so the UI origin is the only one that *needs* to be public. See [auth.md](auth.m
 
 One volume, mounted at `/data`:
 
-- `/data/chroma_db/` — ChromaDB vector index (built-in knowledge + uploaded company docs)
+- `/data/chroma_db/` — ChromaDB vector index (built-in knowledge + uploaded company docs). Guarded: refused schemas → [knowledge-store-guard.md](knowledge-store-guard.md)
 - `/data/episodic_memory.db` — SQLite: episodic memory, people, alerts, scheduled actions, audit log
 - `/data/company/profile.yaml` + `/data/company/docs/` — onboarding output + uploaded docs
 - `/data/company/mcp_servers.json` — MCP gateway config. Placing this file is what **enables** MCP when `MCP_ENABLED` is unset; set `MCP_ENABLED=false` to keep MCP off with the file in place. A config defining no servers under `mcpServers`, or a gateway that fails to start, is logged and skipped — the API boots without MCP tools (and without the email poller) rather than failing to boot.
@@ -60,6 +60,7 @@ repo-relative so a local checkout works with no configuration:
 ```
 VECTOR_STORE_PATH             = /data/chroma_db
 EPISODIC_DB_PATH              = /data/episodic_memory.db
+BOAGENTS_DB_PATH              = /data/bo_agents.db
 COMPANY_PROFILE_PATH          = /data/company/profile.yaml
 MCP_SERVERS_CONFIG_PATH       = /data/company/mcp_servers.json
 WORKSPACE_MCP_CREDENTIALS_DIR = /data/google_credentials
@@ -77,7 +78,8 @@ with "no company profile" on a fresh volume is expected, not a fault.
 
 | Variable | Why |
 |---|---|
-| `ANTHROPIC_API_KEY` | Every agent call. The app will not start without it. |
+| `ANTHROPIC_API_KEY` or a configured alternative provider | Required by the host application unless running entirely on a configured local/OpenRouter provider; see .env.example. |
+| `BACKEND_PROXY_SECRET` | Separate server-only delegation credential on API and UI, distinct from the service key. Required for signed-in BO users; see auth.md. |
 | `BACKEND_SHARED_SECRET` | Gates every API route via `x-api-key`. Generate with `openssl rand -hex 32`; the UI needs the same value. |
 | `OE_PUBLIC_DEPLOYMENT=1` | **Set this on every internet-reachable instance.** See below. |
 | `BACKEND_ALLOWED_ORIGINS` | Comma-separated UI origins allowed through CORS, e.g. `https://exec.example.com`. |
@@ -210,6 +212,9 @@ the host — a plain file copy of a live SQLite database can be torn.
 | Browser console shows CORS errors | UI origin missing from `BACKEND_ALLOWED_ORIGINS` | Add the exact scheme + host |
 | Scheduled actions firing twice | More than one API replica | Scale the API to exactly 1 (see the warning at the top) |
 | Onboarding wizard says "no company profile" | Empty volume on first boot | Expected — complete the wizard; output lands at `/data/company/profile.yaml` |
+| Boot or a job fails with `PersistedEmbeddingConfigError` | Persisted collection schema refused by the integrity guard (tampered or written by a different ChromaDB) | [knowledge-store-guard.md](knowledge-store-guard.md) — preserve the volume, rebuild from trusted sources; do not delete or hand-edit `chroma.sqlite3` |
+| API answers `503 restore_blocked` on all routes | A client activation failed mid-restore and automatic recovery also failed (or the process restarted mid-transition); `.restore_blocked` marker under `_client_slots/` | Repair the vector volume, then complete the recorded recovery (`POST /clients/<restore_slug>/activate` or `POST /fixtures/unload`) — see [knowledge-store-guard.md](knowledge-store-guard.md) § "Restore-blocked". Restarting alone does not clear the marker |
+| Container exits at boot with `PersistedEmbeddingConfigError` and `/health` never answers | `.restore_blocked` marker present AND the vector volume still refuses — startup builds `ChromaDBStore` before any route exists, so the API never binds | Fail-closed. The recovery endpoints are unreachable until the volume is repaired: quarantine/replace the volume **offline** (see [knowledge-store-guard.md](knowledge-store-guard.md)), then start the process and complete the recorded recovery. Do not delete `.restore_blocked` to force boot |
 
 ---
 

@@ -169,7 +169,12 @@ async def run_client_rotation(
                 else:
                     # Half-restored live state must be DISCARDED, never saved
                     # back over anyone's good copy.
-                    await _force_restore(settings, original, app_state=app_state)
+                    await _force_restore(
+                        settings,
+                        original,
+                        app_state=app_state,
+                        failed_slug=next(iter(failed), None),
+                    )
         except Exception:
             # The one failure mode we cannot paper over: the operator must
             # know their active client wasn't restored.
@@ -192,7 +197,11 @@ async def run_client_rotation(
 
 
 async def _force_restore(
-    settings: Any, slug: str, *, app_state: Any | None = None
+    settings: Any,
+    slug: str,
+    *,
+    app_state: Any | None = None,
+    failed_slug: str | None = None,
 ) -> None:
     """Restore ``slug`` WITHOUT saving the current live state back first.
 
@@ -205,17 +214,47 @@ async def _force_restore(
     from openexecutive.clients.slots import (
         _FIXTURE_OP_LOCK,
         _active_client_sentinel,
+        _clear_restore_blocked,
+        _mark_restore_blocked,
         _require_slot,
         _restore_slot_state,
         _set_honcho_client_workspace,
+        _write_transition_marker,
+        get_restore_blocked,
     )
 
     async with _FIXTURE_OP_LOCK:
         slot = _require_slot(settings, slug)
+        # Same durable-transition rule as activate_client_slot: when no
+        # marker exists yet, this restore is itself the transition that
+        # needs one — a kill mid-restore must still fence the restarted
+        # process. A write failure aborts BEFORE any live mutation.
+        fresh_marker = get_restore_blocked(settings) is None
+        if fresh_marker:
+            _write_transition_marker(
+                settings, failed_slug=failed_slug or slug, target_slug=slug
+            )
         await _restore_slot_state(settings, slot, app_state=app_state)
         _active_client_sentinel(settings).parent.mkdir(parents=True, exist_ok=True)
         _active_client_sentinel(settings).write_text(slug, encoding="utf-8")
         _set_honcho_client_workspace(slug)
+        # If a restore block was active, live state is now provably `slug` —
+        # re-point the recorded recovery target at it so the operator's
+        # allowed re-activation restores the client that's actually live,
+        # not a stale name. (The block itself persists until that
+        # re-activation verifies and clears it — still fail-closed.) A
+        # marker this call wrote is different: the restore it fenced just
+        # completed and verified, so it clears like a successful
+        # activation's marker does — sentinel first, marker last.
+        marker = get_restore_blocked(settings)
+        if fresh_marker:
+            _clear_restore_blocked(settings)
+        elif marker is not None and marker.get("restore_slug") != slug:
+            _mark_restore_blocked(
+                settings,
+                failed_slug=marker.get("failed_slug") or slug,
+                target_slug=slug,
+            )
 
 
 async def _run_quiet_work_for_live_client(settings: Any, slug: str) -> None:

@@ -28,6 +28,9 @@ def get_conn(db_path: Path | None = None) -> Generator[sqlite3.Connection, None,
     conn = sqlite3.connect(str(_resolve_db_path(db_path)))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # Concurrent rebind/claim/worker writers must wait for the lock rather
+    # than failing spuriously — same policy as the audit logger.
+    conn.execute("PRAGMA busy_timeout=5000")
     try:
         yield conn
         conn.commit()
@@ -38,6 +41,7 @@ def get_conn(db_path: Path | None = None) -> Generator[sqlite3.Connection, None,
 def initialize_db(db_path: Path | None = None) -> None:
     """Create every BOAgents table idempotently. Called from the lifespan."""
     from openexecutive.bo.bots import store as bots_store
+    from openexecutive.bo.execution import store as execution_store
     from openexecutive.bo.packages import store as packages_store
     from openexecutive.bo.routing import store as routing_store
     from openexecutive.bo.settings import store as settings_store
@@ -46,3 +50,6 @@ def initialize_db(db_path: Path | None = None) -> None:
     bots_store.initialize_db(db_path)
     packages_store.initialize_db(db_path)
     routing_store.initialize_db(db_path)
+    execution_store.initialize_db(db_path)
+    from openexecutive.bo.pilot.service import initialize_db as initialize_pilot
+    initialize_pilot(db_path)

@@ -30,11 +30,23 @@ async def health_check() -> HealthResponse:
 
     profile = load_or_create_profile()
 
+    # /health is unauthenticated AND allowed through the restore-blocked
+    # gate — while blocked, the live profile may be the half-swapped
+    # incoming client's, so withhold the name rather than disclose a
+    # possibly-wrong identity to an unauthenticated caller.
+    from openexecutive.clients.slots import is_restore_blocked
+
+    blocked = is_restore_blocked()
+
     return HealthResponse(
-        status="ok",
+        # "degraded" (still HTTP 200 — the process IS up) so health-check
+        # monitors can see the fence without being handed any identity.
+        status="degraded" if blocked else "ok",
         builtin_knowledge_chunks=chunk_count,
         company_profile_loaded=not profile.is_empty(),
-        company_name=profile.name if not profile.is_empty() else None,
+        company_name=(
+            profile.name if not profile.is_empty() and not blocked else None
+        ),
         builtin_skills=builtin_skills_count,
         company_skills=company_skills_count,
     )

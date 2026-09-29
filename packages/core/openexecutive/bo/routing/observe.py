@@ -248,8 +248,8 @@ def observe_call(
         )
         store.sweep_observations(tenant, retention, db_path=db_path)
         return {"obs_id": obs_id, "decision": decision.decision}
-    except Exception:  # noqa: BLE001 — observation is strictly best-effort
-        logger.warning("bo.router.observe_call a eșuat", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — observation is strictly best-effort
+        logger.warning("bo.router.observe_call a eșuat (%s)", type(exc).__name__)
         return None
 
 
@@ -285,8 +285,8 @@ def emit_catalog_sync(tenant: str, db_path: Path | None = None) -> None:
             envelope, db_path=db_path,
         )
         delivery.ensure_worker(db_path=db_path)
-    except Exception:  # noqa: BLE001 — inventory sync never blocks the write
-        logger.warning("emit_catalog_sync a eșuat", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — inventory sync never blocks the write
+        logger.warning("emit_catalog_sync a eșuat (%s)", type(exc).__name__)
 
 
 __all__ = ["emit_catalog_sync", "flush_pending", "load_policy", "observe_call"]

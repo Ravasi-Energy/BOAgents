@@ -382,10 +382,34 @@ async def resolve_and_acknowledge(
     Never raises: an inbound message must still reach the chat path if the
     resolver or the run store is having a bad day.
     """
+    # A restore-blocked instance must not resolve gates on possibly
+    # half-swapped live state — the resume would execute the wrong client's
+    # remaining steps (incl. outbound sends), and this path is reachable
+    # from socket-mode adapters that never pass the HTTP 503 gate. Tell the
+    # human and consume the message: returning False would fall it through
+    # to alert triage + a full chat turn — same wrong-identity problem.
+    from openexecutive.clients.slots import is_restore_blocked
     from openexecutive.workflows.resumer import (
         apply_resolution,
         resolution_acknowledgement,
     )
+
+    if is_restore_blocked():
+        try:
+            await send(
+                "I'm in maintenance mode — a client switch failed and the "
+                "instance is fenced off until an operator completes the "
+                "recovery. Your reply wasn't recorded; please resend it "
+                "after the service is back."
+            )
+        except Exception:
+            logger.exception(
+                "resolver: could not send restore-blocked notice to "
+                "person %s on %s",
+                person_id,
+                channel,
+            )
+        return True
 
     try:
         resolution = await resolve_inbound_message(

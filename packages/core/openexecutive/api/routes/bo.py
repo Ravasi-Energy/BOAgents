@@ -28,6 +28,9 @@ from openexecutive.bo import identity as bo_identity
 from openexecutive.bo.bots import examples as bot_examples
 from openexecutive.bo.bots import service as bot_service
 from openexecutive.bo.bots import store as bot_store
+from openexecutive.bo.execution import engine as exec_engine
+from openexecutive.bo.execution import store as exec_store
+from openexecutive.bo.execution.mandate import MandateValidationError
 from openexecutive.bo.packages import service as pkg_service
 from openexecutive.bo.packages import store as pkg_store
 from openexecutive.bo.packages.errors import PackageReject
@@ -73,6 +76,10 @@ async def _bo_conflict(_req: Request, exc: Exception) -> JSONResponse:
     return _bo_json(409, "version_conflict", str(exc))
 
 
+async def _bo_disabled_exec(_req: Request, exc: Exception) -> JSONResponse:
+    return _bo_json(403, "exec_disabled", str(exc))
+
+
 async def _bo_invalid(_req: Request, exc: Exception) -> JSONResponse:
     if isinstance(exc, bot_service.ValidationFailure):
         return _bo_json(422, "invalid_definition", exc.errors)
@@ -105,6 +112,12 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(bot_service.SimulationRefused, _bo_invalid)  # type: ignore[arg-type]
     app.add_exception_handler(SettingValidationError, _bo_invalid)  # type: ignore[arg-type]
     app.add_exception_handler(TelemetrySchemaError, _bo_invalid)  # type: ignore[arg-type]
+    app.add_exception_handler(exec_store.NotFoundError, _bo_not_found)  # type: ignore[arg-type]
+    app.add_exception_handler(exec_store.ConflictError, _bo_conflict)  # type: ignore[arg-type]
+    app.add_exception_handler(exec_store.BudgetExceededError, _bo_conflict)  # type: ignore[arg-type]
+    app.add_exception_handler(exec_store.InvalidStateError, _bo_conflict)  # type: ignore[arg-type]
+    app.add_exception_handler(MandateValidationError, _bo_invalid)  # type: ignore[arg-type]
+    app.add_exception_handler(exec_engine.ExecutionDisabledError, _bo_disabled_exec)  # type: ignore[arg-type]
 
 
 # --------------------------------------------------------------------------- #
@@ -116,6 +129,44 @@ def _identity(request: Request) -> bo_identity.Identity:
 
 
 BoIdentity = Annotated[bo_identity.Identity, Depends(_identity)]
+
+
+class _PilotActivation(BaseModel):
+    import_id: str = Field(min_length=1, max_length=80)
+    active: bool
+    expected_version: int = Field(ge=0)
+    reason: str = Field(min_length=3, max_length=300)
+
+
+class _PilotRun(BaseModel):
+    mandate_id: str = Field(min_length=1, max_length=80)
+    correlation_id: str | None = Field(default=None, max_length=80)
+
+
+@router.get("/pilot")
+def pilot_status(ident: BoIdentity) -> Any:
+    from openexecutive.bo.pilot.service import status
+    return status(ident)
+
+
+@router.put("/pilot/activation")
+def pilot_activation(body: _PilotActivation, ident: BoIdentity) -> Any:
+    from openexecutive.bo.pilot.service import change_activation
+    return change_activation(ident, **body.model_dump())
+
+
+@router.post("/pilot/runs", status_code=201)
+def pilot_run(body: _PilotRun, ident: BoIdentity) -> Any:
+    from openexecutive.bo.pilot.service import submit
+    return submit(ident, **body.model_dump())
+
+
+@router.post("/pilot/runs/{run_id}/telemetry/replay")
+def pilot_telemetry_replay(run_id: str, ident: BoIdentity) -> Any:
+    """Re-queue missing observation/telemetry envelopes from the persisted
+    evidence — idempotent, audited, never a new effect or provider call."""
+    from openexecutive.bo.pilot.service import replay_telemetry
+    return replay_telemetry(ident, run_id)
 
 
 class _SettingPatch(BaseModel):
@@ -194,8 +245,8 @@ def _config_applied(ident: bo_identity.Identity, key: str,
             "appliedVersion": record["version"],
             "actorRef": opaque_actor_ref(ident.actor),
         })
-    except Exception:  # noqa: BLE001 — telemetry never breaks the write path
-        logger.warning("ConfigApplied emit failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — telemetry never breaks the write path
+        logger.warning("emiterea ConfigApplied a eșuat (%s)", type(exc).__name__)
 
 
 # --------------------------------------------------------------------------- #
@@ -302,15 +353,39 @@ def get_run(run_id: str,
 def telemetry_status(ident: BoIdentity) -> Any:
     bo_identity.require(ident, "telemetry:read")
     adapter = get_adapter()
+    cfg = adapter.resolve(ident.tenant)
     return {
+        # Bootstrap = the env/injected adapter the process was built with.
         "enabled": adapter.enabled,
         "transport": type(adapter.transport).__name__,
         "emitted": adapter.emitted,
         "dropped": adapter.dropped,
         "rejected": adapter.rejected,
         "schema_version": "bo.telemetry.v1",
-        "note": "Telemetria este oprită implicit; se activează doar prin "
-                "configurație explicită (BO_TELEMETRY_*).",
+        # Effective = what the next envelope for this tenant actually uses —
+        # administered bo.telemetry.* rows win over bootstrap. The token
+        # itself is server-only; only its configured/not-configured status
+        # and the env-var reference are exposed.
+        "effective": {
+            "enabled": cfg.enabled,
+            "transport": cfg.transport_kind,
+            "endpoint": cfg.endpoint or None,
+            "token_ref": cfg.token_ref,
+            "token_configured": cfg.token_configured,
+            # Credential↔destination binding state — the SecretRef NAME
+            # only, never the secret. „endpoint_without_ref"/
+            # „unprovisioned"/„missing" mean delivery refuses closed.
+            "credential_ref": cfg.credential_ref,
+            "credential_state": cfg.credential_state,
+            "incomplete": cfg.enabled
+            and cfg.transport_kind == "http"
+            and cfg.transport is None,
+            "source": cfg.source,
+        },
+        "note": "Telemetria este oprită implicit; se activează prin "
+                "BO_TELEMETRY_ENABLED sau prin setarea tenant "
+                "bo.telemetry.enabled — valoarea salvată are prioritate "
+                "față de bootstrap.",
     }
 
 
@@ -520,3 +595,500 @@ def flush_routing_observations(ident: BoIdentity) -> Any:
     unavailable — local retention + explicit retry, never silent loss."""
     bo_identity.require(ident, "routing:write")
     return routing_observe.flush_pending(ident.tenant)
+
+
+# --------------------------------------------------------------------------- #
+# Delegated execution (VAL4-01)
+# --------------------------------------------------------------------------- #
+
+class _MandateCreate(BaseModel):
+    parent_mandate_id: str | None = None
+    guardian_ref: str | None = Field(default=None, min_length=1, max_length=128)
+    allowed_resources: list[str] = Field(min_length=1, max_length=64)
+    allowed_actions: list[str] = Field(min_length=1, max_length=64)
+    budget_limit: str | float | int
+    concurrency_limit: int = Field(ge=1, le=64)
+    max_steps: int = Field(ge=1, le=500)
+    max_depth: int = Field(ge=0, le=16)
+    expires_at: str = Field(min_length=10, max_length=40)
+
+
+class _RunCreate(BaseModel):
+    mandate_id: str = Field(min_length=1, max_length=80)
+    steps: list[dict[str, Any]] = Field(min_length=1, max_length=500)
+    budget_amount: str | float | int
+    parent_run_id: str | None = None
+    correlation_id: str | None = Field(default=None, max_length=80)
+
+
+class _RevokeBody(BaseModel):
+    reason: str = Field(min_length=1, max_length=300)
+
+
+class _ReconcileBody(BaseModel):
+    resolution: str = Field(pattern="^(receipt|mark_failed)$")
+
+
+class _FlagBody(BaseModel):
+    reason: str | None = Field(default=None, max_length=300)
+
+
+def _guardian_summary(tenant: str, mandate: Any | None = None) -> dict[str, Any]:
+    """Effective-authority surface for operators — booleans only, never
+    credentials. `bound_ref` is the explicit Guardian link the mandate
+    was created with (stable across restarts)."""
+    from openexecutive.bo.execution import guardian as exec_guardian
+
+    endpoint, token, _t, required = exec_guardian._link_config(
+        tenant, None
+    )
+    refs = []
+    if mandate is not None:
+        refs = list(dict.fromkeys(
+            link.guardian_ref for link in exec_store.mandate_chain(tenant, mandate.mandate_id)
+            if link.guardian_ref
+        ))
+    return {
+        "bound_ref": (getattr(mandate, "guardian_ref", None) or (refs[0] if refs else None)),
+        "chain_refs": refs,
+        "endpoint_configured": bool(endpoint),
+        "credential_configured": bool(token),
+        "auth_required": required,
+        "policy_layer": bool(
+            exec_guardian._policy_token(tenant, None)
+        ),
+    }
+
+
+def _mandate_json(m: Any) -> dict[str, Any]:
+    from openexecutive.bo.execution.mandate import mandate_state
+
+    return {
+        "mandate_id": m.mandate_id,
+        "parent_mandate_id": m.parent_mandate_id,
+        "principal_ref": m.principal_ref,
+        "depth": m.depth,
+        "allowed_resources": sorted(m.allowed_resources),
+        "allowed_actions": sorted(m.allowed_actions),
+        "budget_limit": str(m.budget_limit),
+        "concurrency_limit": m.concurrency_limit,
+        "max_steps": m.max_steps,
+        "max_depth": m.max_depth,
+        "expires_at": m.expires_at,
+        "policy_version": m.policy_version,
+        "state": mandate_state(m),
+        "revoked_at": m.revoked_at,
+        "revoked_reason": m.revoked_reason,
+        "guardian_ref": getattr(m, "guardian_ref", None),
+        "created_by": m.created_by,
+        "created_at": m.created_at,
+    }
+
+
+@router.get("/execution/mandates")
+def list_mandates(ident: BoIdentity) -> Any:
+    bo_identity.require(ident, "execution:read")
+    return {
+        "mandates": [
+            _mandate_json(m)
+            for m in exec_store.list_mandates(ident.tenant)
+        ],
+    }
+
+
+@router.post("/execution/mandates", status_code=201)
+def create_mandate(body: _MandateCreate, ident: BoIdentity) -> Any:
+    bo_identity.require(ident, "execution:write")
+    tenant = ident.tenant
+    parent = (
+        exec_store.get_mandate(tenant, body.parent_mandate_id)
+        if body.parent_mandate_id
+        else None
+    )
+    policy_version = settings_store.config_version(tenant)
+    max_depth_cap = int(
+        settings_store.get_effective_value(
+            tenant, "bo.exec.max_delegation_depth"
+        )
+    )
+    mandate = exec_store.create_mandate(
+        tenant,
+        {
+            "allowed_resources": body.allowed_resources,
+            "allowed_actions": body.allowed_actions,
+            "budget_limit": body.budget_limit,
+            "concurrency_limit": body.concurrency_limit,
+            "max_steps": body.max_steps,
+            "max_depth": body.max_depth,
+            "expires_at": body.expires_at,
+        },
+        parent=parent,
+        principal_ref=opaque_actor_ref(ident.actor),
+        policy_version=policy_version,
+        actor=ident.actor,
+        max_depth_cap=max_depth_cap,
+        guardian_ref=body.guardian_ref,
+    )
+    return {"mandate": _mandate_json(mandate)}
+
+
+@router.post("/execution/mandates/{mandate_id}/revoke")
+def revoke_mandate(
+    mandate_id: str, body: _RevokeBody, ident: BoIdentity
+) -> Any:
+    """Revoke a mandate (and transitively its subtree). Takes effect at
+    the NEXT effect boundary — in-flight runs see it before the next
+    effect, never only at creation."""
+    bo_identity.require(ident, "execution:write")
+    mandate = exec_store.revoke_mandate(
+        ident.tenant, mandate_id, reason=body.reason, actor=ident.actor,
+    )
+    return {"mandate": _mandate_json(mandate)}
+
+
+@router.get("/execution/runs")
+def list_runs(ident: BoIdentity, state: str | None = None) -> Any:
+    bo_identity.require(ident, "execution:read")
+    runs = exec_store.list_runs(ident.tenant, state=state)
+    return {"runs": runs}
+
+
+@router.post("/execution/runs", status_code=201)
+def submit_run(body: _RunCreate, ident: BoIdentity) -> Any:
+    """Submit a delegated execution. Authorization is validated against
+    the LIVE mandate chain — expiry or revocation is caught here and again
+    at every effect boundary."""
+    bo_identity.require(ident, "execution:write")
+    from decimal import Decimal, InvalidOperation
+
+    try:
+        budget = Decimal(str(body.budget_amount))
+    except InvalidOperation as exc:
+        raise MandateValidationError("budget_amount: format decimal invalid") from exc
+    run = exec_engine.submit_execution(
+        ident.tenant, body.mandate_id, body.steps,
+        budget_amount=budget,
+        correlation_id=body.correlation_id,
+        actor=ident.actor, parent_run_id=body.parent_run_id,
+    )
+    return {"run": run}
+
+
+@router.get("/execution/runs/{run_id}")
+def get_run_detail(run_id: str, ident: BoIdentity) -> Any:
+    """Full run detail: tree position, checkpoints, ledger, reservation —
+    execution vs observation is explicit in the payload."""
+    bo_identity.require(ident, "execution:read")
+    tenant = ident.tenant
+    run = exec_store.get_run(tenant, run_id)
+    mandate = exec_store.get_mandate(tenant, run["mandate_id"])
+    children = [
+        r for r in exec_store.list_runs(tenant)
+        if r["parent_run_id"] == run_id
+    ]
+    return {
+        "run": run,
+        "kind": "execution",
+        "mandate": _mandate_json(mandate),
+        "chain": [
+            _mandate_json(m)
+            for m in exec_store.mandate_chain(tenant, run["mandate_id"])
+        ],
+        "children": children,
+        "checkpoints": exec_store.list_checkpoints(tenant, run_id),
+        "ledger": exec_store.list_ledger(tenant, run_id),
+        "reservation": exec_store.reservation_for(tenant, run_id),
+        "guardian": _guardian_summary(tenant, mandate),
+        "limits_note": "exactly-once nu e promis pentru provideri fără "
+        "idempotență/receipt — stările UNKNOWN cer reconciliere",
+    }
+
+
+@router.post("/execution/runs/{run_id}/pause")
+def pause_run(
+    run_id: str, ident: BoIdentity, body: _FlagBody | None = None,
+) -> Any:
+    bo_identity.require(ident, "execution:write")
+    return {
+        "run": exec_store.request_flag(
+            ident.tenant, run_id, "pause_requested", actor=ident.actor,
+            reason=body.reason if body else None,
+        )
+    }
+
+
+@router.post("/execution/runs/{run_id}/cancel")
+def cancel_run(
+    run_id: str, ident: BoIdentity, body: _FlagBody | None = None,
+) -> Any:
+    """Request cancellation — honored at the next step boundary. An
+    already-executed external effect is NOT reversed (UI states this).
+    The reason is mandatory for the audit trail of a consequential op."""
+    bo_identity.require(ident, "execution:write")
+    if not body or not body.reason:
+        raise MandateValidationError(
+            "anularea cere un motiv — operație consecvențială auditată"
+        )
+    return {
+        "run": exec_store.request_flag(
+            ident.tenant, run_id, "cancel_requested", actor=ident.actor,
+            reason=body.reason,
+        )
+    }
+
+
+@router.post("/execution/runs/{run_id}/resume")
+def resume_run(run_id: str, ident: BoIdentity) -> Any:
+    """Resume a stopped run — same identity, same idempotency keys. Never
+    recreates intents and never claims to reverse effects."""
+    bo_identity.require(ident, "execution:write")
+    return {
+        "run": exec_engine.resume_run(
+            ident.tenant, run_id, actor=ident.actor
+        )
+    }
+
+
+@router.post("/execution/runs/{run_id}/reconcile")
+def reconcile_run(
+    run_id: str, body: _ReconcileBody, ident: BoIdentity
+) -> Any:
+    """Resolve ambiguous entries. ``receipt`` does a provider receipt
+    lookup (no re-execution); ``mark_failed`` is the operator's audited
+    assertion that the effect did not happen."""
+    bo_identity.require(ident, "execution:write")
+    provider = _synth_provider(ident.tenant)
+    return exec_engine.reconcile_run(
+        ident.tenant, run_id, provider,
+        resolution=body.resolution, actor=ident.actor,
+    )
+
+
+@router.get("/execution/runs/{run_id}/authority")
+def run_authority(run_id: str, ident: BoIdentity) -> Any:
+    """Live effective-authority check for the run's mandate — the same
+    evaluation the engine performs at the effect boundary. Read-only:
+    it changes nothing, it answers "would the effect be allowed NOW?"
+    and exposes the exact blocking reason for operators."""
+    from openexecutive.bo.execution import guardian as exec_guardian
+
+    bo_identity.require(ident, "execution:read")
+    tenant = ident.tenant
+    run = exec_store.get_run(tenant, run_id)
+    mandate = exec_store.get_mandate(tenant, run["mandate_id"])
+    step = (
+        run["steps"][run["current_step"]]
+        if run["current_step"] < len(run["steps"])
+        else None
+    )
+    summary = _guardian_summary(tenant, mandate)
+    if run["cancel_requested"] or run["pause_requested"]:
+        return {"authorized": False, "mode": "denied", "kind": "run_control",
+                "detail": "rularea are o cerere de pauză/anulare", "guardian": summary}
+    try:
+        exec_engine.assert_effect_authority(
+            tenant, mandate.mandate_id,
+            step_action=step.get("action") if step else None,
+            step_resource=step.get("resource") if step else None,
+        )
+    except (exec_engine.ExecutionDisabledError,
+            exec_engine.MandateRevokedError, exec_engine.MandateExpiredError) as exc:
+        return {"authorized": False, "mode": "denied", "kind": "local_authority",
+                "detail": str(exc), "guardian": summary}
+    except exec_guardian.GuardianDeniedError as exc:
+        return {
+            "authorized": False, "mode": "denied",
+            "kind": f"guardian_{exc.kind}", "detail": str(exc),
+            "guardian": summary,
+        }
+    except exec_guardian.GuardianUnavailableError as exc:
+        return {
+            "authorized": False, "mode": "unavailable",
+            "kind": "guardian_unavailable", "detail": str(exc),
+            "guardian": summary,
+        }
+    return {
+        "authorized": True,
+        "mode": "guardian" if summary["bound_ref"] else "standalone",
+        "kind": None, "detail": None,
+        "guardian": summary,
+    }
+
+
+@router.get("/execution/outbox")
+def list_exec_outbox(
+    ident: BoIdentity,
+    delivered: int | None = None,
+    limit: int = 100,
+) -> Any:
+    """Inspectable outbox: pending + dead-lettered execution (and
+    telemetry) envelopes with errors, attempts and the exact persisted
+    payload — the conflict/422 detail stays visible, never dropped."""
+    bo_identity.require(ident, "execution:read")
+    from openexecutive.bo.routing import store as routing_store
+
+    return {
+        "entries": routing_store.list_outbox(
+            ident.tenant,
+            delivered=delivered if delivered in (0, 1, 2) else None,
+            limit=min(max(limit, 1), 500),
+        ),
+        "stats": routing_store.outbox_stats(ident.tenant),
+    }
+
+
+class _RetryBody(BaseModel):
+    reason: str = Field(min_length=1, max_length=300)
+
+
+@router.post("/execution/outbox/{event_id}/retry")
+def retry_outbox(
+    event_id: str, body: _RetryBody, ident: BoIdentity
+) -> Any:
+    """Authorized requeue of a DEAD-lettered envelope — the only safe
+    retry: pending entries are in-flight, delivered ones are done. The
+    persisted bytes are re-sent unchanged (receiver dedups by eventId).
+    Reason is mandatory — consequential, audited."""
+    bo_identity.require(ident, "execution:write")
+    from openexecutive.bo.routing import store as routing_store
+
+    return routing_store.retry_outbox_entry(
+        ident.tenant, event_id, reason=body.reason, actor=ident.actor,
+    )
+
+
+class _RebindBody(BaseModel):
+    reason: str = Field(min_length=1, max_length=300)
+    event_ids: list[Annotated[str, Field(max_length=128)]] | None = Field(
+        default=None, max_length=200
+    )
+
+
+@router.post("/execution/outbox/rebind")
+def rebind_outbox(body: _RebindBody, ident: BoIdentity) -> Any:
+    """Explicit, audited re-association of undelivered envelopes with the
+    tenant's CURRENT destination for their kind — the only authorized way
+    to move backlog or legacy rows that carry no recorded binding.
+    Envelope bytes and identities are never rewritten; delivered rows are
+    untouched. Admin-only, reason mandatory."""
+    bo_identity.require(ident, "execution:write")
+    from openexecutive.bo.routing import store as routing_store
+
+    return routing_store.rebind_outbox(
+        ident.tenant, event_ids=body.event_ids, actor=ident.actor,
+        reason=body.reason,
+    )
+
+
+@router.get("/execution/audit-intents")
+def list_audit_intents(
+    ident: BoIdentity,
+    status: str | None = None,
+    limit: int = 200,
+    offset: int = 0,
+) -> Any:
+    """Operator evidence export — durable audit intents correlated with
+    the central journal: status, attempts, claim generation, and the
+    ``audit_row_id`` marker plus whether that row actually exists. An
+    orphan marker (journal restored without the row) shows as
+    ``journal_row_present=false`` — never implied delivered. Bounded,
+    tenant-scoped, secret-free by construction (rebind metadata only)."""
+    bo_identity.require(ident, "execution:read")
+    from openexecutive.bo.routing import store as routing_store
+
+    if status is not None and status not in {
+        "pending", "delivered", "failed",
+    }:
+        status = None
+    return routing_store.audit_intents_evidence(
+        ident.tenant, status=status, limit=limit, offset=offset,
+    )
+
+
+class _AuditRequeueBody(BaseModel):
+    intent_id: str | None = Field(default=None, max_length=128)
+    reason: str | None = Field(default=None, max_length=500)
+
+
+@router.post("/execution/outbox/audit-requeue")
+def audit_requeue(
+    ident: BoIdentity, body: _AuditRequeueBody | None = None,
+) -> Any:
+    """Explicit operator recovery for audit intents — parked ``failed``
+    ones go back to ``pending``; with ``intent_id``, a single ``delivered``
+    intent may be demoted ONLY when the journal verifiably lost its
+    evidence (restored/corrupt journal) — live evidence is refused.
+    Audited like the mutation it is. Admin-only."""
+    bo_identity.require(ident, "execution:write")
+    from openexecutive.bo.routing import store as routing_store
+
+    try:
+        return routing_store.requeue_failed_audit_intents(
+            ident.tenant, actor=ident.actor,
+            intent_id=body.intent_id if body else None,
+            reason=body.reason if body else None,
+        )
+    except ValueError as exc:
+        return _bo_json(409, "audit_requeue_refused", str(exc))
+
+
+class _WorkBody(BaseModel):
+    limit: int = Field(default=5, ge=1, le=50)
+    worker_id: str | None = Field(default=None, max_length=80)
+
+
+@router.post("/execution/work")
+def work_once(body: _WorkBody, ident: BoIdentity) -> Any:
+    """One bounded work cycle — claims runnable runs and executes them
+    against the tenant's synthetic provider. Operator+ (the local
+    process-level worker; scheduling stays the operator's choice)."""
+    bo_identity.require(ident, "execution:operate")
+    return exec_engine.work_once(
+        ident.tenant,
+        provider=_synth_provider(ident.tenant),
+        worker_id=body.worker_id, limit=body.limit,
+    )
+
+
+@router.get("/execution/status")
+def execution_status(ident: BoIdentity) -> Any:
+    bo_identity.require(ident, "execution:read")
+    tenant = ident.tenant
+    runs = exec_store.list_runs(tenant)
+    by_state: dict[str, int] = {}
+    for r in runs:
+        by_state[r["state"]] = by_state.get(r["state"], 0) + 1
+    provider = _synth_provider(tenant)
+    return {
+        "enabled": exec_engine.enabled(tenant),
+        "runs_total": len(runs),
+        "by_state": by_state,
+        "synthetic_effect_total": provider.total(tenant),
+        "guardian": _guardian_summary(tenant),
+        "limits": {
+            "max_delegation_depth": settings_store.get_effective_value(
+                tenant, "bo.exec.max_delegation_depth"
+            ),
+            "max_steps": settings_store.get_effective_value(
+                tenant, "bo.exec.max_steps"
+            ),
+            "lease_seconds": settings_store.get_effective_value(
+                tenant, "bo.exec.lease_seconds"
+            ),
+            "checkpoint_required": settings_store.get_effective_value(
+                tenant, "bo.exec.checkpoint_required"
+            ),
+        },
+        "note": "Efectele sunt exclusiv sintetice și locale; provideri "
+        "fără idempotență nu garantează exactly-once — UNKNOWN cere "
+        "reconciliere, nu reexecutare oarbă.",
+    }
+
+
+def _synth_provider(tenant: str) -> Any:
+    """The tenant's synthetic provider — idempotent by default (the
+    reference provider). Non-idempotent behavior is exercised through
+    tests/probes with explicit providers."""
+    from openexecutive.bo.execution.synth import SyntheticCounterProvider
+
+    return SyntheticCounterProvider(idempotent=True)

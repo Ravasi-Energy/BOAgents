@@ -290,6 +290,20 @@ async def _load_from_dir(
     of where ``fixture_dir`` came from.
     """
     async with _FIXTURE_OP_LOCK:
+        # Inside the lock — a block marker can land between an outside
+        # check and lock acquisition, and the park/unload below would then
+        # operate on the very mixed state the marker describes. Reads the
+        # caller's settings, not a lazy global, so tests/CLI callers with
+        # non-default paths are fenced at their own _client_slots dir.
+        from openexecutive.clients.slots import get_restore_blocked
+
+        if get_restore_blocked(settings) is not None:
+            raise FixtureActiveError(
+                "Instance is restore-blocked: a failed client activation left "
+                "live state inconsistent. Complete the recorded recovery "
+                "(reactivate the recorded client or POST /fixtures/unload) "
+                "before loading a fixture."
+            )
         # If a client slot is active, the live state belongs to that client —
         # save it back to its slot and leave client mode before the fixture
         # replaces everything. Without this, loading a demo would silently
@@ -417,13 +431,24 @@ def list_all_fixtures() -> list[dict[str, Any]]:
     return generated + curated
 
 
-async def _apply_state_from_source(source_dir: Path, settings: Any) -> dict[str, Any]:
+async def _apply_state_from_source(
+    source_dir: Path, settings: Any, *, strict_per_company: bool = False
+) -> dict[str, Any]:
     """Apply profile.yaml + docs/ + memory.json + people.yaml + departments.yaml
     from ``source_dir`` to the live company state.
 
     Shared by ``load_fixture()`` (source = fixture dir) and ``unload_fixture()``
     (source = ``_user_backup/`` dir). Wipes the company-side state before
     writing, so the source dir is fully authoritative.
+
+    ``strict_per_company``: when the caller is repairing a restore-blocked
+    incident (recovery to ``_user_backup`` or unload under the marker), live
+    ``mcp_servers.json``/``skills/`` may carry the FAILED client's state —
+    the source dir becomes authoritative for them (restore when present,
+    remove when absent). On the normal load/unload paths it stays False:
+    backups written before these artifacts were captured lack them, and
+    deleting the user's live MCP config/skills would brick integrations —
+    keep them instead (pre-existing behavior for fixture loads).
     """
     from openexecutive.knowledge.loader import ingest_file
     from openexecutive.knowledge.store import ChromaDBStore
@@ -450,6 +475,28 @@ async def _apply_state_from_source(source_dir: Path, settings: Any) -> dict[str,
         for src in src_docs_dir.glob("*.md"):
             shutil.copy2(src, company_docs_dir / src.name)
 
+    # ── 2b. mcp_servers.json + skills/ — per-company surfaces. In strict
+    #       mode (restore-blocked recovery) the source is authoritative:
+    #       restore when present, remove when absent — no MCP config is
+    #       safer than the failed client's credentials. Non-strict restores
+    #       copies when present but leaves live artifacts alone otherwise
+    #       (old backups predate these keys; deleting would lose them).
+    src_mcp = source_dir / "mcp_servers.json"
+    dst_mcp = getattr(settings, "mcp_servers_config_path", None)
+    if dst_mcp is not None:
+        if src_mcp.exists():
+            shutil.copy2(src_mcp, dst_mcp)
+        elif strict_per_company:
+            dst_mcp.unlink(missing_ok=True)
+    src_skills = source_dir / "skills"
+    dst_skills = settings.company_profile_path.parent / "skills"
+    if src_skills.is_dir():
+        if dst_skills.exists():
+            shutil.rmtree(dst_skills)
+        shutil.copytree(src_skills, dst_skills)
+    elif strict_per_company and dst_skills.exists():
+        shutil.rmtree(dst_skills)
+
     # ── 3. Clear + re-index ChromaDB company collection ───────────────────
     store = ChromaDBStore(persist_directory=settings.vector_store_path)
     store.delete_company_docs()
@@ -461,6 +508,28 @@ async def _apply_state_from_source(source_dir: Path, settings: Any) -> dict[str,
     )
     store.delete_notion_docs()
     store.delete_attachment_docs()
+    # Company-authored skills share the same per-company rule: the source
+    # dir's skills/ is authoritative for files, and its indexed rows must
+    # not survive a swap (a failed client's skills otherwise stay
+    # retrievable under the next identity). Re-index whatever company
+    # skills are live after the file swap — same loop the slot-restore
+    # path runs — so restored skills don't end up on-disk-only.
+    from openexecutive.knowledge.skills_index import (
+        SKILLS_COLLECTION,
+        index_skill,
+    )
+    from openexecutive.knowledge.skills_repo import list_skills
+
+    store.delete_documents(
+        collection=SKILLS_COLLECTION,
+        where={"source": "company"},
+    )
+    for skill in list_skills():
+        if skill.source == "company":
+            try:
+                index_skill(skill, store)
+            except Exception:
+                logger.exception("fixture: reindex company skill failed")
     from openexecutive.knowledge.notion_sync import reset_local_state
 
     reset_local_state(profile_path=settings.company_profile_path)
@@ -542,6 +611,22 @@ async def _apply_state_from_source(source_dir: Path, settings: Any) -> dict[str,
     }
 
 
+def _discard_state_not_in_backup() -> None:
+    """Drop live per-client DB state that the ``_user_backup`` format never
+    captured — before a backup restore under a restore block.
+
+    The backup carries profile/docs/memory/people/departments/mcp/skills;
+    ``_apply_state_from_source(strict_per_company=True)`` makes those
+    authoritative. What it does NOT carry is the DB-resident per-client
+    surface: without this wipe, a failed client's chat messages, sessions,
+    workflow runs + definitions, audit rows, scheduled actions, roster and
+    departments stay live under the user's identity.
+    """
+    from openexecutive.clients.slots import _wipe_per_client_tables
+
+    _wipe_per_client_tables()
+
+
 async def unload_fixture(settings: Any) -> dict[str, Any]:
     """Restore the user's original state from ``_user_backup/``.
 
@@ -567,9 +652,39 @@ async def unload_fixture(settings: Any) -> dict[str, Any]:
             logger.exception("unload: client save-back failed (continuing)")
             summary_client = None
 
-        summary = await _apply_state_from_source(backup, settings)
+        # Under a restore block the live DB/company dir may still hold the
+        # failed client's residue — the backup format never carried it, so
+        # discard first (same wipe the slots recovery uses).
+        from openexecutive.clients.slots import get_restore_blocked
+
+        was_blocked = get_restore_blocked(settings) is not None
+        if was_blocked:
+            _discard_state_not_in_backup()
+
+        summary = await _apply_state_from_source(
+            backup, settings, strict_per_company=was_blocked
+        )
         if summary_client is not None:
             summary["client_saved"] = summary_client
+
+        # A restore-blocked instance recovers here: the backup replace just
+        # made live state coherent again, so the block marker goes away.
+        # (park_active_client above was a silent no-op under the block —
+        # get_active_client returns None — so the partial live state was
+        # discarded, not saved.) An .active_client sentinel can still exist
+        # physically under a block (a rotation's _force_restore writes one,
+        # or a cancelled recovery's inner task finishes late). Live state is
+        # the user's backup now — the sentinel goes FIRST and the marker
+        # LAST, so a crash between them leaves the safer state (still
+        # blocked beats unblocked-with-stale-client-identity).
+        if was_blocked:
+            from openexecutive.clients.slots import (
+                _active_client_sentinel,
+                _clear_restore_blocked,
+            )
+
+            _active_client_sentinel(settings).unlink(missing_ok=True)
+            _clear_restore_blocked(settings)
 
         # Clear the active-fixture sentinel — current state is the user's own.
         sentinel = _fixture_active_sentinel(settings)
@@ -688,6 +803,17 @@ async def reset_all_state(
     from openexecutive.memory.company_profile import CompanyProfile
 
     async with _FIXTURE_OP_LOCK:
+        # Under a restore block a reset would delete _user_backup (the
+        # recorded recovery target for kind=user_backup) and wipe the mixed
+        # live state the marker is still describing — unrecoverable brick.
+        from openexecutive.clients.slots import get_restore_blocked
+
+        if get_restore_blocked(settings) is not None:
+            raise FixtureActiveError(
+                "Instance is restore-blocked — complete the recorded "
+                "recovery (reactivate the recorded client or unload) "
+                "before resetting."
+            )
         # 1. Live profile → empty
         CompanyProfile().save_to_yaml(settings.company_profile_path)
 
@@ -1082,6 +1208,18 @@ def snapshot_user_state(settings: Any, *, force: bool = False) -> dict[str, Any]
     Safe to call on empty environments — missing sources produce empty
     snapshot artifacts that round-trip cleanly through restore.
     """
+    # A restore block means live state provably is NOT the user's company —
+    # snapshotting it (even forced) would overwrite the only verified
+    # restore point with a half-swapped mix. No force override here. Reads
+    # the caller's settings, not a lazy global — see _load_from_dir.
+    from openexecutive.clients.slots import get_restore_blocked
+
+    if get_restore_blocked(settings) is not None:
+        raise FixtureActiveError(
+            "Cannot snapshot while restore-blocked — live state may not be "
+            "the user's company. Complete the recorded recovery first."
+        )
+
     sentinel = _fixture_active_sentinel(settings)
     if sentinel.exists() and not force:
         raise FixtureActiveError(
@@ -1114,6 +1252,23 @@ def snapshot_user_state(settings: Any, *, force: bool = False) -> dict[str, Any]
         for f in src_docs.glob("*.md"):
             shutil.copy2(f, dst_docs / f.name)
             docs_count += 1
+
+    # ── 2b. mcp_servers.json + skills/ — per-company surfaces the slot
+    # path swaps but this format historically missed; without them a
+    # restore-blocked recovery would leave the incoming client's MCP
+    # credentials configured under the user's identity.
+    src_mcp = getattr(settings, "mcp_servers_config_path", None)
+    dst_mcp = backup_dir / "mcp_servers.json"
+    if src_mcp is not None and src_mcp.exists():
+        shutil.copy2(src_mcp, dst_mcp)
+    elif dst_mcp.exists():
+        dst_mcp.unlink()
+    src_skills = src_profile.parent / "skills"
+    dst_skills = backup_dir / "skills"
+    if dst_skills.exists():
+        shutil.rmtree(dst_skills)
+    if src_skills.is_dir():
+        shutil.copytree(src_skills, dst_skills)
 
     # ── 3. memory.json (episodic) ─────────────────────────────────────────
     memory_count = _dump_episodic_memory(backup_dir / "memory.json")

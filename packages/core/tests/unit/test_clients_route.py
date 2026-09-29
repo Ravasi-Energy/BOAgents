@@ -38,7 +38,7 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     episodic.initialize_db(db_path)
     monkeypatch.setattr(config, "get_settings", lambda: settings)
 
-    async def _no_vector(_settings: Any, _app_state: Any) -> int:
+    async def _no_vector(_settings: Any, _app_state: Any, *, store: Any = None) -> int:
         return 0
 
     monkeypatch.setattr(slots, "_rebuild_vector_state", _no_vector)
@@ -142,3 +142,110 @@ def test_refuses_while_fixture_active(client: TestClient, tmp_path: Path) -> Non
         ).status_code
         == 409
     )
+
+
+# ── SEC-09: real ASGI route reproduces the blocked/identity failure ─────────
+
+
+@pytest.fixture()
+def refusing_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[TestClient, dict[str, bool], SimpleNamespace]:
+    """Same harness as ``client`` but the vector rebuild layer refuses on
+    demand — the post-preflight refusal point (SEC-08's delete_company_docs
+    lives inside _rebuild_vector_state). The activation path, recovery and
+    marker machinery all run for real through POST /clients/{slug}/activate.
+    """
+    company = tmp_path / "company"
+    company.mkdir()
+    settings = SimpleNamespace(
+        company_profile_path=company / "profile.yaml",
+        vector_store_path=tmp_path / "chroma",
+        mcp_servers_config_path=company / "mcp_servers.json",
+        honcho_workspace_id="default-ws",
+        client_rotation_enabled=False,
+    )
+    settings.company_profile_path.write_text("name: Live Co\n")
+
+    db_path = tmp_path / "episodic.db"
+    from openexecutive import config
+    from openexecutive.memory import episodic
+
+    monkeypatch.setattr(episodic, "DB_PATH", db_path)
+    episodic.initialize_db(db_path)
+    monkeypatch.setattr(config, "get_settings", lambda: settings)
+    monkeypatch.setattr(slots, "_set_honcho_client_workspace", lambda _slug: None)
+    monkeypatch.setattr(slots, "_reseed_blank_defaults", lambda **kw: None)
+    monkeypatch.setattr(slots, "snapshot_user_state", lambda _s: None)
+
+    from openexecutive.knowledge.store import PersistedEmbeddingConfigError
+
+    refusing = {"on": False}
+
+    async def _maybe_refuse(
+        _settings: Any, _app_state: Any, *, store: Any = None
+    ) -> int:
+        if refusing["on"]:
+            if refusing.get("once"):
+                refusing["on"] = False
+            raise PersistedEmbeddingConfigError(
+                "collection 'company_docs': refused (synthetic)"
+            )
+        return 0
+
+    monkeypatch.setattr(slots, "_rebuild_vector_state", _maybe_refuse)
+
+    app = FastAPI()
+    app.include_router(route.router)
+    # The refusal is a real unhandled server error on this path — let it
+    # surface as a 500 response instead of re-raising into the test.
+    return TestClient(app, raise_server_exceptions=False), refusing, settings
+
+
+def test_activate_route_late_refusal_auto_recovers_and_blocks(
+    refusing_client: tuple[TestClient, dict[str, bool], SimpleNamespace],
+) -> None:
+    """Through the real POST /clients/{slug}/activate route — no test-side
+    repair before inspecting the failure state."""
+    client, refusing, settings = refusing_client
+    assert (
+        client.post(
+            "/clients", json={"display_name": "Acme", "source": "blank"}
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            "/clients", json={"display_name": "Beta", "source": "blank"}
+        ).status_code
+        == 200
+    )
+    assert client.post("/clients/acme/activate").status_code == 200
+
+    # One-shot refusal during B's restore → 500, automatic recovery to A
+    # (the flag disarms on the first raise, so the recovery restore — which
+    # re-runs the same layer — succeeds).
+    refusing["once"] = True
+    refusing["on"] = True
+    resp = client.post("/clients/beta/activate")
+    assert resp.status_code == 500
+    assert client.get("/clients").json()["active"] == "acme"
+    assert slots.get_restore_blocked(settings) is None
+
+    # Persistent refusal → the second failure blocks the instance.
+    refusing["once"] = False
+    refusing["on"] = True
+    resp = client.post("/clients/beta/activate")
+    assert resp.status_code == 400
+    assert "restore-blocked" in resp.json()["detail"]
+    marker = slots.get_restore_blocked(settings)
+    assert marker is not None and marker["restore_slug"] == "acme"
+    assert client.get("/clients").json()["active"] is None
+
+    # Retrying B stays refused; only the recorded recovery slug can proceed.
+    assert client.post("/clients/beta/activate").status_code == 400
+    assert client.post("/clients/acme/activate").status_code == 400
+    refusing["on"] = False
+    assert client.post("/clients/acme/activate").status_code == 200
+    assert slots.get_restore_blocked(settings) is None
+    assert client.get("/clients").json()["active"] == "acme"

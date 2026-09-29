@@ -18,7 +18,11 @@ from pathlib import Path
 from typing import Any
 
 from openexecutive.bo.db import get_conn
-from openexecutive.bo.settings.registry import REGISTRY, SettingValidationError
+from openexecutive.bo.settings.registry import (
+    REGISTRY,
+    SettingValidationError,
+    validate_tenant_scope,
+)
 
 
 class UnknownSettingError(KeyError):
@@ -120,6 +124,23 @@ def get_effective_value(tenant: str, key: str, db_path: Path | None = None) -> A
     return spec.default if row is None else json.loads(row["value_json"])
 
 
+def get_stored_value(
+    tenant: str, key: str, db_path: Path | None = None
+) -> tuple[Any, bool]:
+    """The tenant override when one exists — ``(value, True)`` — else
+    ``(None, False)``. Callers that must distinguish „administered" from
+    „registry default" (bootstrap/env fallbacks) use this instead of
+    ``get_effective_value``, which cannot tell them apart."""
+    if key not in REGISTRY:
+        raise UnknownSettingError(key)
+    with get_conn(db_path) as conn:
+        row = conn.execute(
+            "SELECT value_json FROM bo_settings WHERE tenant = ? AND key = ?",
+            (tenant, key),
+        ).fetchone()
+    return (json.loads(row["value_json"]), True) if row is not None else (None, False)
+
+
 def config_version(tenant: str, db_path: Path | None = None) -> int:
     """Max stored version for the tenant — the configVersion snapshot tag."""
     with get_conn(db_path) as conn:
@@ -144,6 +165,7 @@ def set_value(
     if spec is None:
         raise UnknownSettingError(key)
     validated = spec.validate(value)  # raises SettingValidationError
+    validated = validate_tenant_scope(tenant, key, validated)
 
     with get_conn(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -187,6 +209,7 @@ __all__ = [
     "UnknownSettingError",
     "config_version",
     "get_effective_value",
+    "get_stored_value",
     "initialize_db",
     "list_effective",
     "set_value",

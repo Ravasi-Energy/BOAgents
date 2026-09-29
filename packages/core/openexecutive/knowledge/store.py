@@ -35,6 +35,132 @@ class KnowledgeStore(ABC):
     def delete_documents(self, collection: str, where: dict[str, Any]) -> None: ...
 
 
+class PersistedEmbeddingConfigError(RuntimeError):
+    """Raised when a persisted ChromaDB collection carries an embedding
+    function configuration this store never writes.
+
+    ChromaDB 1.5.9 defers embedding-function instantiation from persisted
+    collection schema to embed/schema access: ``_embed`` and
+    ``_get_sparse_embedding_targets`` reach ``self.schema`` /
+    ``self.configuration``, whose deserialization calls
+    ``known_embedding_functions[name].build_from_config`` for every
+    ``embedding_function`` node (dense ``vector_index`` AND sparse /
+    ``defaults`` keys — including nodes the projected
+    ``configuration_json`` never surfaces). A tampered ``schema_str`` row
+    in ``chroma.sqlite3`` can therefore turn the next ``add``/``query``
+    into arbitrary code loading (e.g. ``sentence_transformer`` or
+    ``huggingface_sparse`` with ``trust_remote_code``).
+
+    The pre-embed gate must inspect ``col._model.serialized_schema``: the
+    raw schema dict the Rust backend returns, read with zero builds
+    (probe-verified). ``collection.configuration``, ``collection.schema``,
+    ``add`` and ``query`` all deserialize/build — they are the effectful
+    side, never the inspection side.
+    """
+
+
+# Embedding functions this store ever persists in a collection schema.
+# Anything else found at any embedding_function node is rejected before
+# the first schema deserialize can build it into running code.
+_ALLOWED_EF_NAMES = frozenset({"default", "onnx_mini_lm_l6_v2"})
+
+
+def _iter_ef_nodes(node: Any, path: tuple[str, ...] = ()) -> Any:
+    """Yield ``(json_path, ef_node)`` for every ``embedding_function`` key
+    at any depth of the serialized schema — ``defaults`` and all
+    ``keys.*`` included, so no schema branch hides a node."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "embedding_function":
+                yield path + (key,), value
+            else:
+                yield from _iter_ef_nodes(value, path + (key,))
+    elif isinstance(node, list):
+        for i, item in enumerate(node):
+            yield from _iter_ef_nodes(item, path + (str(i),))
+
+
+def _validate_ef_node(collection_name: str, path: tuple[str, ...], ef: Any) -> None:
+    """Validate one persisted ``embedding_function`` node with exact
+    upstream semantics (chromadb 1.5.9 ``_deserialize_*_value_type``):
+
+    - ``None`` / ``{"type": "legacy"}`` / ``{"type": "unknown"}`` without
+      a name never reach ``build_from_config`` — allowed.
+    - ``{"type": "known", ...}`` builds at deserialize; only
+      ``default``/``onnx_mini_lm_l6_v2`` with an empty config are shapes
+      this store writes.
+    - A ``"known"``-shaped node under a dense ``vector_index`` builds
+      even when typed ``"unknown"`` (the dense branch only skips
+      ``"legacy"``), so any node carrying a registered ``name`` outside
+      the whitelist is rejected regardless of its declared ``type``.
+    """
+    where = f"{collection_name!r} schema {'.'.join(path)}"
+    if ef is None:
+        return
+    if not isinstance(ef, dict):
+        raise PersistedEmbeddingConfigError(
+            f"knowledge collection {where}: persisted embedding_function "
+            "is not a mapping"
+        )
+    ef_type = ef.get("type")
+    name = ef.get("name")
+    if name is not None and name not in _ALLOWED_EF_NAMES:
+        raise PersistedEmbeddingConfigError(
+            f"knowledge collection {where}: persisted embedding function "
+            f"{name!r} is not one this store writes"
+        )
+    if ef_type == "legacy":
+        return
+    if ef_type == "unknown":
+        # Upstream treats unknown as None only in the sparse branch; a
+        # named node can still build on the dense path — reject any
+        # unknown node that carries a name or a config payload.
+        if name is not None or ef.get("config"):
+            raise PersistedEmbeddingConfigError(
+                f"knowledge collection {where}: persisted "
+                "embedding_function 'unknown' node carries name/config"
+            )
+        return
+    if ef_type != "known":
+        raise PersistedEmbeddingConfigError(
+            f"knowledge collection {where}: persisted "
+            f"embedding_function type {ef_type!r} is not 'known'"
+        )
+    if name not in _ALLOWED_EF_NAMES:
+        raise PersistedEmbeddingConfigError(
+            f"knowledge collection {where}: persisted "
+            f"embedding_function 'known' node has no name"
+        )
+    if ef.get("config"):
+        raise PersistedEmbeddingConfigError(
+            f"knowledge collection {where}: persisted "
+            "embedding_function carries a non-empty config"
+        )
+
+
+def _serialized_schema(collection: Any) -> dict[str, Any]:
+    """Return the raw serialized schema — the zero-build read.
+
+    ``_model`` is chromadb-internal; if a future chromadb renames the
+    attribute or changes the shape, this fails closed instead of silently
+    skipping validation.
+    """
+    model = getattr(collection, "_model", None)
+    schema = getattr(model, "serialized_schema", None)
+    if not isinstance(schema, dict):
+        raise PersistedEmbeddingConfigError(
+            f"knowledge collection {getattr(collection, 'name', '?')!r}: "
+            "cannot inspect persisted schema — failing closed"
+        )
+    return schema
+
+
+def _validate_collection_schema(collection: Any) -> None:
+    name = getattr(collection, "name", "?")
+    for path, ef in _iter_ef_nodes(_serialized_schema(collection)):
+        _validate_ef_node(name, path, ef)
+
+
 class ChromaDBStore(KnowledgeStore):
     BUILTIN_COLLECTION = "builtin_knowledge"
     COMPANY_COLLECTION = "company_docs"
@@ -74,8 +200,27 @@ class ChromaDBStore(KnowledgeStore):
             path=str(persist_directory),
             settings=Settings(anonymized_telemetry=False),
         )
+        # Validate every already-persisted collection at construction:
+        # opening a DB performs no embedding-function builds, but the first
+        # embed/schema access against a tampered schema_str would. See
+        # PersistedEmbeddingConfigError.
+        for col in self._client.list_collections():
+            _validate_collection_schema(col)
 
     def _get_or_create_collection(self, name: str) -> Any:
+        # Re-validate before handing out a collection handle: the DB can be
+        # modified on disk after construction, and ``get_collection`` /
+        # ``_model.serialized_schema`` are the probe-verified zero-build
+        # reads. Only a missing collection falls through; any other failure
+        # is re-raised rather than silently skipping validation.
+        from chromadb.errors import NotFoundError
+
+        try:
+            existing = self._client.get_collection(name)
+        except NotFoundError:
+            existing = None
+        if existing is not None:
+            _validate_collection_schema(existing)
         return self._client.get_or_create_collection(
             name=name,
             metadata={"hnsw:space": "cosine"},
@@ -140,15 +285,21 @@ class ChromaDBStore(KnowledgeStore):
 
     def collection_exists(self, collection: str) -> bool:
         try:
-            self._client.get_collection(collection)
+            col = self._client.get_collection(collection)
+            _validate_collection_schema(col)
             return True
+        except PersistedEmbeddingConfigError:
+            raise
         except Exception:
             return False
 
     def get_collection_count(self, collection: str) -> int:
         try:
             col = self._client.get_collection(collection)
+            _validate_collection_schema(col)
             return col.count()
+        except PersistedEmbeddingConfigError:
+            raise
         except Exception:
             return 0
 
@@ -156,6 +307,12 @@ class ChromaDBStore(KnowledgeStore):
         try:
             col = self._get_or_create_collection(collection)
             col.delete(where=where)
+        except PersistedEmbeddingConfigError:
+            # Integrity refusal is not a cleanup miss — it must abort the
+            # caller, not masquerade as an empty/absent collection. A
+            # swallowed refusal here is exactly how client A's rows used to
+            # survive a slot switch into client B's hands.
+            raise
         except Exception:
             pass
 
@@ -169,6 +326,8 @@ class ChromaDBStore(KnowledgeStore):
         try:
             col = self._get_or_create_collection(collection)
             rows = col.get(include=["metadatas"])
+        except PersistedEmbeddingConfigError:
+            raise
         except Exception:
             return []
         ids = rows.get("ids") or []
@@ -195,6 +354,8 @@ class ChromaDBStore(KnowledgeStore):
             col = self._get_or_create_collection(collection)
             col.delete(ids=ids)
             return len(ids)
+        except PersistedEmbeddingConfigError:
+            raise
         except Exception:
             logging.getLogger(__name__).exception(
                 "delete_by_ids failed for %d id(s) in %s", len(ids), collection
@@ -242,6 +403,8 @@ class ChromaDBStore(KnowledgeStore):
                             dict(md) if isinstance(md, dict) else {},
                         )
                     )
+        except PersistedEmbeddingConfigError:
+            raise
         except Exception:
             logging.getLogger(__name__).exception(
                 "get_documents_by_ids failed for %d id(s) in %s", len(ids), collection
@@ -249,14 +412,27 @@ class ChromaDBStore(KnowledgeStore):
             return []
         return out
 
+    def _drop_and_recreate(self, name: str) -> None:
+        """Validate the persisted schema, then drop + recreate the collection.
+
+        The guard runs BEFORE the drop on purpose: silently deleting a
+        tampered collection would launder an integrity refusal into a clean
+        success, hiding the incident. Refusal propagates instead.
+        """
+        from chromadb.errors import NotFoundError
+
+        try:
+            existing = self._client.get_collection(name)
+        except NotFoundError:
+            existing = None
+        if existing is not None:
+            _validate_collection_schema(existing)
+            self._client.delete_collection(name)
+        self._get_or_create_collection(name)
+
     def delete_company_docs(self) -> None:
         """Delete and recreate the company_docs collection, clearing all indexed documents."""
-        import contextlib
-
-        with contextlib.suppress(Exception):
-            self._client.delete_collection(self.COMPANY_COLLECTION)
-        # Recreate with the same HNSW settings so subsequent upserts work normally.
-        self._get_or_create_collection(self.COMPANY_COLLECTION)
+        self._drop_and_recreate(self.COMPANY_COLLECTION)
 
     def delete_notion_docs(self) -> None:
         """Drop synced Notion chunks from the isolated collection and any
@@ -279,11 +455,7 @@ class ChromaDBStore(KnowledgeStore):
         collection wholesale a line or two earlier — but it keeps this
         method correct when called on its own.
         """
-        import contextlib
-
-        with contextlib.suppress(Exception):
-            self._client.delete_collection(self.ATTACHMENT_COLLECTION)
-        self._get_or_create_collection(self.ATTACHMENT_COLLECTION)
+        self._drop_and_recreate(self.ATTACHMENT_COLLECTION)
         self.delete_documents(
             collection=self.COMPANY_COLLECTION, where={"type": "attachment"}
         )

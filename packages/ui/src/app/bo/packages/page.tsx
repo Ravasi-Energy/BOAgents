@@ -1,7 +1,7 @@
 "use client";
 
 // Pachete semnate bo.package.v1 (VAL2-01): import → verificare → carantină.
-// Activarea nu există în acest lot — stările ajung până la DRAFT. Verdictul
+// Activarea pilotului sintetic este separată; aici stările ajung la DRAFT. Verdictul
 // verificatorului este afișat întotdeauna, inclusiv pentru importuri respinse.
 import { useCallback, useEffect, useState } from "react";
 
@@ -586,7 +586,7 @@ export default function BoPackagesPage() {
   return (
     <BoPage
       title="Pachete semnate"
-      sub="Import bo.package.v1 cu verificare Ed25519 și trust store separat. Pachetele acceptate stau în carantină; activarea nu există în acest lot."
+      sub="Import bo.package.v1 cu verificare Ed25519 și trust store separat. După carantină și DRAFT, pachetul ERP sintetic cere aprobare explicită în Pilot sintetic."
       actions={null}
     >
       {notice ? (

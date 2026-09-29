@@ -60,6 +60,7 @@ services:
       - AUTH_URL=${AUTH_URL:-}
       - ALLOWED_EMAILS=${ALLOWED_EMAILS:-}
       - BACKEND_SHARED_SECRET=${BACKEND_SHARED_SECRET:-}
+      - BACKEND_PROXY_SECRET=${BACKEND_PROXY_SECRET:-}
     depends_on:
       - api
 

@@ -100,6 +100,75 @@ def _validate_trust_store(v: Any) -> str:
 
 _CSV_ITEM_RE = re.compile(r"^[^@\s,]+$")
 _COST_CAP_RE = re.compile(r"^\d+(\.\d{1,6})? [A-Z]{3}$")
+_SECRET_REF_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+
+
+def _validate_urlish(v: Any, *, label: str) -> str:
+    """http(s) base URL or empty — trailing slash stripped."""
+    if not isinstance(v, str):
+        raise SettingValidationError(f"{label}: așteptat text")
+    v = v.strip().rstrip("/")
+    if _CONTROL_CHAR_RE.search(v):
+        raise SettingValidationError(f"{label}: caractere de control interzise")
+    if not v:
+        return v
+    if len(v) > 512 or not v.startswith(("http://", "https://")) or " " in v:
+        raise SettingValidationError(
+            f"{label}: așteptat URL http(s) valid, max 512 caractere"
+        )
+    if "@" in v:
+        raise SettingValidationError(
+            f"{label}: credențialele în URL (userinfo) sunt interzise — "
+            "folosește o referință de secret"
+        )
+    return v
+
+
+def _validate_secret_ref(v: Any, *, label: str) -> str:
+    """Name of an env var holding the secret — never the secret itself."""
+    if not isinstance(v, str):
+        raise SettingValidationError(f"{label}: așteptat text")
+    v = v.strip()
+    if not _SECRET_REF_RE.match(v):
+        raise SettingValidationError(
+            f"{label}: așteptat nume de variabilă de mediu (ex. BO_GUARDIAN_TOKEN)"
+        )
+    return v
+
+
+def _validate_telemetry_secret_ref(v: Any) -> str:
+    """``bo.telemetry.token_ref`` names a PROVISIONED env var — the operator
+    allow-list ``BO_TELEMETRY_SECRET_REFS`` plus the built-in bootstrap
+    references. An admin can never point the adapter at an arbitrary env
+    var by typing its name here."""
+    v = _validate_secret_ref(v, label="Referința tokenului de telemetrie")
+    from openexecutive.bo.telemetry import adapter
+
+    if v not in adapter.provisioned_secret_refs():
+        raise SettingValidationError(
+            "Referința tokenului de telemetrie: numele nu este provisionat "
+            "(lista operatorului BO_TELEMETRY_SECRET_REFS sau referințele "
+            "bootstrap încorporate)"
+        )
+    return v
+
+
+def _validate_guardian_secret_ref(v: Any) -> str:
+    """``bo.exec.guardian_*_secret_ref`` names a PROVISIONED env var —
+    the operator allow-list ``BO_GUARDIAN_SECRET_REFS`` plus the built-in
+    references. Without this gate an admin could point the Bearer
+    credential at any env var the process holds."""
+    v = _validate_secret_ref(v, label="Referința de secret Guardian")
+    from openexecutive.bo.execution import guardian
+
+    if v not in guardian.provisioned_secret_refs():
+        raise SettingValidationError(
+            "Referința de secret Guardian: numele nu este provisionat "
+            "(lista operatorului BO_GUARDIAN_SECRET_REFS sau referințele "
+            "încorporate BO_GUARDIAN_TOKEN/BO_GUARDIAN_POLICY_TOKEN/"
+            "BO_TELEMETRY_TOKEN)"
+        )
+    return v
 
 
 def _validate_csv(v: Any, *, label: str) -> str:
@@ -542,6 +611,46 @@ REGISTRY: dict[str, SettingSpec] = {
             v, minimum=1, maximum=500, label="Batch-ul de livrare"
         ),
     ),
+    "bo.router.audit_drain_attempts": SettingSpec(
+        key="bo.router.audit_drain_attempts",
+        type="integer",
+        default=3,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="routing",
+        label_ro="Tentative emitere audit (drain)",
+        label_en="Audit drain emit attempts",
+        help_ro="Câte tentative de emitere către jurnal primește o intență de audit înainte de „failed” — rândul rămâne probă durabilă, nu se buclează nelimitat.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Următoarea rundă de reconciliere folosește noul prag.",
+        acceptance_ro="Intenția „failed” nu se mai reia automat — requeue explicit, auditat.",
+        validate=lambda v: _validate_int(
+            v, minimum=1, maximum=10, label="Pragul tentative audit"
+        ),
+    ),
+    "bo.router.audit_drain_lease_s": SettingSpec(
+        key="bo.router.audit_drain_lease_s",
+        type="integer",
+        default=60,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="routing",
+        label_ro="Lease claim audit (s)",
+        label_en="Audit drain claim lease (s)",
+        help_ro="Cât deține un drain o intență de audit înainte ca un alt proces să o poată revendica. Un claim expirat NU blochează reconcilierea — garanția de unicitate vine din dedup-ul jurnalului, nu din lease.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Următorul ciclu de drain folosește noul lease; claim-urile expirate devin revendicabile.",
+        acceptance_ro="Un emitent blocat/căzut nu blochează intenția mai mult decât lease-ul configurat.",
+        validate=lambda v: _validate_int(
+            v, minimum=5, maximum=3600, label="Lease-ul drain audit"
+        ),
+    ),
     "bo.router.delivery_max_attempts": SettingSpec(
         key="bo.router.delivery_max_attempts",
         type="integer",
@@ -562,7 +671,455 @@ REGISTRY: dict[str, SettingSpec] = {
             v, minimum=1, maximum=1000, label="Tentativele maxime"
         ),
     ),
+    "bo.router.delivery_retry_backoff_s": SettingSpec(
+        key="bo.router.delivery_retry_backoff_s",
+        type="integer",
+        default=0,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="routing",
+        label_ro="Backoff reîncercare livrare (s)",
+        label_en="Delivery retry backoff (s)",
+        help_ro="Pauza minimă între două tentative de livrare pentru un plic eșuat. 0 = reîncearcă la fiecare ciclu (comportamentul implicit).",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Eșecurile următoare programează următoarea tentativă după cel puțin aceste secunde.",
+        acceptance_ro="Un endpoint picat nu mai e bombardat la fiecare ciclu; plicurile nereușite rămân vizibile.",
+        validate=lambda v: _validate_int(
+            v, minimum=0, maximum=86400, label="Backoff-ul de livrare"
+        ),
+    ),
+    "bo.router.audit_drain_batch": SettingSpec(
+        key="bo.router.audit_drain_batch",
+        type="integer",
+        default=200,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="routing",
+        label_ro="Intenții audit per drain",
+        label_en="Audit drain batch size",
+        help_ro="Câte intenții de audit pending procesează un ciclu de drain. Mărginește cât blochează reconcilierea ciclul workerului.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Următorul drain procesează cel mult această valoare; restul așteaptă ciclul următor.",
+        acceptance_ro="Un backlog mare nu blochează ciclul de livrare — avansează mărginit per ciclu.",
+        validate=lambda v: _validate_int(
+            v, minimum=1, maximum=1000, label="Batch-ul drain audit"
+        ),
+    ),
+    "bo.telemetry.enabled": SettingSpec(
+        key="bo.telemetry.enabled",
+        type="boolean",
+        default=False,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="telemetrie",
+        label_ro="Telemetrie produs",
+        label_en="Product telemetry",
+        help_ro="Pornește emiterea și livrarea plicurilor de telemetrie pentru acest tenant. O valoare salvată aici are prioritate față de bootstrap-ul de mediu (BO_TELEMETRY_ENABLED); fără salvare, mediul rămâne sursa.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Se aplică de la următorul plic emis/ciclu de livrare; plicurile deja în outbox nu sunt rescrise sau mutate.",
+        acceptance_ro="Oprit: emiterea și livrarea automată stau inactive pentru acest tenant; flush-ul manual respectă aceeași valoare.",
+        validate=lambda v: _validate_bool(v, label="Telemetrie produs"),
+    ),
+    "bo.telemetry.transport": SettingSpec(
+        key="bo.telemetry.transport",
+        type="enum",
+        default="buffered",
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="telemetrie",
+        label_ro="Transport telemetrie",
+        label_en="Telemetry transport",
+        help_ro="buffered = păstrare în memorie (preview/test); http = POST către endpointul administrat. Suprascrie BO_TELEMETRY_TRANSPORT numai după salvare explicită.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Se aplică de la următorul plic trimis; schimbarea destinației nu mută și nu rescrie plicurile existente din outbox.",
+        acceptance_ro="Doar buffered sau http; transport necunoscut este respins la salvare.",
+        validate=lambda v: _validate_enum(
+            v, allowed=("buffered", "http"), label="Transportul telemetriei"
+        ),
+    ),
+    "bo.telemetry.endpoint": SettingSpec(
+        key="bo.telemetry.endpoint",
+        type="text",
+        default="",
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="telemetrie",
+        label_ro="Endpoint telemetrie (http)",
+        label_en="Telemetry endpoint (http)",
+        help_ro="URL complet al receptorului de telemetrie, folosit numai cu transportul http. Gol = se păstrează fallback-ul de mediu BO_TELEMETRY_ENDPOINT.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Se aplică la următoarea trimitere; plicurile persistate păstrează conținutul și identitatea originală — destinația nu le reasignează.",
+        acceptance_ro="URL http(s) valid, cel mult 512 caractere, sau gol.",
+        validate=lambda v: _validate_urlish(v, label="Endpointul telemetriei"),
+    ),
+    "bo.telemetry.token_ref": SettingSpec(
+        key="bo.telemetry.token_ref",
+        type="text",
+        default="BO_TELEMETRY_TOKEN",
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="telemetrie",
+        label_ro="Referința tokenului de telemetrie",
+        label_en="Telemetry token reference",
+        help_ro="Numele variabilei de mediu care deține tokenul. Secretul propriu-zis rămâne doar pe server și nu se editează din browser; aici se administrează doar referința. Numele trebuie provisionat explicit de operator în BO_TELEMETRY_SECRET_REFS (sau să fie o referință bootstrap încorporată) — o destinație administrată fără referință proprie nu moștenește tokenul bootstrap.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Se citește variabila indicată la următoarea trimitere http. Cu endpoint administrat, referința lipsește/neprovisionată înseamnă refuz controlat de livrare, nu fallback la BO_TELEMETRY_TOKEN.",
+        acceptance_ro="Doar un nume de variabilă de mediu provisionat (litere, cifre, _), niciodată valoarea secretă.",
+        validate=_validate_telemetry_secret_ref,
+    ),
+    "bo.telemetry.timeout_s": SettingSpec(
+        key="bo.telemetry.timeout_s",
+        type="integer",
+        default=5,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="telemetrie",
+        label_ro="Timeout trimitere telemetrie (s)",
+        label_en="Telemetry send timeout (s)",
+        help_ro="Timeout-ul apelului http către destinația administrată. Plicul netrimis rămâne pending și se reîncearcă — un timeout nu livrează și nu pierde.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Se aplică la următoarea trimitere http; transportul construit din mediu (bootstrap) păstrează constanta internă.",
+        acceptance_ro="Întreg 1–120 secunde; apelul abortează controlat la timeout.",
+        validate=lambda v: _validate_int(
+            v, minimum=1, maximum=120, label="Timeout-ul telemetriei"
+        ),
+    ),
+    "bo.exec.enabled": SettingSpec(
+        key="bo.exec.enabled",
+        type="boolean",
+        default=False,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="exec",
+        label_ro="Execuție delegată",
+        label_en="Delegated execution",
+        help_ro="Permite trimiterea și rularea execuțiilor delegate. Oprit implicit — niciun mandat nu produce efecte.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Pornit: acceptă rulări. Oprit: refuză submit, nu preia rulări și oprește efectele noi la frontieră; efectele deja trimise nu sunt anulate.",
+        acceptance_ro="Oprit implicit; submit și claim sunt blocate; rulările în curs intră în pauză înaintea următorului efect.",
+        validate=lambda v: _validate_bool(v, label="Execuție delegată"),
+    ),
+    "bo.exec.max_delegation_depth": SettingSpec(
+        key="bo.exec.max_delegation_depth",
+        type="integer",
+        default=3,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="exec",
+        label_ro="Adâncime maximă de delegare",
+        label_en="Max delegation depth",
+        help_ro="Câte niveluri de mandate copil pot exista sub o rădăcină. Copilul nu depășește niciodată părintele.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Crearea unui mandat peste adâncime este refuzată la salvare/execuție.",
+        acceptance_ro="Valori în afara 0–8 sunt respinse; mandatele peste adâncime nu se creează.",
+        validate=lambda v: _validate_int(
+            v, minimum=0, maximum=8, label="Adâncimea maximă"
+        ),
+    ),
+    "bo.exec.max_steps": SettingSpec(
+        key="bo.exec.max_steps",
+        type="integer",
+        default=50,
+        apply_mode="NEW_RUN",
+        scope="tenant",
+        page="setari",
+        tab="exec",
+        label_ro="Limită de pași per execuție",
+        label_en="Steps per execution",
+        help_ro="Plafon administrat al pașilor unei rulări — se intersectează cu max_steps din mandat.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Rulările noi nu pot depăși minimul dintre mandat și această valoare.",
+        acceptance_ro="Valori în afara 1–200 sunt respinse.",
+        validate=lambda v: _validate_int(
+            v, minimum=1, maximum=200, label="Limita de pași"
+        ),
+    ),
+    "bo.exec.default_concurrency": SettingSpec(
+        key="bo.exec.default_concurrency",
+        type="integer",
+        default=2,
+        apply_mode="NEW_RUN",
+        scope="tenant",
+        page="setari",
+        tab="exec",
+        label_ro="Concurență implicită per rulare",
+        label_en="Default run concurrency",
+        help_ro="Sloturile de concurență rezervate implicit per rulare, plafonate de mandat.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Rezervarea atomică folosește minimul dintre această valoare și mandat.",
+        acceptance_ro="Valori în afara 1–16 sunt respinse.",
+        validate=lambda v: _validate_int(
+            v, minimum=1, maximum=16, label="Concurența implicită"
+        ),
+    ),
+    "bo.exec.lease_seconds": SettingSpec(
+        key="bo.exec.lease_seconds",
+        type="integer",
+        default=60,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="exec",
+        label_ro="Durata lease-ului (s)",
+        label_en="Lease duration (s)",
+        help_ro="Cât deține un worker o rulare/o intrare de ledger. La expirare alt worker poate prelua — fencing-ul oprește finalizarea stale.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Se aplică la următoarele claim-uri; lease-urile emise rămân valide până expiră.",
+        acceptance_ro="Valori în afara 5–600 sunt respinse.",
+        validate=lambda v: _validate_int(
+            v, minimum=5, maximum=600, label="Durata lease-ului"
+        ),
+    ),
+    "bo.exec.max_effect_attempts": SettingSpec(
+        key="bo.exec.max_effect_attempts",
+        type="integer",
+        default=3,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="exec",
+        label_ro="Tentative maxime per efect",
+        label_en="Max effect attempts",
+        help_ro="Câte claim-uri poate lua o intrare de ledger înainte de reconciliere obligatorie.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Peste prag, intrarea nu mai e revendicabilă automat — cere reconciliere.",
+        acceptance_ro="Valori în afara 1–10 sunt respinse.",
+        validate=lambda v: _validate_int(
+            v, minimum=1, maximum=10, label="Tentativele maxime"
+        ),
+    ),
+    "bo.exec.checkpoint_required": SettingSpec(
+        key="bo.exec.checkpoint_required",
+        type="boolean",
+        default=True,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="exec",
+        label_ro="Checkpoint obligatoriu",
+        label_en="Mandatory checkpoint",
+        help_ro="Pasul dependent nu rulează fără checkpoint persistat. Eșecul de scriere blochează efectul, nu îl execută orbeste.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Pornit (implicit): fiecare pas scrie checkpoint pre/post; eșecul de persistare oprește rularea.",
+        acceptance_ro="Cu checkpoint-ul oprit, rularea continuă fără stare de reluare — documentat în UI.",
+        validate=lambda v: _validate_bool(v, label="Checkpoint obligatoriu"),
+    ),
+    "bo.exec.retry_backoff_s": SettingSpec(
+        key="bo.exec.retry_backoff_s",
+        type="integer",
+        default=0,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="exec",
+        label_ro="Backoff minim la reîncercare (s)",
+        label_en="Min retry backoff (s)",
+        help_ro="Delay minim după expirarea lease-ului înainte ca o intrare SUBMITTED/UNKNOWN să poată fi revendicată. Lease-ul e deja un delay; backoff-ul e plafonul suplimentar.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Se aplică la următoarele claim-uri de ledger; 0 = doar durata lease-ului separă tentativele.",
+        acceptance_ro="Valori în afara 0–300 sunt respinse; retry-ul nu poate fi mai dens decât lease+backoff.",
+        validate=lambda v: _validate_int(
+            v, minimum=0, maximum=300, label="Backoff-ul la reîncercare"
+        ),
+    ),
+    "bo.exec.budget_cap": SettingSpec(
+        key="bo.exec.budget_cap",
+        type="text",
+        default="",
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="exec",
+        label_ro="Plafon de buget per rulare",
+        label_en="Per-run budget cap",
+        help_ro="Plafon tenant pentru budget_amount la trimitere — format „<sumă> <monedă>“, ex. „100.00 USD“. Gol = fără plafon peste cel al mandatului.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Setat: POST /bo/execution/runs respinge orice budget_amount peste plafon, indiferent de mandat.",
+        acceptance_ro="Format invalid → 422 la salvare; depășire → trimitere refuzată cu motiv explicit.",
+        validate=_validate_cost_cap,
+    ),
+    "bo.exec.retention_days": SettingSpec(
+        key="bo.exec.retention_days",
+        type="integer",
+        default=90,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="exec",
+        label_ro="Retenție execuții (zile)",
+        label_en="Execution retention (days)",
+        help_ro="Cât se păstrează rulările, checkpointurile și ledgerul. Nu atinge auditul.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="La următoarea curățare se șterg doar execuțiile finalizate mai vechi decât pragul.",
+        acceptance_ro="Sweep-ul nu atinge rulări active sau ledgerul nefinalizat.",
+        validate=lambda v: _validate_int(
+            v, minimum=0, maximum=3650, label="Retenția execuțiilor"
+        ),
+    ),
+    "bo.exec.guardian_endpoint": SettingSpec(
+        key="bo.exec.guardian_endpoint",
+        type="text",
+        default="",
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="exec",
+        label_ro="Endpoint Guardian (autorizare + evenimente)",
+        label_en="Guardian endpoint (authorization + events)",
+        help_ro="URL de bază Guardian pentru statusul mandatului și livrarea evenimentelor. Gol: se încearcă BO_TELEMETRY_ENDPOINT; fără niciun endpoint, mandatele legate sau supravegherea obligatorie opresc efectele.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Setat: fiecare frontieră de efect reverifică starea mandatului în Guardian; outbox-ul livrează către /v1/execution-events.",
+        acceptance_ro="Standalone este permis doar pentru mandate nelegate și autorizare opțională. Un mandat legat nu devine standalone când endpointul lipsește.",
+        validate=lambda v: _validate_urlish(v, label="Endpoint Guardian"),
+    ),
+    "bo.exec.guardian_secret_ref": SettingSpec(
+        key="bo.exec.guardian_secret_ref",
+        type="text",
+        default="BO_GUARDIAN_TOKEN",
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="exec",
+        label_ro="Referință secret Guardian",
+        label_en="Guardian secret reference",
+        help_ro="Numele variabilei de mediu care ține tokenul Bearer către Guardian — SecretRef, niciodată valoarea.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Clientul Guardian citește tokenul din variabila de mediu numită aici; lipsa ei e tratată ca eroare de configurare.",
+        acceptance_ro="Doar numele variabilei e persistat; tokenul se trimite numai în antetul Bearer către Guardian, nu în DB, cereri de Setări sau loguri.",
+        validate=_validate_guardian_secret_ref,
+    ),
+    "bo.exec.guardian_policy_secret_ref": SettingSpec(
+        key="bo.exec.guardian_policy_secret_ref",
+        type="text",
+        default="BO_GUARDIAN_POLICY_TOKEN",
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="exec",
+        label_ro="Referință secret politică Guardian",
+        label_en="Guardian policy secret reference",
+        help_ro="Numele variabilei de mediu cu un credențial execpolicy:read — activează o citire suplimentară a politicii. Verdictul efectiv al mandatului include deja politica curentă.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Prezent: verifică suplimentar acțiunea/resursa în politica curentă. Lipsă: se păstrează verdictul efectiv Guardian, care blochează politici revocate sau mandate în afara politicii.",
+        acceptance_ro="Credențialul din env trebuie să aibă execpolicy:read; altfel efectul se oprește (unavailable), nu continuă.",
+        validate=_validate_guardian_secret_ref,
+    ),
+    "bo.exec.guardian_timeout_s": SettingSpec(
+        key="bo.exec.guardian_timeout_s",
+        type="integer",
+        default=5,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="exec",
+        label_ro="Timeout cereri Guardian (s)",
+        label_en="Guardian request timeout (s)",
+        help_ro="Timeout pe cererea de autorizare/livrare către Guardian.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Depășirea timeoutului la autorizare blochează efectul când legătura e obligatorie.",
+        acceptance_ro="Între 1 și 30 secunde.",
+        validate=lambda v: _validate_int(
+            v, minimum=1, maximum=30, label="Timeout Guardian"
+        ),
+    ),
+    "bo.exec.guardian_auth_required": SettingSpec(
+        key="bo.exec.guardian_auth_required",
+        type="boolean",
+        default=False,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="exec",
+        label_ro="Autorizare Guardian obligatorie",
+        label_en="Guardian authorization required",
+        help_ro="Pornit: și mandatele NELEGATE (fără guardian_ref) sunt respinse la frontieră. Pentru mandatele legate verificarea e obligatorie mereu — această setare nu le poate face standalone.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Pornit: mandat fără guardian_ref → deny. Indisponibilitatea Guardian → pauză recuperabilă pentru ORICE mandat legat, indiferent de această setare.",
+        acceptance_ro="Fereastra dintre verificare și efect e minimă, dar nenulă — cursele distribuite nu sunt eliminate.",
+        validate=lambda v: _validate_bool(v, label="Autorizarea Guardian obligatorie"),
+    ),
 }
+
+
+def _pilot_specs() -> None:
+    from openexecutive.bo.pilot.config import allowlist, endpoint, secret_ref
+
+    entries: list[tuple[str, SettingType, Any, str, str, Callable[[Any], Any]]] = [
+        ("enabled", "boolean", False, "Pilot ERP sintetic", "Activare globală explicită; nu pornește un scheduler.", lambda v: _validate_bool(v, label="Pilot")),
+        ("profile", "enum", "disabled", "Profil pilot", "Loopback este permis numai în profilul synthetic-loopback.", lambda v: _validate_enum(v, allowed=("disabled", "synthetic-loopback"), label="Profil")),
+        ("endpoint", "text", "", "Endpoint ERP sintetic", "Adresă exactă prezentă în allowlist; fără DNS, proxy sau redirect.", endpoint),
+        ("allowlist", "text", "[]", "Allowlist ERP sintetic", "Listă JSON administrată de endpointuri loopback explicite.", allowlist),
+        ("secret_ref", "text", "BO_PILOT_SERVICE_TOKEN", "Referință secret ERP sintetic", "Numele variabilei server-only; credentialul serviciului fixează tenantul.", secret_ref),
+        ("timeout_s", "integer", 3, "Timeout ERP sintetic (s)", "Timeout de transport; lipsa răspunsului nu dovedește eșecul efectului.", lambda v: _validate_int(v, minimum=1, maximum=10, label="Timeout")),
+        ("stale_s", "integer", 60, "Prag stale pilot (s)", "Vârsta dovezii; fără dovadă starea este UNKNOWN.", lambda v: _validate_int(v, minimum=5, maximum=3600, label="Prag stale")),
+        ("max_queue", "integer", 100, "Limită coadă pilot", "Peste limită diagnosticul este DEGRADED, fără remediere automată.", lambda v: _validate_int(v, minimum=0, maximum=10000, label="Coada")),
+        ("supervision", "enum", "standalone", "Supraveghere pilot", "required cere mandat Guardian; mandatele legate rămân obligatorii și în standalone.", lambda v: _validate_enum(v, allowed=("standalone", "required"), label="Supraveghere")),
+    ]
+    for suffix, typ, default, label, help_text, validator in entries:
+        key = f"bo.pilot.{suffix}"
+        REGISTRY[key] = SettingSpec(
+            key=key, type=typ, default=default, apply_mode="IMMEDIATE",
+            scope="tenant", page="setari", tab="pilot", label_ro=label,
+            label_en=label, help_ro=help_text, owner_role="admin", edit_role="admin",
+            sensitivity="normal", effect_ro="Reverificat înainte de apel; schimbarea configurației cere o rulare nouă. Dovezile vechi se păstrează.",
+            acceptance_ro="CAS/RBAC/audit; refuz sigur fără configurație explicită.", validate=validator,
+        )
+
+
+_pilot_specs()
 
 
 def validate_value(key: str, value: Any) -> Any:
@@ -570,3 +1127,36 @@ def validate_value(key: str, value: Any) -> Any:
     if spec is None:
         raise SettingValidationError(f"Setare necunoscută: {key}")
     return spec.validate(value)
+
+
+#: Settings whose SecretRef value must also be provisioned FOR this tenant —
+#: an allow-list entry ``NAME@other-tenant`` is provisioned globally but must
+#: never be selectable here (a tenant cannot name another tenant's ref).
+def validate_tenant_scope(tenant: str, key: str, value: Any) -> Any:
+    """Per-tenant SecretRef scope check, applied on top of ``spec.validate``
+    by ``settings_store.set_value`` — the unary validator only knows the
+    name is provisioned *somewhere*; this gates it to THIS tenant."""
+    if not isinstance(value, str) or not value:
+        return value
+    if key == "bo.telemetry.token_ref":
+        from openexecutive.bo.telemetry import adapter
+
+        if value not in adapter.provisioned_secret_refs(tenant):
+            raise SettingValidationError(
+                "Referința tokenului de telemetrie: numele este provisionat "
+                "pentru alt tenant — un tenant nu poate folosi referința "
+                "altui tenant"
+            )
+    elif key in (
+        "bo.exec.guardian_secret_ref",
+        "bo.exec.guardian_policy_secret_ref",
+    ):
+        from openexecutive.bo.execution import guardian
+
+        if value not in guardian.provisioned_secret_refs(tenant):
+            raise SettingValidationError(
+                "Referința de secret Guardian: numele este provisionat "
+                "pentru alt tenant — un tenant nu poate folosi referința "
+                "altui tenant"
+            )
+    return value

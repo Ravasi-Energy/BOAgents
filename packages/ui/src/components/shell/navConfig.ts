@@ -230,11 +230,24 @@ export const ADVANCED_ITEMS: NavItem[] = [
       "Pachete semnate bo.package.v1 — import verificat, carantină și aprobări de downgrade.",
   },
   {
+    href: "/bo/pilot",
+    label: "BOAgents — Pilot sintetic",
+    icon: "bolt",
+    description: "Diagnostic ERP sintetic: pachet semnat, activare autorizată și dovezi.",
+  },
+  {
     href: "/bo/routing",
     label: "BOAgents — Modele și rutare",
     icon: "bolt",
     description:
       "Catalogul de modele administrat și observațiile routerului în mod observare.",
+  },
+  {
+    href: "/bo/executions",
+    label: "BOAgents — Execuții",
+    icon: "bolt",
+    description:
+      "Execuții delegate — mandate, checkpointuri, ledger de efecte, reluare și reconciliere.",
   },
 ];
 

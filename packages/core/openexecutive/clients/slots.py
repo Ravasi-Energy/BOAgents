@@ -362,6 +362,18 @@ async def _restore_slot_state(
     # Once any slot has been saved back, state.db exists and wins.
     is_blank = not (slot / "state.db").exists()
 
+    # 0. Preflight the vector store BEFORE the first live mutation. Building
+    #    ChromaDBStore runs the persisted-schema guard; if the volume is
+    #    refused (tampered schema, incompatible chromadb) raising here leaves
+    #    the previous client's live state fully intact — DB, profile/docs,
+    #    MCP config and the sentinel all still agree. Without this, the swaps
+    #    below would already have run and the refusal would strand live
+    #    state on the incoming client while get_active_client() still named
+    #    the previous one.
+    from openexecutive.knowledge.store import ChromaDBStore
+
+    store = ChromaDBStore(persist_directory=settings.vector_store_path)
+
     # 1. SQLite state — whole-DB restore (or factory wipe for blank slots),
     #    with operator-level tables carried across.
     preserved = _dump_global_tables()
@@ -407,7 +419,7 @@ async def _restore_slot_state(
         mcp_live.unlink(missing_ok=True)
 
     # 3. Vector state — rebuild the company collections from the restored dirs.
-    docs_indexed = await _rebuild_vector_state(settings, app_state)
+    docs_indexed = await _rebuild_vector_state(settings, app_state, store=store)
 
     return {
         "display_name": profile.name,
@@ -661,8 +673,13 @@ def _reseed_blank_defaults(*, seed_departments: bool = True) -> None:
             )
 
 
-async def _rebuild_vector_state(settings: Any, app_state: Any | None) -> int:
+async def _rebuild_vector_state(
+    settings: Any, app_state: Any | None, *, store: Any | None = None
+) -> int:
     """Rebuild ChromaDB company collections from the restored live dirs.
+
+    ``store`` may be supplied by a caller that already constructed (and
+    therefore guard-validated) one; a fresh instance is built otherwise.
 
     Returns the number of company-doc chunks indexed. Isolated here so tests
     can stub the vector layer without touching the file/DB round-trip logic.
@@ -672,7 +689,8 @@ async def _rebuild_vector_state(settings: Any, app_state: Any | None) -> int:
     from openexecutive.knowledge.skills_repo import list_skills
     from openexecutive.knowledge.store import ChromaDBStore
 
-    store = ChromaDBStore(persist_directory=settings.vector_store_path)
+    if store is None:
+        store = ChromaDBStore(persist_directory=settings.vector_store_path)
     store.delete_company_docs()
     # Per-company research artifacts never carry across companies.
     store.delete_documents(
@@ -715,7 +733,7 @@ async def _rebuild_vector_state(settings: Any, app_state: Any | None) -> int:
                 logger.exception("client-slots: reindex skill failed")
 
     if app_state is not None and hasattr(app_state, "store"):
-        app_state.store = ChromaDBStore(persist_directory=settings.vector_store_path)
+        app_state.store = store
     return docs_indexed
 
 

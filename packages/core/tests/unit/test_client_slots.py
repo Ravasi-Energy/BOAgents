@@ -53,7 +53,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     people_store.initialize_db(db_path)
     dept_store.initialize_db(db_path)
 
-    async def _no_vector(_settings: Any, _app_state: Any) -> int:
+    async def _no_vector(_settings: Any, _app_state: Any, *, store: Any = None) -> int:
         return 0
 
     reseed_calls: list[dict[str, Any]] = []
@@ -623,3 +623,74 @@ async def test_generated_requires_valid_bundle(env: SimpleNamespace) -> None:
             env.settings, display_name="Ghost Co", source="generated", bundle=bad
         )
     assert not (env.company / "_client_slots" / "ghost_co").exists()
+
+
+async def test_refused_vector_store_leaves_live_state_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PersistedEmbeddingConfigError mid-switch must not strand B's state under A's sentinel.
+
+    Reproduces the SEC-06 defect: _restore_slot_state swapped the live DB,
+    profile/docs and MCP config to the target client BEFORE constructing
+    ChromaDBStore — a refused store then left live=B while the sentinel
+    still named A. The fix validates the store before the first mutation.
+    """
+    company = tmp_path / "company"
+    company.mkdir()
+    settings = SimpleNamespace(
+        company_profile_path=company / "profile.yaml",
+        vector_store_path=tmp_path / "chroma",
+        mcp_servers_config_path=company / "mcp_servers.json",
+        honcho_workspace_id="default-ws",
+    )
+    db_path = tmp_path / "episodic.db"
+    from openexecutive.departments import store as dept_store
+    from openexecutive.memory import episodic
+    from openexecutive.people import store as people_store
+
+    monkeypatch.setattr(episodic, "DB_PATH", db_path)
+    monkeypatch.setattr(people_store, "DB_PATH", db_path)
+    monkeypatch.setattr(dept_store, "DB_PATH", db_path)
+    episodic.initialize_db(db_path)
+    people_store.initialize_db(db_path)
+    dept_store.initialize_db(db_path)
+    monkeypatch.setattr(slots, "_set_honcho_client_workspace", lambda _slug: None)
+    monkeypatch.setattr(slots, "_reseed_blank_defaults", lambda **kw: None)
+
+    env = SimpleNamespace(settings=settings, db_path=db_path, company=company)
+    _seed_live_company(env, "Acme Corp")
+    await create_client_slot(env.settings, display_name="Acme Corp", source="current")
+    await create_client_slot(env.settings, display_name="Beta Inc", source="blank")
+
+    # Real _rebuild_vector_state, but the store factory refuses — the same
+    # failure mode as the persisted-schema guard on a tampered volume.
+    import openexecutive.knowledge.store as store_mod
+    from openexecutive.knowledge.store import PersistedEmbeddingConfigError
+
+    _real = store_mod.ChromaDBStore
+
+    class _RefusingStore:
+        # Lazy imports evaluate collection constants on the patched class —
+        # carry the real names so module import survives the refusal.
+        COMPANY_COLLECTION = _real.COMPANY_COLLECTION
+        RESEARCH_COLLECTION = _real.RESEARCH_COLLECTION
+        ATTACHMENT_COLLECTION = _real.ATTACHMENT_COLLECTION
+        BUILTIN_COLLECTION = _real.BUILTIN_COLLECTION
+        FAILURES_COLLECTION = _real.FAILURES_COLLECTION
+
+        def __init__(self, *_a: Any, **_kw: Any) -> None:
+            raise PersistedEmbeddingConfigError(
+                "collection 'company_docs': embedding_function config refused"
+            )
+
+    monkeypatch.setattr(store_mod, "ChromaDBStore", _RefusingStore)
+
+    with pytest.raises(PersistedEmbeddingConfigError):
+        await activate_client_slot(env.settings, "beta_inc")
+
+    # Identity AND live state must both still be Acme — not just the sentinel.
+    assert get_active_client(env.settings) == "acme_corp"
+    assert _decision_summaries(env.db_path) == ["Acme Corp decision"]
+    assert "Acme Corp" in env.settings.company_profile_path.read_text()
+    assert (env.company / "docs" / "strategy.md").exists()
+    assert env.settings.mcp_servers_config_path.exists()

@@ -38,7 +38,7 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     episodic.initialize_db(db_path)
     monkeypatch.setattr(config, "get_settings", lambda: settings)
 
-    async def _no_vector(_settings: Any, _app_state: Any) -> int:
+    async def _no_vector(_settings: Any, _app_state: Any, *, store: Any = None) -> int:
         return 0
 
     monkeypatch.setattr(slots, "_rebuild_vector_state", _no_vector)

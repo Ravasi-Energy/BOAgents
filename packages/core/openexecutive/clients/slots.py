@@ -211,12 +211,15 @@ def _clear_restore_blocked(settings: Any) -> None:
 def get_restore_blocked(settings: Any) -> dict[str, Any] | None:
     """The restore-blocked marker, or None when client switching is healthy.
 
-    Written only when BOTH a client activation and the automatic save-back-free
-    recovery fail: live state then provably does not match any identity, so
-    the slot ops that read or overwrite state (save, create-from-current,
-    park, delete, activate) refuse until the recorded restore target
-    succeeds — and the API gate 503s normal traffic entirely. Fail closed —
-    an unreadable marker still means blocked.
+    Written BEFORE the first live mutation of a client transition (phase
+    ``transition_started``) as the durable proof that keeps a crashed or
+    killed restore fenced across restarts, and refreshed when the
+    automatic save-back-free recovery fails (phase ``recovery_failed``).
+    While it exists the slot ops that read or overwrite state (save,
+    create-from-current, park, delete, activate) refuse until the
+    recorded restore target succeeds — and the API gate 503s normal
+    traffic entirely. Fail closed — an unreadable marker still means
+    blocked.
     """
     marker = _restore_blocked_path(settings)
     try:
@@ -292,6 +295,58 @@ def _require_not_restore_blocked(settings: Any, *, allow_slug: str | None = None
     )
 
 
+def _write_restore_marker_payload(
+    *, failed_slug: str, target_slug: str | None, phase: str
+) -> str:
+    return json.dumps(
+        {
+            "failed_slug": failed_slug,
+            "restore_slug": target_slug,
+            "kind": "slot" if target_slug else "user_backup",
+            "phase": phase,
+            "at": datetime.now(UTC).isoformat(),
+        }
+    )
+
+
+def _write_marker_file(marker: Path, payload: str) -> None:
+    """Write the marker via a same-directory tmp file + rename — a torn
+    write must never leave a half-written marker that loses
+    ``restore_slug`` (a malformed marker still blocks, but degrades
+    recovery to the user-backup path)."""
+    tmp = marker.with_name(marker.name + ".tmp")
+    tmp.write_text(payload, encoding="utf-8")
+    tmp.replace(marker)
+
+
+def _write_transition_marker(
+    settings: Any, *, failed_slug: str, target_slug: str | None
+) -> None:
+    """Durable proof of an in-progress client transition, written BEFORE
+    the first live-state mutation. If the process dies mid-restore the
+    marker survives and a restarted process fences the instance until the
+    recorded target is restored. Refuses the transition outright when the
+    marker cannot be persisted — no durable proof, no mutation."""
+    marker = _restore_blocked_path(settings)
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        _write_marker_file(
+            marker,
+            _write_restore_marker_payload(
+                failed_slug=failed_slug,
+                target_slug=target_slug,
+                phase="transition_started",
+            ),
+        )
+    except Exception as exc:
+        raise ClientSlotError(
+            "Cannot persist the client-transition marker — refusing to "
+            "start the switch without durable proof of an incomplete "
+            "transition (a write fault here leaves live state untouched; "
+            "retry once the filesystem is healthy)."
+        ) from exc
+
+
 def _mark_restore_blocked(
     settings: Any, *, failed_slug: str, target_slug: str | None
 ) -> None:
@@ -299,16 +354,13 @@ def _mark_restore_blocked(
     marker = _restore_blocked_path(settings)
     try:
         marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(
-            json.dumps(
-                {
-                    "failed_slug": failed_slug,
-                    "restore_slug": target_slug,
-                    "kind": "slot" if target_slug else "user_backup",
-                    "at": datetime.now(UTC).isoformat(),
-                }
+        _write_marker_file(
+            marker,
+            _write_restore_marker_payload(
+                failed_slug=failed_slug,
+                target_slug=target_slug,
+                phase="recovery_failed",
             ),
-            encoding="utf-8",
         )
         _restore_blocked_local = False
     except Exception:
@@ -1272,6 +1324,16 @@ async def activate_client_slot(
         from openexecutive.knowledge.store import ChromaDBStore
 
         store = ChromaDBStore(persist_directory=settings.vector_store_path)
+        if blocked is None:
+            # Durable proof BEFORE the first live mutation: a crash or
+            # killed process mid-restore leaves this marker on disk and a
+            # restarted instance stays fenced until the recorded target is
+            # restored. If the marker cannot be persisted the activation
+            # aborts here — live state untouched. A recovery activation
+            # (blocked is not None) already has its durable marker.
+            _write_transition_marker(
+                settings, failed_slug=slug, target_slug=recovery_target
+            )
         try:
             summary = await _restore_slot_state(
                 settings, slot, app_state=app_state, store=store
@@ -1285,7 +1347,9 @@ async def activate_client_slot(
             # (not Exception): a task cancellation mid-restore must not skip
             # containment either.
             _mark_restore_blocked(
-                settings, failed_slug=slug, target_slug=recovery_target
+                settings,
+                failed_slug=(blocked or {}).get("failed_slug") or slug,
+                target_slug=recovery_target,
             )
             # Keep a handle on the recovery task and await it to completion
             # UNDER THE LOCK even if this task gets cancelled while waiting.

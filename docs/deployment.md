@@ -213,7 +213,7 @@ the host — a plain file copy of a live SQLite database can be torn.
 | Scheduled actions firing twice | More than one API replica | Scale the API to exactly 1 (see the warning at the top) |
 | Onboarding wizard says "no company profile" | Empty volume on first boot | Expected — complete the wizard; output lands at `/data/company/profile.yaml` |
 | Boot or a job fails with `PersistedEmbeddingConfigError` | Persisted collection schema refused by the integrity guard (tampered or written by a different ChromaDB) | [knowledge-store-guard.md](knowledge-store-guard.md) — preserve the volume, rebuild from trusted sources; do not delete or hand-edit `chroma.sqlite3` |
-| API answers `503 restore_blocked` on all routes | A client activation failed mid-restore and automatic recovery also failed; `.restore_blocked` marker under `_client_slots/` | Repair the vector volume, then complete the recorded recovery (`POST /clients/<restore_slug>/activate` or `POST /fixtures/unload`) — see [knowledge-store-guard.md](knowledge-store-guard.md) § "Restore-blocked" |
+| API answers `503 restore_blocked` on all routes | A client activation failed mid-restore and automatic recovery also failed (or the process restarted mid-transition); `.restore_blocked` marker under `_client_slots/` | Repair the vector volume, then complete the recorded recovery (`POST /clients/<restore_slug>/activate` or `POST /fixtures/unload`) — see [knowledge-store-guard.md](knowledge-store-guard.md) § "Restore-blocked". Restarting alone does not clear the marker |
 
 ---
 

@@ -25,7 +25,7 @@ vector-store volume is a privileged filesystem boundary.
 |---|---|---|
 | API boot (`api/main.py` lifespan) | API does not start | `PersistedEmbeddingConfigError` in logs; `/health` never answers |
 | Scheduled/overnight workflows (`scheduler/runner.py`, `clients/rotation.py`, `workflows/resumer.py`) | That job/run fails | run marked failed with the error as `last_error` |
-| Client-slot activation/restore (`clients/slots.py`) | Refused before any live mutation: the store is preflighted in `activate_client_slot` (and inside `_restore_slot_state`), so DB, profile/docs, MCP config and the `.active_client` sentinel all stay the previous client's. A refusal *after* preflight triggers automatic save-back-free recovery to the previous coherent state; if recovery also fails the instance enters restore-blocked (`.restore_blocked` marker, API 503, scheduler/resumer hold) until the recorded recovery succeeds. Overnight rotation additionally force-restores the original client (`_force_restore`) on activation failure. | activation error; live state provably coherent — previous state restored, or instance fenced off |
+| Client-slot activation/restore (`clients/slots.py`) | Refused before any live mutation: the store is preflighted in `activate_client_slot` (and inside `_restore_slot_state`), so DB, profile/docs, MCP config and the `.active_client` sentinel all stay the previous client's. A A durable `.restore_blocked` transition marker is written *before* the first live mutation — a write failure aborts the switch with live state untouched, and a crash/restart mid-restore leaves the instance fenced. A refusal *after* preflight triggers automatic save-back-free recovery to the previous coherent state; if recovery also fails the instance enters restore-blocked (API 503, scheduler/resumer hold) until the recorded recovery succeeds. Overnight rotation additionally force-restores the original client (`_force_restore`) on activation failure. | activation error; live state provably coherent — previous state restored, or instance fenced off |
 | Attachment ingest (`integrations/attachments.py`) | That request fails | HTTP 500 on the upload |
 
 The error message names the collection and the schema path of the offending
@@ -94,10 +94,15 @@ not end in that state, not that the state never existed.
 
 #### Restore-blocked (recovery itself failed — e.g. volume still refuses)
 
-If recovery also fails, the instance writes
-`_client_slots/.restore_blocked` (JSON: `failed_slug`, `restore_slug`,
-`kind`, `at`), quarantines the sentinel to `.active_client.refused`
-(kept, not deleted), and refuses to serve ambiguous state:
+`activate` writes `_client_slots/.restore_blocked` **before the first
+live mutation** — it is the durable proof of an in-progress transition
+(JSON: `failed_slug`, `restore_slug`, `kind`, `phase`
+`transition_started`/`recovery_failed`, `at`). If the marker cannot be
+persisted the activation refuses to start: live state stays untouched
+and a restart correctly finds no block. When recovery also fails the
+marker is refreshed (`phase` `recovery_failed`), the sentinel is
+quarantined to `.active_client.refused` (kept, not deleted), and the
+instance refuses to serve ambiguous state:
 
 - the API answers `503 restore_blocked` on every route except `OPTIONS`
   preflights, `/health`, `POST /fixtures/unload`, and
@@ -121,10 +126,24 @@ If recovery also fails, the instance writes
 - `get_active_client` returns `None` while blocked — nothing may
   attribute live state to a client;
 - the marker is a file: the block survives restarts, and a booted
-  instance comes up blocked, not quietly serving. If the file itself
-  cannot be written, a process-local flag fences the process until a
-  verified recovery clears it — log line: `could not write
-  restore-blocked marker`.
+  instance comes up blocked, not quietly serving. **Restarting the
+  process is not a way to clear an unresolved block** — the marker is
+  only deleted by a verified restore completing. If the post-failure
+  marker refresh cannot be written either (the pre-mutation marker
+  already landed), a process-local flag additionally fences the
+  process until a verified recovery clears it — log line: `could not
+  write restore-blocked marker`. The durability model is a plain
+  write on the same filesystem across a *process* restart — fsync-
+  level power-loss guarantees are not claimed. The write itself is
+  tmp-file + same-directory rename, so a torn write cannot leave a
+  half-readable marker that loses `restore_slug`.
+- scope: this fence covers client transitions (`activate` and
+  rotation's `_force_restore`). The fixture load/unload/reset mutation
+  windows are *not* covered — a crash there on an otherwise-healthy
+  instance is a pre-existing, separately-tracked exposure;
+- normal client switches fence the API for the duration of the swap —
+  transient `503 restore_blocked` during activation is intended, not an
+  incident.
 
 Operator recovery while blocked:
 

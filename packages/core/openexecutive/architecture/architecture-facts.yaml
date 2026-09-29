@@ -3891,24 +3891,40 @@ clients:
     re-restores the previous good state — the named slot, or _user_backup
     when no client was active — through the same save-back-free
     _force_restore-style path rotation uses (the mixed live state is
-    deliberately NOT saved back anywhere). If that recovery also fails,
-    _client_slots/.restore_blocked is written, the sentinel is quarantined
+    deliberately NOT saved back anywhere). The .restore_blocked marker is
+    the durable proof of the transition: activate writes it (phase
+    transition_started) after preflight but BEFORE the first live
+    mutation — a write failure aborts the switch with live state
+    untouched, so a transition without durable proof can never start. If
+    the recovery also fails, the marker is refreshed (phase
+    recovery_failed), the sentinel is quarantined
     to .active_client.refused (kept as forensics — nothing ever reads it;
     archive or delete it with the incident record), and an api/main.py
     middleware returns 503 on every route except OPTIONS preflights,
     /health and the fixture/slot ops needed to repair; the marker persists
-    across restarts so a booted-but-blocked API never serves mixed state.
+    across restarts so a booted-but-blocked API never serves mixed state —
+    only a verified restore deletes it, restart is never an unblock path.
     The scheduler tick AND its boot prologue, the wait-for-human resumer
     (startup sweep, tick, kicked resumes), the shared inbound resolver,
     Executive.chat (covers Slack/Discord sockets and every chat caller) and
     the email poller's whole poll cycle all hold on the same marker
     (fail-CLOSED on read errors — the inverse of the rotation pause, which
     fails open) so no due row, resumed run, chat turn or inbound message
-    can act on the wrong client's state. The marker write itself is
-    fail-closed too: if the file cannot be written, a process-local flag
-    fences this process until a verified recovery clears it via
-    _clear_restore_blocked (a restart on a writable volume then proceeds
-    normally; on a still-broken one the next activation re-fences). The
+    can act on the wrong client's state. If the post-failure marker
+    refresh write fails too (the pre-mutation marker is already durable),
+    a process-local flag additionally fences this process until a verified
+    recovery clears it via _clear_restore_blocked. The marker write itself
+    is tmp-file + same-dir rename so a torn write cannot leave a
+    half-readable marker that loses restore_slug. rotation's
+    _force_restore follows the same rule: it writes its own marker before
+    restoring when none exists (cleared on verified completion) and keeps
+    an existing block fail-closed. The durability model claimed is a plain
+    write surviving a PROCESS restart on the same filesystem —
+    fsync/power-loss guarantees are not claimed. Scope note: the fixture
+    load/unload/reset mutation windows (fixture_loader) are NOT covered by
+    this marker — a crash mid-unload on an otherwise-healthy instance is
+    a pre-existing, separately-tracked exposure, not part of the client
+    transition fence. The
     recovery await is shielded and looped under _FIXTURE_OP_LOCK — a
     cancelled request still waits for the inner restore to finish before
     the lock is released and the CancelledError re-raised — so a client

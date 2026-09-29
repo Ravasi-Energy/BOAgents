@@ -821,10 +821,12 @@ async def test_late_refusal_with_persistent_fault_blocks_operations(
         await activate_client_slot(env.settings, "beta_inc")
 
     # The recorded recovery slug is allowed through but re-blocks while the
-    # volume still refuses.
+    # volume still refuses — and the marker keeps the ORIGINAL failed_slug
+    # forensics, not the recovery attempt's target.
     with pytest.raises(slots.ClientSlotError, match="restore-blocked"):
         await activate_client_slot(env.settings, "acme_corp")
-    assert slots.get_restore_blocked(env.settings) is not None
+    marker = slots.get_restore_blocked(env.settings)
+    assert marker is not None and marker["failed_slug"] == "beta_inc"
 
     # Acme's slot copy was never touched through any of this.
     assert (
@@ -995,6 +997,121 @@ def test_restore_blocked_active_fails_closed_on_read_error(
     monkeypatch.setattr("openexecutive.config.get_settings", _boom)
     assert runner._restore_blocked_active() is True
     assert resumer._restore_blocked_active() is True
+
+
+async def test_marker_write_failure_aborts_before_any_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An I/O fault on the transition marker must abort the activation
+    BEFORE the first live mutation: live state is the previous client's,
+    untouched, and a restart legitimately finds no block — no transition
+    was ever in flight."""
+    env = _late_refusal_env(tmp_path, monkeypatch)
+    _seed_live_company(env, "Acme Corp")
+    await create_client_slot(
+        env.settings, display_name="Acme Corp", source="current"
+    )
+    await create_client_slot(
+        env.settings, display_name="Beta Inc", source="blank"
+    )
+
+    real_write_text = Path.write_text
+
+    def _fail_marker_write(self: Path, *a: Any, **kw: Any) -> Any:
+        if self.name.startswith(".restore_blocked"):
+            raise OSError("synthetic marker I/O fault")
+        return real_write_text(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "write_text", _fail_marker_write)
+    with pytest.raises(slots.ClientSlotError, match="transition marker"):
+        await activate_client_slot(env.settings, "beta_inc")
+
+    # Nothing mutated — same live state, same sentinel, no marker, no flag.
+    assert get_active_client(env.settings) == "acme_corp"
+    assert _decision_summaries(env.db_path) == ["Acme Corp decision"]
+    assert not slots._restore_blocked_path(env.settings).exists()
+    assert slots._restore_blocked_local is False
+    assert slots.get_restore_blocked(env.settings) is None
+
+
+async def test_post_mutation_marker_refresh_failure_still_fenced_on_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pre-mutation marker is the durable proof; if the post-failure
+    refresh write ALSO fails, the marker on disk still fences a restarted
+    process — the in-process flag is only the belt on top."""
+    env = _late_refusal_env(tmp_path, monkeypatch)
+    _seed_live_company(env, "Acme Corp")
+    await create_client_slot(
+        env.settings, display_name="Acme Corp", source="current"
+    )
+    await create_client_slot(
+        env.settings, display_name="Beta Inc", source="blank"
+    )
+
+    real_write_text = Path.write_text
+    marker_writes = 0
+
+    def _fail_second_marker_write(self: Path, *a: Any, **kw: Any) -> Any:
+        nonlocal marker_writes
+        if self.name == ".restore_blocked.tmp":
+            marker_writes += 1
+            if marker_writes > 1:
+                raise OSError("synthetic marker I/O fault")
+        return real_write_text(self, *a, **kw)
+
+    _refusing_store(monkeypatch, once=False)  # recovery is refused too
+    monkeypatch.setattr(Path, "write_text", _fail_second_marker_write)
+
+    try:
+        with pytest.raises(slots.ClientSlotError, match="restore-blocked"):
+            await activate_client_slot(env.settings, "beta_inc")
+
+        assert marker_writes == 2  # transition_started + failed refresh
+        assert slots._restore_blocked_local is True
+
+        # Simulate restart: drop the in-process fence — the on-disk marker
+        # alone must still block everything.
+        slots._restore_blocked_local = False
+        marker = slots.get_restore_blocked(env.settings)
+        assert marker is not None and marker["restore_slug"] == "acme_corp"
+        with pytest.raises(slots.ClientSlotError):
+            await save_active_client(env.settings)
+    finally:
+        slots._restore_blocked_local = False
+
+
+async def test_transition_marker_on_disk_throughout_restore(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pin the ordering invariant directly: the durable marker must exist
+    on disk for the WHOLE _restore_slot_state window, carrying the
+    transition_started phase and the correct restore target."""
+    env = _late_refusal_env(tmp_path, monkeypatch)
+    _seed_live_company(env, "Acme Corp")
+    await create_client_slot(
+        env.settings, display_name="Acme Corp", source="current"
+    )
+    await create_client_slot(
+        env.settings, display_name="Beta Inc", source="blank"
+    )
+
+    seen: dict[str, Any] = {}
+    real_restore = slots._restore_slot_state
+
+    async def _spy(*a: Any, **kw: Any) -> Any:
+        seen["marker"] = slots.get_restore_blocked(env.settings)
+        return await real_restore(*a, **kw)
+
+    monkeypatch.setattr(slots, "_restore_slot_state", _spy)
+    await activate_client_slot(env.settings, "beta_inc")
+
+    assert seen["marker"] is not None
+    assert seen["marker"]["phase"] == "transition_started"
+    assert seen["marker"]["failed_slug"] == "beta_inc"
+    assert seen["marker"]["restore_slug"] == "acme_corp"
+    # Successful activation clears it.
+    assert slots.get_restore_blocked(env.settings) is None
 
 
 def test_restore_blocked_ignores_settings_without_real_path(

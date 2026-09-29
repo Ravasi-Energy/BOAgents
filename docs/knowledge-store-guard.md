@@ -147,6 +147,17 @@ instance refuses to serve ambiguous state:
 
 Operator recovery while blocked:
 
+0. **If the process is down, the API will NOT come back up until the
+   volume is repaired.** Startup builds `ChromaDBStore` in the lifespan
+   before any route exists: with the marker present *and* the vector
+   volume still refusing, boot raises `PersistedEmbeddingConfigError`
+   and the application exits — `/health`, the recovery endpoints and
+   the 503 gate never get a socket. This is fail-closed (nothing is
+   served), but it means the recovery paths below are HTTP-unreachable
+   while the volume is bad: **repair/quarantine the volume offline
+   first, then start the process, then complete the recorded
+   recovery.** Do not delete the marker to make boot succeed — the
+   marker is the only thing fencing the half-swapped live state.
 1. **Repair or replace the vector volume** (procedure above: quarantine
    the suspect dir read-only, fresh `VECTOR_STORE_PATH`, re-ingest).
 2. Complete the recorded recovery path — either

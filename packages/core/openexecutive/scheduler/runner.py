@@ -97,56 +97,75 @@ async def run_scheduler(
     poll_interval_seconds: int = 30,
 ) -> None:
     """Poll for due scheduled actions and dispatch them through the Executive."""
-    # Sweep any rows left in 'running' by a previous crash back to 'pending'
-    # so they can be re-tried. Without this they would stay stuck forever.
+    # Marker hygiene is not a live-state write — a stale rotation marker
+    # left by a crash mid-rotation must still be reconciled while blocked,
+    # or the rotation pause would hold claiming forever after recovery.
     try:
-        requeued = requeue_orphaned_running()
-        if requeued:
-            logger.warning(
-                "scheduler: requeued %d orphaned 'running' row(s) from previous run",
-                requeued,
-            )
-    except Exception:
-        logger.exception("scheduler: requeue_orphaned_running failed")
+        from openexecutive.clients.rotation import clear_stale_rotation_marker
+        from openexecutive.config import get_settings as _gs_marker
 
-    # Idempotent seed of the recurring principal briefs. After the first
-    # boot, subsequent restarts are no-ops because each brief row chains
-    # the next occurrence on fire (see _run_principal_brief).
-    try:
-        seeded = seed_principal_briefs()
-        if seeded:
-            logger.info("scheduler: seeded %d principal brief row(s)", seeded)
+        clear_stale_rotation_marker(_gs_marker())
     except Exception:
-        logger.exception("scheduler: seed_principal_briefs failed")
+        logger.exception("scheduler: rotation marker reconcile failed")
 
-    # Overnight client rotation: reconcile a stale marker from a crash
-    # mid-rotation (it would pause claiming forever), then seed the next
-    # occurrence (no-op unless CLIENT_ROTATION_ENABLED).
-    try:
-        from openexecutive.clients.rotation import (
-            clear_stale_rotation_marker,
-            seed_client_rotation,
+    if _restore_blocked_active():
+        # Booting into a restore block: every seed/sweep below would write
+        # into possibly-mixed live state. They are all idempotent — hold
+        # them entirely; the first post-recovery restart (or the next boot)
+        # runs them on coherent state. The tick loop holds as well.
+        logger.warning(
+            "scheduler: instance is restore-blocked — skipping boot "
+            "seeds/sweeps; tick loop will hold until recovery completes"
         )
-        from openexecutive.config import get_settings as _gs
+    else:
+        # Sweep any rows left in 'running' by a previous crash back to
+        # 'pending' so they can be re-tried. Without this they would stay
+        # stuck forever.
+        try:
+            requeued = requeue_orphaned_running()
+            if requeued:
+                logger.warning(
+                    "scheduler: requeued %d orphaned 'running' row(s) from previous run",
+                    requeued,
+                )
+        except Exception:
+            logger.exception("scheduler: requeue_orphaned_running failed")
 
-        clear_stale_rotation_marker(_gs())
-        seed_client_rotation()
-    except Exception:
-        logger.exception("scheduler: rotation reconcile/seed failed")
+        # Idempotent seed of the recurring principal briefs. After the first
+        # boot, subsequent restarts are no-ops because each brief row chains
+        # the next occurrence on fire (see _run_principal_brief).
+        try:
+            seeded = seed_principal_briefs()
+            if seeded:
+                logger.info("scheduler: seeded %d principal brief row(s)", seeded)
+        except Exception:
+            logger.exception("scheduler: seed_principal_briefs failed")
 
-    # Expire past-TTL alerts once at boot (a redeploy cleans an old backlog
-    # immediately) and then every _ALERT_SWEEP_INTERVAL from the tick loop.
-    _maybe_sweep_alerts(datetime.now(UTC))
+        # Overnight client rotation: seed the next occurrence (no-op
+        # unless CLIENT_ROTATION_ENABLED). Stale-marker reconcile runs
+        # above the block gate — it is marker hygiene, not live-state work.
+        try:
+            from openexecutive.clients.rotation import seed_client_rotation
 
-    # Executive alert review heartbeat — idempotent bootstrap, like nudge_scan.
-    try:
-        from openexecutive.alerts.review import bootstrap_alert_review_scan
-        from openexecutive.config import get_settings as _review_settings
+            seed_client_rotation()
+        except Exception:
+            logger.exception("scheduler: rotation seed failed")
 
-        if _review_settings().alert_review_enabled:
-            bootstrap_alert_review_scan()
-    except Exception:
-        logger.exception("scheduler: alert_review bootstrap failed")
+        # Expire past-TTL alerts once at boot (a redeploy cleans an old
+        # backlog immediately) and then every _ALERT_SWEEP_INTERVAL from the
+        # tick loop.
+        _maybe_sweep_alerts(datetime.now(UTC))
+
+        # Executive alert review heartbeat — idempotent bootstrap, like
+        # nudge_scan.
+        try:
+            from openexecutive.alerts.review import bootstrap_alert_review_scan
+            from openexecutive.config import get_settings as _review_settings
+
+            if _review_settings().alert_review_enabled:
+                bootstrap_alert_review_scan()
+        except Exception:
+            logger.exception("scheduler: alert_review bootstrap failed")
 
     logger.info(
         "scheduler started (poll_interval=%ds)", poll_interval_seconds
@@ -157,7 +176,8 @@ async def run_scheduler(
         try:
             now = datetime.now(UTC)
             # Alert expiry is pure DB hygiene and must not wait for
-            # onboarding or a client rotation — it runs before both gates.
+            # onboarding, a client rotation, or a restore block — it runs
+            # before all three holds.
             _maybe_sweep_alerts(now)
             if not _company_profile_active():
                 # No active company profile — don't claim or run anything.
@@ -180,6 +200,13 @@ async def run_scheduler(
                 # context — claiming now would fire the just-activated
                 # client's overdue outbound backlog at 3am. Everything due
                 # fires on the first tick after the original client is back.
+                await asyncio.sleep(poll_interval_seconds)
+                continue
+            if _restore_blocked_active():
+                # A failed client activation left live state half-swapped
+                # and automatic recovery failed. Due rows would run the
+                # wrong client's outbound actions — hold everything until
+                # an operator completes the recorded recovery path.
                 await asyncio.sleep(poll_interval_seconds)
                 continue
             due = claim_due_actions(now)
@@ -869,6 +896,20 @@ def _rotation_pause_active() -> bool:
         return rotation_in_progress(get_settings())
     except Exception:
         return False
+
+
+def _restore_blocked_active() -> bool:
+    """True while the client-slot restore-blocked marker exists.
+
+    Deliberately the OPPOSITE of ``_rotation_pause_active``'s fail-open: a
+    restore block means live state may be a half-swapped mix that provably
+    belongs to no client, and due rows could fire the wrong company's
+    outbound actions. ``slots.is_restore_blocked`` fails closed — a marker
+    read error also holds the tick.
+    """
+    from openexecutive.clients.slots import is_restore_blocked
+
+    return is_restore_blocked()
 
 
 def _parse_hhmm(spec: str, default: str) -> tuple[int, int]:

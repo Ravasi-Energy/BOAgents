@@ -1603,6 +1603,18 @@ class Executive:
         keeps each underlying entry point's own default (``"minimal"``
         for the streaming path, ``"medium"`` for the committee path).
         """
+        # A restore-blocked instance must not run a turn on possibly
+        # half-swapped state — socket-mode channels (Slack/Discord/email)
+        # reach here without ever crossing the HTTP 503 gate.
+        from openexecutive.clients.slots import is_restore_blocked
+
+        if is_restore_blocked():
+            return (
+                "I'm in maintenance mode — a client switch failed and the "
+                "instance is fenced off until an operator completes the "
+                "recovery. Please try again after it's back."
+            )
+
         # Build the kwargs dict so we can conditionally include the
         # reasoning_level only when caller specified one — otherwise
         # the inner method's own default ("low" or "medium") wins.

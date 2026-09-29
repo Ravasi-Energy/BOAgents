@@ -25,7 +25,7 @@ vector-store volume is a privileged filesystem boundary.
 |---|---|---|
 | API boot (`api/main.py` lifespan) | API does not start | `PersistedEmbeddingConfigError` in logs; `/health` never answers |
 | Scheduled/overnight workflows (`scheduler/runner.py`, `clients/rotation.py`, `workflows/resumer.py`) | That job/run fails | run marked failed with the error as `last_error` |
-| Client-slot activation/restore (`clients/slots.py`) | Refused before any live mutation: the store is preflighted at the top of `_restore_slot_state`, so DB, profile/docs, MCP config and the `.active_client` sentinel all stay the previous client's. Overnight rotation additionally force-restores the original client (`_force_restore`, save-back-free) on any activation failure. | activation error; live state provably unchanged |
+| Client-slot activation/restore (`clients/slots.py`) | Refused before any live mutation: the store is preflighted in `activate_client_slot` (and inside `_restore_slot_state`), so DB, profile/docs, MCP config and the `.active_client` sentinel all stay the previous client's. A refusal *after* preflight triggers automatic save-back-free recovery to the previous coherent state; if recovery also fails the instance enters restore-blocked (`.restore_blocked` marker, API 503, scheduler/resumer hold) until the recorded recovery succeeds. Overnight rotation additionally force-restores the original client (`_force_restore`) on activation failure. | activation error; live state provably coherent — previous state restored, or instance fenced off |
 | Attachment ingest (`integrations/attachments.py`) | That request fails | HTTP 500 on the upload |
 
 The error message names the collection and the schema path of the offending
@@ -66,10 +66,7 @@ Preflighting refuses before the first mutation, so a rejected store leaves
 the previous client fully live. One residual window remains: if the volume
 is tampered *between* preflight and the rebuild calls, a mid-restore
 refusal can still leave the live DB/docs swapped to the target while the
-`.active_client` sentinel names the previous client. Detect it by
-comparing the sentinel file against the live profile/decisions in the
-logs or SQLite — do not browse B's data in the UI as a diagnostic step;
-the UI follows the live state, which is the very thing under suspicion.
+`.active_client` sentinel names the previous client.
 
 **Cleanup refuses too — no silent skip.** Integrity refusal propagates out
 of every store cleanup/read helper (`delete_documents`, `delete_by_ids`,
@@ -79,41 +76,82 @@ the persisted schema *before* dropping. An activation whose cleanup is
 refused therefore **fails** — it cannot report success while client A's
 rows linger for B to read after the volume is repaired. Ordinary
 "collection absent" cases still pass (absence is not tamper), as do
-non-integrity file errors the callers already tolerate. What this does
-NOT cover: a refusal lands mid-restore, so the partial state below still
-applies — and any *other* failure mode during restore is handled by the
-same recovery.
+non-integrity file errors the callers already tolerate.
 
-Recovery is save-back-free and was exercised end-to-end synthetically —
-the target's last good slot copy is never touched:
+#### Automatic recovery (the product path — runs before any operator step)
 
-1. **Stop all writers** (API/scheduler down) before changing anything.
-2. **Verify the good slot copy first**: `<clients_root>/<sentinel_slug>/`
-   must contain `state.db`, `profile.yaml`, `docs/`. If it does not, there
-   is nothing verified to restore — stop here; recovery of that client is
-   undemonstrated and needs a backup, not improvisation.
-3. **Repair or replace the vector volume BEFORE re-activation** (procedure
-   above: quarantine suspect dir, fresh `VECTOR_STORE_PATH`). Skipping
-   this just makes the re-activation refuse at preflight again — though
-   harmlessly, since the partial live state stays untouched.
-4. **Quarantine the sentinel, never delete it**: rename
-   `<clients_root>/.active_client` to `.active_client.refused-<date>`.
-   Do **not** call `park_active_client` or `activate_client_slot` for A
-   while it still reads A — either would save the half-restored live
-   state over A's good slot copy.
-5. **Re-activate A** through the normal path (`activate_client_slot` /
-   the clients UI). With no sentinel, activation restores A's slot copy
-   and rewrites the sentinel — nothing is saved back. Note: the
-   pre-activation `_user_backup` snapshot only runs when `_user_backup/`
-   is absent; if it was already created (normal for client-mode users)
-   it is untouched — verify its existence first, since a missing one
-   would capture the partial live state.
-6. **Validate before resuming traffic**: sentinel names A, live decisions
-   /profile/docs match the slot copy, `app_state.store` serves queries,
-   and the slot copy itself is byte-identical (it was the source, not the
-   destination). The rebuilt vector index is *reconstructed*, not
-   byte-verbatim — re-ingest produces equivalent search, not the old
-   chunk ids.
+A failed `activate_client_slot` no longer returns with mixed state
+servable. The activation itself, still under the shared destructive-op
+lock, re-restores the previous coherent state **save-back-free** (the
+same contract as rotation's `_force_restore`): the recorded previous
+slot, or `_user_backup` when no client was active. The half-swapped live
+state is discarded — never written over a good slot copy. The request
+then propagates the original error. Note for auditors: an unchanged
+`.active_client` sentinel is **not** by itself proof that no exposure
+happened — between the failed restore and the recovery restore, live
+state was B's under A's name; the invariant is that the *request* does
+not end in that state, not that the state never existed.
+
+#### Restore-blocked (recovery itself failed — e.g. volume still refuses)
+
+If recovery also fails, the instance writes
+`_client_slots/.restore_blocked` (JSON: `failed_slug`, `restore_slug`,
+`kind`, `at`), quarantines the sentinel to `.active_client.refused`
+(kept, not deleted), and refuses to serve ambiguous state:
+
+- the API answers `503 restore_blocked` on every route except `OPTIONS`
+  preflights, `/health`, `POST /fixtures/unload`, and
+  `POST /clients/{slug}/activate` — and of the activations only the
+  recorded `restore_slug` may proceed. `/health` answers but withholds
+  `company_name` (the live profile may be the half-swapped one, and
+  health is unauthenticated);
+- slot mutations (`save`, `create`, `park`, `delete`, other activations)
+  refuse — nothing can save mixed live state over a good slot;
+- the scheduler boot prologue and tick, the resumer (startup sweep, poll
+  loop, kicked resumes), the shared inbound resolver (Socket-mode
+  Slack/Discord replies get a maintenance notice instead of resolving a
+  gate), `Executive.chat` (returns a maintenance reply on every channel),
+  and the email poller's whole poll cycle all hold — inbound mail stays
+  unread and retriable, due rows and resumed runs do not fire the wrong
+  company's outbound work. All gates fail **closed**: a marker read
+  error also holds;
+- fixture/CLI paths refuse too: `load_fixture`/`load_fixture_any`,
+  `snapshot_user_state`, `reset_all_state` — the snapshot above all,
+  since it would overwrite `_user_backup` with mixed state;
+- `get_active_client` returns `None` while blocked — nothing may
+  attribute live state to a client;
+- the marker is a file: the block survives restarts, and a booted
+  instance comes up blocked, not quietly serving. If the file itself
+  cannot be written, a process-local flag fences the process until a
+  verified recovery clears it — log line: `could not write
+  restore-blocked marker`.
+
+Operator recovery while blocked:
+
+1. **Repair or replace the vector volume** (procedure above: quarantine
+   the suspect dir read-only, fresh `VECTOR_STORE_PATH`, re-ingest).
+2. Complete the recorded recovery path — either
+   `POST /clients/<restore_slug>/activate` (re-restores that slot, clears
+   the marker on success) or `POST /fixtures/unload` (restores the user
+   backup, exits client mode, clears the marker). A successful restore is
+   the *only* thing that clears the marker; `unload_fixture` unlinks it
+   only after `_apply_state_from_source` returns.
+3. If the marker's `kind` is `user_backup` and `_user_backup/profile.yaml`
+   is missing, there is no verified restore point — recovery of that
+   live state is undemonstrated; restore from a real backup instead of
+   improvising.
+4. Do **not** delete `.restore_blocked` or the quarantined sentinel by
+   hand while live state is still mixed — the marker is what stops
+   save-back contamination and wrong-identity serving. After a
+   successful recovery, `.active_client.refused` can be archived with
+   the incident record.
+
+Validate before declaring the incident closed: active client names the
+recovered client, live decisions/profile/docs match the slot copy,
+`app_state.store` serves queries, and the slot copy itself is
+byte-identical (it was the source, not the destination). The rebuilt
+vector index is *reconstructed*, not byte-verbatim — re-ingest produces
+equivalent search, not the old chunk ids.
 
 ## Situation B — private interface incompatible
 

@@ -31,6 +31,7 @@ Invariants:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import shutil
@@ -117,8 +118,15 @@ _BLANK_WIPE_TABLES = (
     "eval_runs",
     "external_signals",
     "watchlist",
+    "watchlist_declines",
+    "watchlist_policy_outcomes",
     "page_watch_state",
     "outbound_context",
+    "audit_dedup",
+    # User-authored workflow definitions live in the same DB (not in
+    # workflow_runs) — without this a failed/incoming client's custom
+    # workflows stay active under the next identity.
+    "dynamic_workflows",
     # Legacy talent / staff-onboarding tables. Both features are gone and
     # nothing writes these any more, but the rows may still exist on upgraded
     # installs and they carry candidate PII (names, employers, screening
@@ -179,8 +187,142 @@ def _episodic_db_path() -> Path:
     return Path(str(DB_PATH))
 
 
+_RESTORE_BLOCKED = ".restore_blocked"
+
+# Process-local fallback for when the marker file itself cannot be written
+# (the same disk/volume fault that broke the activation usually breaks this
+# write too). Without it the instance would claim "restore-blocked" in its
+# error while every gate read unblocked. Fail-closed for the process
+# lifetime; cleared wherever the marker is cleared after a coherent restore.
+_restore_blocked_local = False
+
+
+def _restore_blocked_path(settings: Any) -> Path:
+    return _clients_root(settings) / _RESTORE_BLOCKED
+
+
+def _clear_restore_blocked(settings: Any) -> None:
+    """Single choke point for lifting the block: marker file + local flag."""
+    global _restore_blocked_local
+    _restore_blocked_path(settings).unlink(missing_ok=True)
+    _restore_blocked_local = False
+
+
+def get_restore_blocked(settings: Any) -> dict[str, Any] | None:
+    """The restore-blocked marker, or None when client switching is healthy.
+
+    Written only when BOTH a client activation and the automatic save-back-free
+    recovery fail: live state then provably does not match any identity, so
+    the slot ops that read or overwrite state (save, create-from-current,
+    park, delete, activate) refuse until the recorded restore target
+    succeeds — and the API gate 503s normal traffic entirely. Fail closed —
+    an unreadable marker still means blocked.
+    """
+    marker = _restore_blocked_path(settings)
+    try:
+        raw = marker.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        if _restore_blocked_local:
+            # The file could never be written, but this process knows a
+            # recovery failed — fence anyway.
+            return {"malformed": True, "volatile": True}
+        return None
+    except Exception:
+        # Fail closed: an unreadable marker (perms, ELOOP) means "cannot
+        # prove live state is coherent" — same as a malformed one.
+        return {"malformed": True}
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {"malformed": True}
+
+
+def is_restore_blocked() -> bool:
+    """Shared fail-CLOSED check for background gates (scheduler tick,
+    resumer, API middleware). Resolves settings lazily; any error —
+    including a settings/read failure — means "cannot prove live state is
+    coherent", which is itself a block condition."""
+    try:
+        from openexecutive.config import get_settings
+
+        return get_restore_blocked(get_settings()) is not None
+    except Exception:
+        return True
+
+
+def _require_not_restore_blocked(settings: Any, *, allow_slug: str | None = None) -> None:
+    marker = get_restore_blocked(settings)
+    if marker is None:
+        return
+    restore_slug = marker.get("restore_slug")
+    if allow_slug is not None and restore_slug and allow_slug == restore_slug:
+        if _slot_dir(settings, restore_slug).is_dir():
+            return
+        raise ClientSlotError(
+            f"Client switching is restore-blocked and the recorded recovery "
+            f"slot {restore_slug!r} no longer exists — restore the user "
+            "backup via POST /fixtures/unload, or repair manually."
+        )
+    if restore_slug:
+        raise ClientSlotError(
+            "Client switching is restore-blocked: a failed activation left "
+            "live state inconsistent and automatic recovery failed. Repair "
+            "the vector store, then re-activate "
+            f"{restore_slug!r} (or restore the user backup via "
+            "POST /fixtures/unload)."
+        )
+    raise ClientSlotError(
+        "Client switching is restore-blocked: restore the user backup via "
+        "POST /fixtures/unload. If no user backup exists either, inspect "
+        "live state manually and, only after verifying nothing worth "
+        "keeping is live, delete "
+        f"{_restore_blocked_path(settings)} to unblock (or, when the marker "
+        "never made it to disk, restart the process to clear the "
+        "in-process fence)."
+    )
+
+
+def _mark_restore_blocked(
+    settings: Any, *, failed_slug: str, target_slug: str | None
+) -> None:
+    global _restore_blocked_local
+    marker = _restore_blocked_path(settings)
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(
+            json.dumps(
+                {
+                    "failed_slug": failed_slug,
+                    "restore_slug": target_slug,
+                    "kind": "slot" if target_slug else "user_backup",
+                    "at": datetime.now(UTC).isoformat(),
+                }
+            ),
+            encoding="utf-8",
+        )
+        _restore_blocked_local = False
+    except Exception:
+        # The marker file is the whole containment — if it can't be written
+        # the instance still must not serve mixed state. Fence this process
+        # in memory and escalate loudly; the block then survives until a
+        # verified recovery clears it via _clear_restore_blocked.
+        _restore_blocked_local = True
+        logger.critical(
+            "client-slots: could not write restore-blocked marker %s — "
+            "instance fenced in-process only; a restart loses the fence — "
+            "take it down manually",
+            marker,
+        )
+
+
 def get_active_client(settings: Any) -> str | None:
     """The active slot slug, or None when running single-company / fixture mode."""
+    if get_restore_blocked(settings) is not None:
+        # Under a restore block nothing may attribute live state to a client.
+        return None
     sentinel = _active_client_sentinel(settings)
     if not sentinel.exists():
         return None
@@ -353,9 +495,18 @@ def _replace_dir_copy(src: Path, dst: Path) -> int:
 
 
 async def _restore_slot_state(
-    settings: Any, slot: Path, *, app_state: Any | None = None
+    settings: Any,
+    slot: Path,
+    *,
+    app_state: Any | None = None,
+    store: Any | None = None,
 ) -> dict[str, Any]:
-    """Make ``slot`` the live company context. Caller holds the lock."""
+    """Make ``slot`` the live company context. Caller holds the lock.
+
+    ``store`` may carry a preflighted ChromaDBStore — see below; passing one
+    lets the caller distinguish a clean refusal (before any mutation) from
+    a mid-restore failure needing recovery.
+    """
     company_dir: Path = settings.company_profile_path.parent
     # "Blank" here means "no state.db yet" — true for both empty blank slots
     # and generated seed slots (which carry YAML/JSON seed files instead).
@@ -369,10 +520,13 @@ async def _restore_slot_state(
     #    MCP config and the sentinel all still agree. Without this, the swaps
     #    below would already have run and the refusal would strand live
     #    state on the incoming client while get_active_client() still named
-    #    the previous one.
-    from openexecutive.knowledge.store import ChromaDBStore
+    #    the previous one. Callers that already preflighted (activation does
+    #    its own, so it can tell "refused before touching anything" apart
+    #    from "died mid-restore") pass the validated instance via ``store``.
+    if store is None:
+        from openexecutive.knowledge.store import ChromaDBStore
 
-    store = ChromaDBStore(persist_directory=settings.vector_store_path)
+        store = ChromaDBStore(persist_directory=settings.vector_store_path)
 
     # 1. SQLite state — whole-DB restore (or factory wipe for blank slots),
     #    with operator-level tables carried across.
@@ -492,6 +646,17 @@ def _wipe_per_client_tables() -> None:
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()
         }
+        if "people" in existing:
+            # reports_to_person_id is a SELF-FK: a bulk DELETE can hit a
+            # manager row while its subordinate still references it.
+            cols = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(people)")
+            }
+            if "reports_to_person_id" in cols:
+                conn.execute(
+                    "UPDATE people SET reports_to_person_id = NULL"
+                )
         for table in _BLANK_WIPE_TABLES:
             if table in existing:
                 conn.execute(f"DELETE FROM {table}")  # noqa: S608 — fixed allowlist
@@ -802,6 +967,82 @@ def park_active_client(settings: Any) -> str | None:
 # ── Public operations (each holds the shared destructive-op lock) ───────────
 
 
+async def _recover_failed_activation(
+    settings: Any, target_slug: str | None, *, app_state: Any | None = None
+) -> bool:
+    """Save-back-free restore of the coherent previous state after a failed
+    activation. Returns True only when live state provably matches
+    ``target_slug`` (or the user backup when ``target_slug`` is None).
+
+    This is the product-side equivalent of rotation's ``_force_restore``:
+    the caller must already hold ``_FIXTURE_OP_LOCK``. Every failure —
+    including a still-refused vector store — returns False so the caller
+    can drop into the restore-blocked state instead of leaving partial
+    data servable under a wrong identity.
+    """
+    try:
+        sentinel = _active_client_sentinel(settings)
+        if target_slug is not None:
+            target_slot = _slot_dir(settings, target_slug)
+            if not target_slot.is_dir():
+                raise ClientSlotNotFoundError(
+                    f"recovery target slot {target_slug!r} is gone"
+                )
+            await _restore_slot_state(settings, target_slot, app_state=app_state)
+            sentinel.parent.mkdir(parents=True, exist_ok=True)
+            sentinel.write_text(target_slug, encoding="utf-8")
+            _set_honcho_client_workspace(target_slug)
+        else:
+            # No previous client — the user's own company lives in
+            # _user_backup (the same restore point POST /fixtures/unload
+            # uses). That format never carried the DB-resident per-client
+            # state, MCP config or skills — wipe them first, or the failed
+            # client's chat/workflow/audit rows and MCP credentials stay
+            # live under the user's identity.
+            from openexecutive.cli.fixture_loader import (
+                _apply_state_from_source,
+                _discard_state_not_in_backup,
+            )
+
+            backup = settings.company_profile_path.parent / "_user_backup"
+            if not (backup / "profile.yaml").exists():
+                raise ClientSlotError(
+                    "no user backup exists to recover the live state"
+                )
+            _discard_state_not_in_backup()
+            await _apply_state_from_source(
+                backup, settings, strict_per_company=True
+            )
+            sentinel.unlink(missing_ok=True)
+            try:
+                # Mirror unload_fixture: no client is active after a backup
+                # restore, so drop any client-scoped Honcho workspace
+                # override — otherwise post-recovery user turns keep
+                # syncing into the failed client's workspace.
+                from openexecutive.memory.honcho_client import (
+                    clear_active_workspace_id,
+                )
+
+                clear_active_workspace_id()
+            except Exception:
+                logger.exception(
+                    "client-slots: post-recovery honcho workspace clear failed"
+                )
+        logger.info(
+            "client-slots: recovered previous state after failed activation "
+            "(target=%r)",
+            target_slug,
+        )
+        return True
+    except Exception:
+        logger.exception(
+            "client-slots: automatic recovery after failed activation failed "
+            "(target=%r)",
+            target_slug,
+        )
+        return False
+
+
 def _require_no_fixture(settings: Any) -> None:
     active_fixture = get_fixture_status(settings).get("active_fixture")
     if active_fixture:
@@ -855,6 +1096,10 @@ async def create_client_slot(
         raise ClientSlotError("source='generated' requires a bundle")
 
     async with _FIXTURE_OP_LOCK:
+        # Inside the lock: a block marker can land between an outside
+        # check and lock acquisition, and source="current" would then
+        # capture half-swapped live state into a fresh slot.
+        _require_not_restore_blocked(settings)
         _require_no_fixture(settings)
 
         if slug is not None and not _SAFE_NAME_RE.match(slug):
@@ -948,6 +1193,7 @@ async def save_active_client(settings: Any) -> dict[str, Any]:
     """Checkpoint the live state into the active slot without switching."""
     async with _FIXTURE_OP_LOCK:
         _require_no_fixture(settings)
+        _require_not_restore_blocked(settings)
         active = get_active_client(settings)
         if active is None:
             raise ClientSlotConflictError(
@@ -972,11 +1218,23 @@ async def activate_client_slot(
     """
     async with _FIXTURE_OP_LOCK:
         _require_no_fixture(settings)
+
+        # Under a restore block only the recorded recovery target may be
+        # activated — anything else could strand this instance deeper. Check
+        # BEFORE _require_slot so a deleted recovery slot surfaces the
+        # blocked-remediation error, not a misleading 404.
+        blocked = get_restore_blocked(settings)
+        if blocked is not None:
+            _require_not_restore_blocked(settings, allow_slug=slug)
         slot = _require_slot(settings, slug)
 
         active = get_active_client(settings)
         if active == slug:
             return {"slug": slug, "already_active": True}
+        # When blocked, the sentinel was quarantined and `active` reads None;
+        # the coherent recovery target comes from the marker, not the lock
+        # state, so a second failure must still aim at the same slot.
+        recovery_target = active if blocked is None else blocked.get("restore_slug")
 
         if active is not None:
             try:
@@ -989,21 +1247,105 @@ async def activate_client_slot(
                 )
             else:
                 _save_slot_state(settings, previous_slot)
-        else:
+        elif blocked is None and not (
+            settings.company_profile_path.parent / "_user_backup" / "profile.yaml"
+        ).exists():
             # Mirror the fixture switcher's first-load behavior: preserve the
             # user's original company before replacing it. Best-effort — an
             # empty environment has nothing worth snapshotting.
-            if not (settings.company_profile_path.parent / "_user_backup" / "profile.yaml").exists():
-                try:
-                    snapshot_user_state(settings)
-                except Exception:
-                    logger.exception(
-                        "client-slots: pre-activation user snapshot failed"
-                    )
+            try:
+                snapshot_user_state(settings)
+            except Exception:
+                logger.exception(
+                    "client-slots: pre-activation user snapshot failed"
+                )
 
-        summary = await _restore_slot_state(settings, slot, app_state=app_state)
+        # Preflight BEFORE _restore_slot_state: a refusal at this point means
+        # zero live mutations — plain propagation, nothing to recover.
+        from openexecutive.knowledge.store import ChromaDBStore
+
+        store = ChromaDBStore(persist_directory=settings.vector_store_path)
+        try:
+            summary = await _restore_slot_state(
+                settings, slot, app_state=app_state, store=store
+            )
+        except BaseException as exc:
+            # A late refusal has already swapped DB/profile/docs while the
+            # sentinel still names the previous client — the request must not
+            # end serving B's data under A's identity. The marker is written
+            # BEFORE recovery runs: the restore takes seconds and without the
+            # fence up the whole window would serve mixed state. BaseException
+            # (not Exception): a task cancellation mid-restore must not skip
+            # containment either.
+            _mark_restore_blocked(
+                settings, failed_slug=slug, target_slug=recovery_target
+            )
+            # Keep a handle on the recovery task and await it to completion
+            # UNDER THE LOCK even if this task gets cancelled while waiting.
+            # Releasing the lock early would let a retry/restore run a
+            # second concurrent writer against the still-mutating live
+            # state — the incoherence this block exists to fence.
+            inner = asyncio.ensure_future(
+                _recover_failed_activation(
+                    settings, recovery_target, app_state=app_state
+                )
+            )
+            cancelled = False
+            while True:
+                try:
+                    recovered = await asyncio.shield(inner)
+                    break
+                except asyncio.CancelledError:
+                    # Cancellation interrupted the WAIT, not the work —
+                    # the shielded inner task is still restoring. Keep
+                    # waiting until it finishes before judging the result.
+                    cancelled = True
+                    if inner.done():
+                        try:
+                            recovered = inner.result()
+                        except BaseException:
+                            recovered = False
+                        break
+            if recovered:
+                # The marker fenced the recovery window; recovery verified
+                # coherent live state, so the fence comes down again.
+                _clear_restore_blocked(settings)
+                if cancelled:
+                    raise asyncio.CancelledError() from exc
+                raise
+            sentinel = _active_client_sentinel(settings)
+            if sentinel.exists():
+                # Quarantine, never delete: the file is incident
+                # forensics. Nothing reads it again — successful
+                # recovery rewrites .active_client — so it can be
+                # archived or removed with the incident record.
+                sentinel.rename(
+                    sentinel.with_name(".active_client.refused")
+                )
+            if cancelled:
+                # Containment is now durable; deliver the cancellation the
+                # caller asked for rather than swallowing it.
+                raise asyncio.CancelledError() from exc
+            if isinstance(
+                exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)
+            ):
+                raise
+            raise ClientSlotError(
+                f"Activation of {slug!r} failed and automatic recovery "
+                "failed — the instance is restore-blocked until the "
+                "vector store is repaired and the recorded client is "
+                "re-activated (or the user backup is restored via "
+                "POST /fixtures/unload)."
+            ) from exc
+        # Sentinel BEFORE the marker unlink: a crash between them otherwise
+        # leaves the instance unblocked with restored-B live state and no
+        # active_client at all. Remove any stale quarantined sentinel too.
         _active_client_sentinel(settings).parent.mkdir(parents=True, exist_ok=True)
         _active_client_sentinel(settings).write_text(slug, encoding="utf-8")
+        _active_client_sentinel(settings).with_name(
+            ".active_client.refused"
+        ).unlink(missing_ok=True)
+        _clear_restore_blocked(settings)
         workspace = _set_honcho_client_workspace(slug)
         if workspace:
             summary["honcho_workspace"] = workspace
@@ -1026,6 +1368,7 @@ async def activate_client_slot(
 async def delete_client_slot(settings: Any, slug: str) -> dict[str, Any]:
     """Delete a parked slot. Refuses the active one (switch away first)."""
     async with _FIXTURE_OP_LOCK:
+        _require_not_restore_blocked(settings)
         from openexecutive.clients.rotation import rotation_in_progress
 
         if rotation_in_progress(settings):

@@ -758,6 +758,58 @@ def _is_public_deployment() -> bool:
     return os.environ.get("OE_PUBLIC_DEPLOYMENT", "").strip().lower() not in _FALSEY_ENV
 
 
+def _restore_blocked_allowed_path(request: Request) -> bool:
+    """Requests allowed while the instance is restore-blocked: health plus the
+    two recovery surfaces (re-activate the recorded client, unload to the
+    user backup). OPTIONS must pass too — this gate wraps CORSMiddleware
+    responses, and a refused preflight would make the UI's recovery buttons
+    unreachable from a browser exactly when they matter."""
+    # Trailing-slash tolerant — the router's own redirect would 503 without
+    # it, e.g. a POST to /fixtures/unload/ dying on the gate instead of
+    # reaching the route's 307.
+    path = request.url.path.rstrip("/") or "/"
+    method = request.method
+    return (
+        method == "OPTIONS"
+        or path == "/health"
+        or (method == "POST" and path == "/fixtures/unload")
+        or (
+            method == "POST"
+            and path.startswith("/clients/")
+            and path.endswith("/activate")
+        )
+    )
+
+
+async def _restore_blocked_gate(request: Request, call_next):  # type: ignore[no-untyped-def]
+    """503 everything while a failed client activation left live state
+    inconsistent. The marker file is the single source of truth, so the
+    block survives restarts and requires no in-memory plumbing."""
+    from openexecutive.clients.slots import get_restore_blocked, is_restore_blocked
+    from openexecutive.config import get_settings
+
+    if not is_restore_blocked():
+        return await call_next(request)
+    if _restore_blocked_allowed_path(request):
+        return await call_next(request)
+    try:
+        marker = get_restore_blocked(get_settings()) or {}
+    except Exception:
+        marker = {}  # fail-closed helper already decided; payload best-effort
+    return JSONResponse(
+        {
+            "error": "restore_blocked",
+            "detail": "A failed client activation left live state "
+            "inconsistent and automatic recovery failed; repair the vector "
+            "store, then re-activate the recorded client or unload to the "
+            "user backup (POST /fixtures/unload).",
+            "restore_slug": marker.get("restore_slug"),
+            "kind": marker.get("kind"),
+        },
+        status_code=503,
+    )
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Open Executive API",
@@ -781,6 +833,11 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Restore-blocked gate — registered before the shared-secret middleware
+    # so authentication still runs outermost and the marker is never
+    # disclosed to unauthenticated callers.
+    app.middleware("http")(_restore_blocked_gate)
 
     # Shared-secret gate. If BACKEND_SHARED_SECRET is set, every non-exempt
     # request must include a matching x-api-key header. If unset, the gate is

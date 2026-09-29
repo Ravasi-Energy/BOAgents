@@ -9,6 +9,8 @@ round-trip contract under test.
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +21,7 @@ import pytest
 from openexecutive.clients import slots
 from openexecutive.clients.slots import (
     ClientSlotConflictError,
+    ClientSlotError,
     ClientSlotNotFoundError,
     activate_client_slot,
     create_client_slot,
@@ -694,3 +697,605 @@ async def test_refused_vector_store_leaves_live_state_untouched(
     assert "Acme Corp" in env.settings.company_profile_path.read_text()
     assert (env.company / "docs" / "strategy.md").exists()
     assert env.settings.mcp_servers_config_path.exists()
+
+
+def _late_refusal_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """Like ``env`` but keeps the REAL _rebuild_vector_state so the store
+    refusal fires mid-restore, after the live DB/docs swap."""
+    company = tmp_path / "company"
+    company.mkdir()
+    settings = SimpleNamespace(
+        company_profile_path=company / "profile.yaml",
+        vector_store_path=tmp_path / "chroma",
+        mcp_servers_config_path=company / "mcp_servers.json",
+        honcho_workspace_id="default-ws",
+    )
+    db_path = tmp_path / "episodic.db"
+    from openexecutive.departments import store as dept_store
+    from openexecutive.memory import episodic
+    from openexecutive.people import store as people_store
+
+    monkeypatch.setattr(episodic, "DB_PATH", db_path)
+    monkeypatch.setattr(people_store, "DB_PATH", db_path)
+    monkeypatch.setattr(dept_store, "DB_PATH", db_path)
+    episodic.initialize_db(db_path)
+    people_store.initialize_db(db_path)
+    dept_store.initialize_db(db_path)
+    monkeypatch.setattr(slots, "_set_honcho_client_workspace", lambda _slug: None)
+    monkeypatch.setattr(slots, "_reseed_blank_defaults", lambda **kw: None)
+
+    # Keep the suite hermetic: doc re-ingest during a recovery restore would
+    # run the real ONNX embedding path (a download on a cold CI cache). The
+    # vector layer is separately covered by the refusing-store stub; what
+    # these tests witness is the FILE/DB swap, not embeddings.
+    async def _no_ingest(*args: Any, **kwargs: Any) -> int:
+        return 1
+
+    monkeypatch.setattr(
+        "openexecutive.knowledge.loader.ingest_file", _no_ingest
+    )
+    return SimpleNamespace(settings=settings, db_path=db_path, company=company)
+
+
+def _refusing_store(monkeypatch: pytest.MonkeyPatch, *, once: bool) -> Any:
+    """Real ChromaDBStore whose cleanup raises PersistedEmbeddingConfigError —
+    the A02 residual window: builds fine at preflight, refuses post-swap."""
+    import openexecutive.knowledge.store as store_mod
+    from openexecutive.knowledge.store import PersistedEmbeddingConfigError
+
+    _real = store_mod.ChromaDBStore
+    armed = {"on": True}
+
+    class _LateRefusingStore(_real):
+        def delete_company_docs(self) -> None:
+            if armed["on"]:
+                if once:
+                    armed["on"] = False
+                raise PersistedEmbeddingConfigError(
+                    "collection 'company_docs': refused (synthetic)"
+                )
+            return super().delete_company_docs()
+
+    monkeypatch.setattr(store_mod, "ChromaDBStore", _LateRefusingStore)
+    return armed
+
+
+async def test_late_refusal_auto_recovers_previous_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Post-preflight refusal → request fails, live state coherently A again."""
+    env = _late_refusal_env(tmp_path, monkeypatch)
+    _seed_live_company(env, "Acme Corp")
+    await create_client_slot(env.settings, display_name="Acme Corp", source="current")
+    await create_client_slot(env.settings, display_name="Beta Inc", source="blank")
+
+    _refusing_store(monkeypatch, once=True)  # refuses once: B's restore only
+    from openexecutive.knowledge.store import PersistedEmbeddingConfigError
+
+    with pytest.raises(PersistedEmbeddingConfigError):
+        await activate_client_slot(env.settings, "beta_inc")
+
+    # The failed activation recovered A automatically — every layer is Acme.
+    assert get_active_client(env.settings) == "acme_corp"
+    assert _decision_summaries(env.db_path) == ["Acme Corp decision"]
+    assert "Acme Corp" in env.settings.company_profile_path.read_text()
+    assert (env.company / "docs" / "strategy.md").exists()
+    assert env.settings.mcp_servers_config_path.exists()
+    # Not blocked — recovery succeeded, so no marker and ops still work.
+    assert slots.get_restore_blocked(env.settings) is None
+    await activate_client_slot(env.settings, "beta_inc")
+    assert get_active_client(env.settings) == "beta_inc"
+
+
+async def test_late_refusal_with_persistent_fault_blocks_operations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recovery also refused → restore-blocked: no wrong-identity serving,
+    no save-back contamination, and only the recorded slug can recover."""
+    env = _late_refusal_env(tmp_path, monkeypatch)
+    _seed_live_company(env, "Acme Corp")
+    await create_client_slot(env.settings, display_name="Acme Corp", source="current")
+    await create_client_slot(env.settings, display_name="Beta Inc", source="blank")
+
+    armed = _refusing_store(monkeypatch, once=False)  # volume stays "broken"
+    with pytest.raises(slots.ClientSlotError, match="restore-blocked"):
+        await activate_client_slot(env.settings, "beta_inc")
+
+    marker = slots.get_restore_blocked(env.settings)
+    assert marker is not None and marker["restore_slug"] == "acme_corp"
+    # Sentinel quarantined, not deleted; no client attribution under block.
+    assert get_active_client(env.settings) is None
+    assert not slots._active_client_sentinel(env.settings).exists()
+    assert (
+        env.company / "_client_slots" / ".active_client.refused"
+    ).read_text() == "acme_corp"
+
+    # Mutating ops refuse while blocked — no save-back over good copies.
+    with pytest.raises(slots.ClientSlotError):
+        await save_active_client(env.settings)
+    with pytest.raises(slots.ClientSlotError):
+        await create_client_slot(env.settings, display_name="C", source="current")
+    with pytest.raises(slots.ClientSlotError):
+        await delete_client_slot(env.settings, "beta_inc")
+    with pytest.raises(slots.ClientSlotError):
+        await activate_client_slot(env.settings, "beta_inc")
+
+    # The recorded recovery slug is allowed through but re-blocks while the
+    # volume still refuses.
+    with pytest.raises(slots.ClientSlotError, match="restore-blocked"):
+        await activate_client_slot(env.settings, "acme_corp")
+    assert slots.get_restore_blocked(env.settings) is not None
+
+    # Acme's slot copy was never touched through any of this.
+    assert (
+        env.company / "_client_slots" / "acme_corp" / "state.db"
+    ).exists()
+
+    # Repair the volume → the recorded restore path completes → unblocked.
+    armed["on"] = False
+    await activate_client_slot(env.settings, "acme_corp")
+    assert slots.get_restore_blocked(env.settings) is None
+    assert get_active_client(env.settings) == "acme_corp"
+    assert _decision_summaries(env.db_path) == ["Acme Corp decision"]
+    assert "Acme Corp" in env.settings.company_profile_path.read_text()
+    assert (env.company / "docs" / "strategy.md").exists()
+
+
+async def test_late_refusal_recovers_user_backup_without_active_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """First activation (no active client): refusal recovers the user's own
+    company from _user_backup, save-back-free."""
+    env = _late_refusal_env(tmp_path, monkeypatch)
+    # User's own company, no client mode yet. ingest_file is stubbed in the
+    # env so the backup-restore exercises the real store but no embeddings.
+    env.settings.company_profile_path.write_text("name: User Co\n")
+    (env.company / "docs").mkdir()
+    (env.company / "docs" / "user.md").write_text("# user doc")
+    await create_client_slot(env.settings, display_name="Beta Inc", source="blank")
+
+    _refusing_store(monkeypatch, once=True)
+    from openexecutive.knowledge.store import PersistedEmbeddingConfigError
+
+    with pytest.raises(PersistedEmbeddingConfigError):
+        await activate_client_slot(env.settings, "beta_inc")
+
+    assert get_active_client(env.settings) is None  # still single-company
+    assert "User Co" in env.settings.company_profile_path.read_text()
+    # _user_backup covers profile/docs/memory.json/people — witnessed here by
+    # profile + docs. (In this harness `episodic.list_decisions` binds DB_PATH
+    # as a default arg at definition time, so the memory.json dump can't see
+    # the patched test DB — a fixture gap, not the defect under test.)
+    assert (env.company / "docs" / "user.md").exists()
+    assert slots.get_restore_blocked(env.settings) is None
+
+
+def test_restore_blocked_gate_blocks_everything_but_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The HTTP gate: while blocked only /health and recovery endpoints pass."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from openexecutive import config
+    from openexecutive.api.main import _restore_blocked_gate
+
+    company = tmp_path / "company"
+    company.mkdir()
+    settings = SimpleNamespace(
+        company_profile_path=company / "profile.yaml",
+        vector_store_path=tmp_path / "chroma",
+        mcp_servers_config_path=company / "mcp_servers.json",
+        honcho_workspace_id="default-ws",
+    )
+    monkeypatch.setattr(config, "get_settings", lambda: settings)
+
+    from fastapi.middleware.cors import CORSMiddleware
+
+    app = FastAPI()
+    app.add_middleware(
+        CORSMiddleware, allow_origins=["*"], allow_methods=["*"]
+    )
+    app.middleware("http")(_restore_blocked_gate)
+
+    @app.get("/health")
+    def _health() -> dict:  # noqa: ANN202
+        return {"ok": True}
+
+    @app.get("/today")
+    def _today() -> dict:  # noqa: ANN202
+        return {"served": True}
+
+    @app.post("/clients/{slug}/activate")
+    def _activate(slug: str) -> dict:  # noqa: ANN202
+        return {"slug": slug}
+
+    @app.post("/fixtures/unload")
+    def _unload() -> dict:  # noqa: ANN202
+        return {"unloaded": True}
+
+    c = TestClient(app)
+    assert c.get("/today").status_code == 200  # unblocked: normal
+
+    # Simulate the blocked marker.
+    (company / "_client_slots").mkdir()
+    slots._mark_restore_blocked(
+        settings, failed_slug="beta_inc", target_slug="acme_corp"
+    )
+
+    assert c.get("/today").status_code == 503
+    body = c.get("/today").json()
+    assert body["restore_slug"] == "acme_corp"  # operator learns the target
+    assert c.get("/health").status_code == 200
+    # CORS preflight must survive — the UI's recovery buttons would
+    # otherwise be unreachable in a browser while blocked.
+    preflight = c.options(
+        "/clients/acme_corp/activate",
+        headers={
+            "Origin": "http://localhost:3000",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+    assert preflight.status_code == 200
+    assert "access-control-allow-origin" in preflight.headers
+    assert c.post("/clients/acme_corp/activate").status_code == 200
+    assert c.post("/fixtures/unload").status_code == 200
+    assert c.get("/clients/acme_corp/activate").status_code == 503  # GET not a recovery
+
+    # Marker cleared → serving resumes.
+    slots._restore_blocked_path(settings).unlink()
+    assert c.get("/today").status_code == 200
+
+
+# ── SEC-09: scheduler/resumer holds on the restore-blocked marker ───────────
+
+
+def test_scheduler_and_resumer_hold_while_restore_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A blocked instance must not fire due rows or resume runs on behalf of
+    a live state that belongs to no client. Both background loops read the
+    same marker and fail CLOSED (unlike the rotation pause, which fails open
+    so a marker hiccup can't wedge claiming)."""
+    from openexecutive.scheduler import runner
+    from openexecutive.workflows import resumer
+
+    env = _late_refusal_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "openexecutive.config.get_settings", lambda: env.settings
+    )
+    assert runner._restore_blocked_active() is False
+    assert resumer._restore_blocked_active() is False
+
+    slots_root = env.company / "_client_slots"
+    slots_root.mkdir(parents=True, exist_ok=True)
+    (slots_root / ".restore_blocked").write_text(
+        json.dumps({"failed_slug": "b", "restore_slug": "a", "kind": "slot"})
+    )
+    assert runner._restore_blocked_active() is True
+    assert resumer._restore_blocked_active() is True
+
+    # Fail-closed: an unreadable/malformed marker still means blocked.
+    (slots_root / ".restore_blocked").write_text("not json{")
+    assert runner._restore_blocked_active() is True
+    assert resumer._restore_blocked_active() is True
+
+
+def test_restore_blocked_active_fails_closed_on_read_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the settings/marker lookup itself raises, the background gates hold
+    rather than let scheduled work run on unverifiable live state."""
+    from openexecutive.scheduler import runner
+    from openexecutive.workflows import resumer
+
+    def _boom() -> object:
+        raise RuntimeError("settings unavailable")
+
+    monkeypatch.setattr("openexecutive.config.get_settings", _boom)
+    assert runner._restore_blocked_active() is True
+    assert resumer._restore_blocked_active() is True
+
+
+async def test_scheduler_tick_never_claims_while_restore_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Loop-level (not just helper-level): with the marker present a tick
+    reaches the restore-blocked hold and never touches claim_due_actions —
+    the thing that would fire a wrong company's outbound work."""
+    import asyncio
+
+    from openexecutive.scheduler import runner
+
+    env = _late_refusal_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "openexecutive.config.get_settings", lambda: env.settings
+    )
+    (env.company / "_client_slots").mkdir(parents=True)
+    slots._mark_restore_blocked(
+        env.settings, failed_slug="beta", target_slug="acme"
+    )
+
+    claimed: list[Any] = []
+    monkeypatch.setattr(
+        runner, "claim_due_actions", lambda now: claimed.append(now) or []
+    )
+    monkeypatch.setattr(runner, "_company_profile_active", lambda: True)
+    monkeypatch.setattr(runner, "_rotation_pause_active", lambda: False)
+    monkeypatch.setattr(runner, "_maybe_sweep_alerts", lambda _n: 0)
+    monkeypatch.setattr(runner, "requeue_orphaned_running", lambda: 0)
+    monkeypatch.setattr(runner, "seed_principal_briefs", lambda: 0)
+    monkeypatch.setattr(
+        "openexecutive.clients.rotation.clear_stale_rotation_marker",
+        lambda _s: False,
+    )
+    monkeypatch.setattr(
+        "openexecutive.clients.rotation.seed_client_rotation", lambda: None
+    )
+
+    task = asyncio.create_task(runner.run_scheduler(poll_interval_seconds=60))
+    await asyncio.sleep(0.2)  # one tick
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert claimed == []
+
+
+async def test_user_backup_recovery_leaves_no_incoming_client_residue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed activation into a slot WITH state.db, while no client is
+    active, must not leave the incoming client's DB rows / MCP config live
+    under the user's identity after the _user_backup recovery."""
+    env = _late_refusal_env(tmp_path, monkeypatch)
+    env.settings.company_profile_path.write_text("name: User Co\n")
+    (env.company / "docs").mkdir()
+    (env.company / "docs" / "user.md").write_text("# user doc")
+    env.settings.mcp_servers_config_path.write_text('{"user": true}')
+    _insert_decision(env.db_path, "User decision")
+    await create_client_slot(env.settings, display_name="Beta", source="blank")
+
+    # First activation succeeds: user state snapshots to _user_backup,
+    # live becomes Beta. Give Beta a real row + MCP config, then save back
+    # so the slot carries state.db.
+    await activate_client_slot(env.settings, "beta")
+    _insert_decision(env.db_path, "Beta row")
+    env.settings.mcp_servers_config_path.write_text('{"beta": true}')
+    await save_active_client(env.settings)
+
+    # Operator quarantined the sentinel mid-incident (the documented
+    # recovery step) — a no-active-client activation is now reachable.
+    slots._active_client_sentinel(env.settings).unlink()
+
+    _refusing_store(monkeypatch, once=True)
+    from openexecutive.knowledge.store import PersistedEmbeddingConfigError
+
+    with pytest.raises(PersistedEmbeddingConfigError):
+        await activate_client_slot(env.settings, "beta")
+
+    assert get_active_client(env.settings) is None
+    # Beta's rows did not survive the recovery — the backup format has no
+    # state.db, so anything DB-resident must be wiped, not preserved.
+    assert _decision_summaries(env.db_path) == []
+    assert "User Co" in env.settings.company_profile_path.read_text()
+    assert (env.company / "docs" / "user.md").exists()
+    # The backup captured the user's MCP config (snapshot covers it now);
+    # either way, Beta's credentials must not remain live.
+    import json as _json
+
+    assert _json.loads(
+        env.settings.mcp_servers_config_path.read_text()
+    ) == {"user": True}
+    assert slots.get_restore_blocked(env.settings) is None
+
+
+async def test_inbound_resolution_consumed_while_restore_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Socket-mode adapters never cross the HTTP gate: while blocked, an
+    inbound reply must NOT resolve a wait_for_human run (its remaining
+    steps would fire on the wrong client's data) and must NOT fall through
+    to a chat turn. The person is told to resend after recovery."""
+    from openexecutive.workflows import inbound_resolver
+
+    env = _late_refusal_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "openexecutive.config.get_settings", lambda: env.settings
+    )
+    (env.company / "_client_slots").mkdir(parents=True)
+    slots._mark_restore_blocked(
+        env.settings, failed_slug="beta", target_slug="acme"
+    )
+
+    called: list[Any] = []
+
+    async def _spy_resolve(**kwargs: Any) -> None:
+        called.append(kwargs)
+        return None
+
+    monkeypatch.setattr(
+        inbound_resolver, "resolve_inbound_message", _spy_resolve
+    )
+    sent: list[str] = []
+
+    async def _send(msg: str) -> None:
+        sent.append(msg)
+
+    handled = await inbound_resolver.resolve_and_acknowledge(
+        channel="slack",
+        channel_ref="U123",
+        person_id=7,
+        text="approved",
+        send=_send,
+        message_id="m1",
+    )
+    assert handled is True
+    assert called == []  # resolver never touched the runs table
+    assert sent and "maintenance" in sent[0].lower()
+
+
+async def test_executive_chat_refuses_while_restore_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Full chat turns on socket channels must not run on mixed state."""
+    from openexecutive.orchestrator.executive import Executive
+    from openexecutive.orchestrator.session import Session
+
+    env = _late_refusal_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "openexecutive.config.get_settings", lambda: env.settings
+    )
+    (env.company / "_client_slots").mkdir(parents=True)
+    slots._mark_restore_blocked(
+        env.settings, failed_slug="beta", target_slug="acme"
+    )
+
+    reply = await Executive().chat("hello", Session(session_id="t1"))
+    assert "maintenance" in reply.lower()
+
+
+async def test_unload_clears_block_and_restores_user_backup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """kind=user_backup + persistent refusal → POST /fixtures/unload is the
+    recorded recovery path: it must wipe the incoming client's residue,
+    restore the backup, and lift the marker only after the restore landed."""
+    from openexecutive.cli import fixture_loader
+
+    env = _late_refusal_env(tmp_path, monkeypatch)
+    env.settings.company_profile_path.write_text("name: User Co\n")
+    (env.company / "docs").mkdir()
+    (env.company / "docs" / "user.md").write_text("# user doc")
+    _insert_decision(env.db_path, "User decision")
+    await create_client_slot(env.settings, display_name="Beta", source="blank")
+
+    armed = _refusing_store(monkeypatch, once=False)
+    with pytest.raises(ClientSlotError, match="restore-blocked"):
+        await activate_client_slot(env.settings, "beta")
+    assert slots.get_restore_blocked(env.settings) is not None
+    assert get_active_client(env.settings) is None
+
+    # Vector store repaired → the unload recovery path must succeed.
+    armed["on"] = False
+    summary = await fixture_loader.unload_fixture(env.settings)
+
+    assert summary["profile"]["name"] == "User Co"
+    assert slots.get_restore_blocked(env.settings) is None
+    assert slots.is_restore_blocked() is False
+    assert not slots._active_client_sentinel(env.settings).exists()
+    assert (env.company / "docs" / "user.md").exists()
+    # The backup format has no state.db — live per-client tables must be
+    # empty, not carry the half-swapped attempt's rows.
+    assert _decision_summaries(env.db_path) == []
+
+
+async def test_cancelled_activation_waits_for_recovery_under_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cancelling the request mid-recovery must NOT release
+    _FIXTURE_OP_LOCK while the shielded restore still mutates live state:
+    the task ends cancelled only after the inner recovery completed."""
+    env = _late_refusal_env(tmp_path, monkeypatch)
+    _seed_live_company(env, "Acme Corp")
+    await create_client_slot(env.settings, display_name="Acme Corp", source="current")
+    await create_client_slot(env.settings, display_name="Beta Inc", source="blank")
+    _refusing_store(monkeypatch, once=True)
+
+    started = asyncio.Event()
+    finished = asyncio.Event()
+    real_recover = slots._recover_failed_activation
+
+    async def _slow_recover(*args: Any, **kwargs: Any) -> bool:
+        started.set()
+        await asyncio.sleep(0.3)
+        result = await real_recover(*args, **kwargs)
+        finished.set()
+        return result
+
+    monkeypatch.setattr(slots, "_recover_failed_activation", _slow_recover)
+
+    task = asyncio.create_task(
+        activate_client_slot(env.settings, "beta_inc")
+    )
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # The task only surfaced the cancellation after the inner restore
+    # finished — the lock was never released mid-write.
+    assert finished.is_set()
+    # Recovery completed → coherent A, marker cleared despite cancellation.
+    assert get_active_client(env.settings) == "acme_corp"
+    assert slots.get_restore_blocked(env.settings) is None
+
+
+async def test_marker_write_failure_fences_process_in_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the marker file cannot be written (same disk fault that broke the
+    restore), the process must still be fenced — otherwise every gate reads
+    unblocked on provably-mixed state."""
+    env = _late_refusal_env(tmp_path, monkeypatch)
+    monkeypatch.setattr("openexecutive.config.get_settings", lambda: env.settings)
+    root = env.company / "_client_slots"
+    root.mkdir(parents=True)
+    root.chmod(0o555)
+    try:
+        slots._mark_restore_blocked(
+            env.settings, failed_slug="beta", target_slug="acme"
+        )
+        assert not slots._restore_blocked_path(env.settings).exists()
+        assert slots._restore_blocked_local is True
+        assert slots.get_restore_blocked(env.settings) == {
+            "malformed": True,
+            "volatile": True,
+        }
+        assert slots.is_restore_blocked() is True
+    finally:
+        root.chmod(0o755)
+        slots._restore_blocked_local = False
+    assert slots.is_restore_blocked() is False
+
+
+async def test_user_backup_recovery_wipes_db_only_tables(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """dynamic_workflows (and the audit dedup sidecar) live in the episodic
+    DB but not in the backup format — they must not survive recovery."""
+    env = _late_refusal_env(tmp_path, monkeypatch)
+    env.settings.company_profile_path.write_text("name: User Co\n")
+    _insert_decision(env.db_path, "User decision")
+    await create_client_slot(env.settings, display_name="Beta", source="blank")
+    await activate_client_slot(env.settings, "beta")
+
+    # Beta accumulates state that only exists as DB rows.
+    _insert_decision(env.db_path, "Beta row")
+    conn = sqlite3.connect(str(env.db_path))
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS dynamic_workflows "
+        "(id INTEGER PRIMARY KEY, name TEXT, definition TEXT, "
+        "is_active INTEGER, created_at TEXT, updated_at TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO dynamic_workflows (name, definition, is_active) "
+        "VALUES ('beta_wf', '{}', 1)"
+    )
+    conn.commit()
+    conn.close()
+    await save_active_client(env.settings)
+    slots._active_client_sentinel(env.settings).unlink()
+
+    _refusing_store(monkeypatch, once=True)
+    from openexecutive.knowledge.store import PersistedEmbeddingConfigError
+
+    with pytest.raises(PersistedEmbeddingConfigError):
+        await activate_client_slot(env.settings, "beta")
+
+    assert slots.get_restore_blocked(env.settings) is None
+    conn = sqlite3.connect(str(env.db_path))
+    remaining = conn.execute(
+        "SELECT COUNT(*) FROM dynamic_workflows"
+    ).fetchone()[0]
+    conn.close()
+    assert remaining == 0

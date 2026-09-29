@@ -158,7 +158,19 @@ def _parse_search_results(raw: str) -> list[dict[str, str]]:
 
 async def poll_once(gateway: MCPGateway) -> None:
     """One poll cycle: find unread messages, hand each to the Executive."""
+    from openexecutive.clients.slots import is_restore_blocked
     from openexecutive.config import get_settings
+
+    # Socket-side channel like Slack/Discord: never traverses the HTTP gate.
+    # Skipping the WHOLE poll (before _mark_read/_processed_ids) keeps
+    # inbound mail unread and retriable — otherwise every message arriving
+    # during a restore block would be consumed and silently dropped.
+    if is_restore_blocked():
+        logger.warning(
+            "email poller: instance is restore-blocked — skipping cycle; "
+            "unread mail stays queued until recovery completes"
+        )
+        return
 
     settings = get_settings()
     user_email = settings.exec_email_address
@@ -187,6 +199,14 @@ async def poll_once(gateway: MCPGateway) -> None:
         tid = msg.get("thread_id", "")
         if not mid or mid in _processed_ids:
             continue
+        # Re-check per message: a marker can land mid-loop, and processing
+        # the next mail would still consume it via _mark_read.
+        if is_restore_blocked():
+            logger.warning(
+                "email poller: restore block landed mid-cycle — leaving "
+                "remaining mail unread"
+            )
+            return
         try:
             await _handle_email(gateway, mid, tid, user_email)
             _processed_ids.add(mid)

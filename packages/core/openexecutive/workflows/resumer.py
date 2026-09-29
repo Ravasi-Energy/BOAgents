@@ -232,6 +232,16 @@ def _kick_resume(run_id: str, db_path: Path | None = None) -> None:
 
     async def _run() -> None:
         try:
+            # A kicked resume is fire-and-forget from a socket-mode inbound
+            # handler — it never traverses the HTTP gate. Under a restore
+            # block leave the run `resolved`; the gated poll loop claims it
+            # after recovery instead of executing on half-swapped state.
+            if _restore_blocked_active():
+                logger.info(
+                    "resumer: kicked resume %s deferred — restore-blocked",
+                    run_id,
+                )
+                return
             claim = _wf_persistence.claim_run_for_resume(run_id, db_path=db_path)
             if claim is None:
                 return
@@ -652,20 +662,33 @@ async def run_resumer(poll_interval_seconds: int = 60) -> None:
     any runs that expired while the server was down, before the first tick.
     """
     logger.info("resumer started (poll_interval=%ds)", poll_interval_seconds)
-    swept = await sweep_stale_awaiting()
-    if swept:
-        logger.info("resumer: startup sweep processed %d stale run(s)", swept)
-    # Replies that landed while the server was down are already `resolved`;
-    # execute them now rather than after a first full poll interval.
-    try:
-        resumed = await _process_resumable(datetime.now(UTC))
-        if resumed:
-            logger.info("resumer: startup resumed %d run(s)", resumed)
-    except Exception:
-        logger.exception("resumer: startup resume sweep failed")
+    if _restore_blocked_active():
+        logger.warning(
+            "resumer: instance is restore-blocked — skipping startup sweep "
+            "and holding the tick loop until recovery completes"
+        )
+    else:
+        swept = await sweep_stale_awaiting()
+        if swept:
+            logger.info("resumer: startup sweep processed %d stale run(s)", swept)
+        # Replies that landed while the server was down are already
+        # `resolved`; execute them now rather than after a first full poll
+        # interval.
+        try:
+            resumed = await _process_resumable(datetime.now(UTC))
+            if resumed:
+                logger.info("resumer: startup resumed %d run(s)", resumed)
+        except Exception:
+            logger.exception("resumer: startup resume sweep failed")
     while True:
         try:
             now = datetime.now(UTC)
+            if _restore_blocked_active():
+                # Live state may be a half-swapped mix that belongs to no
+                # client — resumed runs would act on the wrong company's
+                # data. Hold until the recorded recovery path completes.
+                await asyncio.sleep(poll_interval_seconds)
+                continue
             await _tick(now)
         except asyncio.CancelledError:
             raise
@@ -676,6 +699,18 @@ async def run_resumer(poll_interval_seconds: int = 60) -> None:
         except asyncio.CancelledError:
             logger.info("resumer cancelled — exiting")
             raise
+
+
+def _restore_blocked_active() -> bool:
+    """True while the client-slot restore-blocked marker exists.
+
+    Shares ``slots.is_restore_blocked``, which fails closed on read
+    errors — the same "can't prove live state is coherent" rule the API
+    gate and scheduler tick apply.
+    """
+    from openexecutive.clients.slots import is_restore_blocked
+
+    return is_restore_blocked()
 
 
 async def _tick(now: datetime) -> None:

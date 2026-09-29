@@ -205,9 +205,11 @@ async def _force_restore(
     from openexecutive.clients.slots import (
         _FIXTURE_OP_LOCK,
         _active_client_sentinel,
+        _mark_restore_blocked,
         _require_slot,
         _restore_slot_state,
         _set_honcho_client_workspace,
+        get_restore_blocked,
     )
 
     async with _FIXTURE_OP_LOCK:
@@ -216,6 +218,18 @@ async def _force_restore(
         _active_client_sentinel(settings).parent.mkdir(parents=True, exist_ok=True)
         _active_client_sentinel(settings).write_text(slug, encoding="utf-8")
         _set_honcho_client_workspace(slug)
+        # If a restore block was active, live state is now provably `slug` —
+        # re-point the recorded recovery target at it so the operator's
+        # allowed re-activation restores the client that's actually live,
+        # not a stale name. (The block itself persists until that
+        # re-activation verifies and clears it — still fail-closed.)
+        marker = get_restore_blocked(settings)
+        if marker is not None and marker.get("restore_slug") != slug:
+            _mark_restore_blocked(
+                settings,
+                failed_slug=marker.get("failed_slug") or slug,
+                target_slug=slug,
+            )
 
 
 async def _run_quiet_work_for_live_client(settings: Any, slug: str) -> None:

@@ -285,15 +285,21 @@ class ChromaDBStore(KnowledgeStore):
 
     def collection_exists(self, collection: str) -> bool:
         try:
-            self._client.get_collection(collection)
+            col = self._client.get_collection(collection)
+            _validate_collection_schema(col)
             return True
+        except PersistedEmbeddingConfigError:
+            raise
         except Exception:
             return False
 
     def get_collection_count(self, collection: str) -> int:
         try:
             col = self._client.get_collection(collection)
+            _validate_collection_schema(col)
             return col.count()
+        except PersistedEmbeddingConfigError:
+            raise
         except Exception:
             return 0
 
@@ -301,6 +307,12 @@ class ChromaDBStore(KnowledgeStore):
         try:
             col = self._get_or_create_collection(collection)
             col.delete(where=where)
+        except PersistedEmbeddingConfigError:
+            # Integrity refusal is not a cleanup miss — it must abort the
+            # caller, not masquerade as an empty/absent collection. A
+            # swallowed refusal here is exactly how client A's rows used to
+            # survive a slot switch into client B's hands.
+            raise
         except Exception:
             pass
 
@@ -314,6 +326,8 @@ class ChromaDBStore(KnowledgeStore):
         try:
             col = self._get_or_create_collection(collection)
             rows = col.get(include=["metadatas"])
+        except PersistedEmbeddingConfigError:
+            raise
         except Exception:
             return []
         ids = rows.get("ids") or []
@@ -340,6 +354,8 @@ class ChromaDBStore(KnowledgeStore):
             col = self._get_or_create_collection(collection)
             col.delete(ids=ids)
             return len(ids)
+        except PersistedEmbeddingConfigError:
+            raise
         except Exception:
             logging.getLogger(__name__).exception(
                 "delete_by_ids failed for %d id(s) in %s", len(ids), collection
@@ -387,6 +403,8 @@ class ChromaDBStore(KnowledgeStore):
                             dict(md) if isinstance(md, dict) else {},
                         )
                     )
+        except PersistedEmbeddingConfigError:
+            raise
         except Exception:
             logging.getLogger(__name__).exception(
                 "get_documents_by_ids failed for %d id(s) in %s", len(ids), collection
@@ -394,14 +412,27 @@ class ChromaDBStore(KnowledgeStore):
             return []
         return out
 
+    def _drop_and_recreate(self, name: str) -> None:
+        """Validate the persisted schema, then drop + recreate the collection.
+
+        The guard runs BEFORE the drop on purpose: silently deleting a
+        tampered collection would launder an integrity refusal into a clean
+        success, hiding the incident. Refusal propagates instead.
+        """
+        from chromadb.errors import NotFoundError
+
+        try:
+            existing = self._client.get_collection(name)
+        except NotFoundError:
+            existing = None
+        if existing is not None:
+            _validate_collection_schema(existing)
+            self._client.delete_collection(name)
+        self._get_or_create_collection(name)
+
     def delete_company_docs(self) -> None:
         """Delete and recreate the company_docs collection, clearing all indexed documents."""
-        import contextlib
-
-        with contextlib.suppress(Exception):
-            self._client.delete_collection(self.COMPANY_COLLECTION)
-        # Recreate with the same HNSW settings so subsequent upserts work normally.
-        self._get_or_create_collection(self.COMPANY_COLLECTION)
+        self._drop_and_recreate(self.COMPANY_COLLECTION)
 
     def delete_notion_docs(self) -> None:
         """Drop synced Notion chunks from the isolated collection and any
@@ -424,11 +455,7 @@ class ChromaDBStore(KnowledgeStore):
         collection wholesale a line or two earlier — but it keeps this
         method correct when called on its own.
         """
-        import contextlib
-
-        with contextlib.suppress(Exception):
-            self._client.delete_collection(self.ATTACHMENT_COLLECTION)
-        self._get_or_create_collection(self.ATTACHMENT_COLLECTION)
+        self._drop_and_recreate(self.ATTACHMENT_COLLECTION)
         self.delete_documents(
             collection=self.COMPANY_COLLECTION, where={"type": "attachment"}
         )

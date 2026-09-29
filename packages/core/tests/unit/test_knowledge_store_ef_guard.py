@@ -261,3 +261,125 @@ def test_missing_serialized_schema_fails_closed(tmp_path):
     with pytest.raises(PersistedEmbeddingConfigError):
         _validate_collection_schema(_FakeCol())
     assert isinstance(col._model.serialized_schema, dict)
+
+
+def _insert_marker(path: Path, collection: str = "recent_research") -> None:
+    """Insert a marker row with explicit embeddings — no EF build, no download."""
+    import chromadb
+    from chromadb.config import Settings
+
+    client = chromadb.PersistentClient(
+        path=str(path), settings=Settings(anonymized_telemetry=False)
+    )
+    col = client.get_or_create_collection(name=collection)
+    col.upsert(
+        ids=["marker-a"],
+        documents=["client A secret marker"],
+        metadatas=[{"type": "recent_research"}],
+        embeddings=[[0.1] * 4],
+    )
+
+
+def _marker_present(path: Path, collection: str = "recent_research") -> bool:
+    import chromadb
+    from chromadb.config import Settings
+
+    client = chromadb.PersistentClient(
+        path=str(path), settings=Settings(anonymized_telemetry=False)
+    )
+    rows = client.get_collection(collection).get(ids=["marker-a"])
+    return bool(rows.get("ids"))
+
+
+def test_delete_documents_propagates_integrity_refusal(tmp_path):
+    """SEC-08: a tampered swept collection must ABORT cleanup, not pass for empty."""
+    db = tmp_path / "db"
+    _insert_marker(db)
+    store = ChromaDBStore(persist_directory=db)  # preflight on clean schema
+    _tamper_schema(db, "recent_research", _HOSTILE_EF, "dense")
+
+    with pytest.raises(PersistedEmbeddingConfigError):
+        store.delete_documents("recent_research", {"type": "recent_research"})
+
+    # Refusal did not clean: the row provably survives until a repaired
+    # volume lets cleanup actually run — refusal ≠ empty.
+    import json as _json
+    import sqlite3 as _sq
+
+    con = _sq.connect(db / "chroma.sqlite3")
+    sch = _json.loads(
+        con.execute(
+            "SELECT schema_str FROM collections WHERE name=?", ("recent_research",)
+        ).fetchone()[0]
+    )
+    sch["keys"]["#embedding"]["float_list"]["vector_index"]["config"][
+        "embedding_function"
+    ] = {"type": "known", "name": "default", "config": {}}
+    con.execute(
+        "UPDATE collections SET schema_str=? WHERE name=?",
+        (_json.dumps(sch), "recent_research"),
+    )
+    con.commit()
+    con.close()
+    repaired = ChromaDBStore(persist_directory=db)
+    assert _marker_present(db)
+    repaired.delete_documents("recent_research", {"type": "recent_research"})
+    assert not _marker_present(db)
+
+
+def test_drop_and_recreate_validates_before_drop(tmp_path):
+    """A tampered company_docs must not be silently laundered by drop+recreate."""
+    db = tmp_path / "db"
+    _insert_marker(db, collection="company_docs")
+    store = ChromaDBStore(persist_directory=db)
+    _tamper_schema(db, "company_docs", _HOSTILE_EF, "dense")
+
+    with pytest.raises(PersistedEmbeddingConfigError):
+        store.delete_company_docs()
+
+    # The collection was NOT dropped — the refusal stayed loud.
+    assert _marker_present(db, collection="company_docs")
+
+
+def test_collection_read_helpers_propagate_refusal(tmp_path):
+    """Absent ≠ refused: read helpers must not launder tamper into 0/False/[]."""
+    db = tmp_path / "db"
+    _insert_marker(db)
+    store = ChromaDBStore(persist_directory=db)
+    _tamper_schema(db, "recent_research", _HOSTILE_EF, "dense")
+
+    with pytest.raises(PersistedEmbeddingConfigError):
+        store.collection_exists("recent_research")
+    with pytest.raises(PersistedEmbeddingConfigError):
+        store.get_collection_count("recent_research")
+    with pytest.raises(PersistedEmbeddingConfigError):
+        store.iter_chunk_metadata("recent_research")
+    with pytest.raises(PersistedEmbeddingConfigError):
+        store.delete_by_ids("recent_research", ["marker-a"])
+    with pytest.raises(PersistedEmbeddingConfigError):
+        store.get_documents_by_ids("recent_research", ["marker-a"])
+
+
+def test_legit_cleanup_and_absent_collection_unaffected(tmp_path):
+    db = tmp_path / "db"
+    _insert_marker(db)
+    store = ChromaDBStore(persist_directory=db)
+
+    # Contract tolerance preserved: absent collection is fine. Note
+    # delete_documents creates a missing collection (get-or-create) —
+    # pre-existing behavior, kept verbatim.
+    store.delete_documents("never_existed", {"type": "x"})
+    assert store.collection_exists("never_existed")
+    assert store.get_collection_count("never_existed") == 0
+    store.delete_documents("still_absent", {"type": "x"})  # no raise
+    assert store.iter_chunk_metadata("still_absent") == []
+    assert store.get_documents_by_ids("still_absent", ["nope"]) == []
+
+    # Real cleanup still works on a healthy schema.
+    store.delete_documents("recent_research", {"type": "recent_research"})
+    assert not _marker_present(db)
+    _insert_marker(db)
+    store.delete_by_ids("recent_research", ["marker-a"])
+    assert not _marker_present(db)
+    store.delete_company_docs()  # drop+recreate on healthy schema still fine
+    assert store.collection_exists("company_docs")

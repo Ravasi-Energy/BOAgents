@@ -71,6 +71,19 @@ comparing the sentinel file against the live profile/decisions in the
 logs or SQLite — do not browse B's data in the UI as a diagnostic step;
 the UI follows the live state, which is the very thing under suspicion.
 
+**Cleanup refuses too — no silent skip.** Integrity refusal propagates out
+of every store cleanup/read helper (`delete_documents`, `delete_by_ids`,
+`delete_company_docs`, `collection_exists`, `get_collection_count`,
+`iter_chunk_metadata`, `get_documents_by_ids`); drop+recreate validates
+the persisted schema *before* dropping. An activation whose cleanup is
+refused therefore **fails** — it cannot report success while client A's
+rows linger for B to read after the volume is repaired. Ordinary
+"collection absent" cases still pass (absence is not tamper), as do
+non-integrity file errors the callers already tolerate. What this does
+NOT cover: a refusal lands mid-restore, so the partial state below still
+applies — and any *other* failure mode during restore is handled by the
+same recovery.
+
 Recovery is save-back-free and was exercised end-to-end synthetically —
 the target's last good slot copy is never touched:
 

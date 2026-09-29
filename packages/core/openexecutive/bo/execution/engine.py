@@ -37,9 +37,9 @@ from openexecutive.bo.execution.mandate import (
     assert_active,
 )
 from openexecutive.bo.execution.synth import (
+    EffectProvider,
     ProviderError,
     ProviderTimeout,
-    SyntheticCounterProvider,
 )
 
 logger = logging.getLogger(__name__)
@@ -153,7 +153,7 @@ def submit_execution(
 def work_once(
     tenant: str,
     *,
-    provider: SyntheticCounterProvider,
+    provider: EffectProvider,
     worker_id: str | None = None,
     limit: int = 5,
     db_path: Path | None = None,
@@ -184,7 +184,7 @@ def work_once(
 def execute_run(
     tenant: str,
     run: dict[str, Any],
-    provider: SyntheticCounterProvider,
+    provider: EffectProvider,
     *,
     worker_id: str,
     lease_s: int,
@@ -428,7 +428,7 @@ def _execute_step(
     tenant: str,
     run: dict[str, Any],
     step: int,
-    provider: SyntheticCounterProvider,
+    provider: EffectProvider,
     *,
     worker_id: str,
     lease_s: int,
@@ -445,6 +445,11 @@ def _execute_step(
     if fresh["pause_requested"] or not enabled(tenant, db_path=db_path):
         return {"terminal": store.RUN_PAUSED, "block_reason": "execution_disabled_or_paused"}
     step_desc = run["steps"][step]
+    if step_desc.get("resource") == "synth.erp":
+        from openexecutive.bo.pilot.provider import PilotProvider
+        if len(run["steps"]) != 1 or step_desc.get("action") != "diagnose":
+            return {"terminal": store.RUN_FAILED, "block_reason": "plan diagnostic invalid"}
+        provider = PilotProvider(tenant, run, db_path)
     payload = step_desc.get("payload", {})
     try:
         entry = store.get_or_create_intent(
@@ -488,7 +493,7 @@ def _execute_step(
                 "terminal": None, "ledger_status": store.LED_SUCCEEDED,
                 "receipt_ref": receipt["receipt_ref"],
             }
-        if not provider.idempotent:
+        if not provider.idempotent or not provider.retry_unknown:
             # Ambiguous external state + no dedup guarantee: a retry could
             # double the effect. Surface it, don't guess.
             store.mark_ledger_status(
@@ -639,7 +644,7 @@ def resume_run(
 def reconcile_run(
     tenant: str,
     run_id: str,
-    provider: SyntheticCounterProvider,
+    provider: EffectProvider,
     *,
     resolution: str,
     actor: str,
@@ -663,6 +668,11 @@ def reconcile_run(
     ]
     resolved = pending = 0
     for entry in entries:
+        if entry["provider"] == "synth.erp":
+            from openexecutive.bo.pilot.provider import PilotProvider
+            provider = PilotProvider(tenant, store.get_run(tenant, run_id, db_path=db_path), db_path)
+            if resolution != "receipt":
+                raise store.InvalidStateError("Pilot UNKNOWN cere readback corelat; fără retrimitere oarbă")
         if resolution == "receipt":
             receipt = provider.receipt_for(
                 tenant=tenant, idempotency_key=entry["idempotency_key"],
@@ -769,9 +779,12 @@ def _enqueue(
         routing_store.enqueue_outbox(
             tenant, "execution", ref_id, envelope, db_path=db_path,
         )
-    except Exception:  # noqa: BLE001 — telemetry must never gate execution
-        logger.warning("evenimentul de execuție nu a putut fi pus în outbox",
-                       exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — telemetry must never gate execution
+        # Only the exception class reaches the log — the message can carry
+        # arbitrary internals (paths, payload echoes) that must not be
+        # persisted alongside delivery history.
+        logger.warning("evenimentul de execuție nu a putut fi pus în outbox (%s)",
+                       type(exc).__name__)
 
 
 _REASON_ALLOWED = frozenset(
@@ -834,9 +847,9 @@ def _emit_checkpoint(
         )
         _enqueue(tenant, f"{run['run_id']}:{step}:{state}:{uuid.uuid4().hex[:8]}",
                  env, db_path)
-    except Exception:  # noqa: BLE001 — telemetry must never gate execution
-        logger.warning("checkpointul de execuție nu a putut fi emis",
-                       exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — telemetry must never gate execution
+        logger.warning("checkpointul de execuție nu a putut fi emis (%s)",
+                       type(exc).__name__)
 
 
 def _emit_receipt(
@@ -893,6 +906,6 @@ def _emit_receipt(
         )
         _enqueue(tenant, f"{entry['entry_id']}:receipt:{uuid.uuid4().hex[:8]}",
                  env, db_path)
-    except Exception:  # noqa: BLE001 — telemetry must never gate execution
-        logger.warning("receiptul de execuție nu a putut fi emis",
-                       exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — telemetry must never gate execution
+        logger.warning("receiptul de execuție nu a putut fi emis (%s)",
+                       type(exc).__name__)

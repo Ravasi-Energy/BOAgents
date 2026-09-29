@@ -131,6 +131,44 @@ def _identity(request: Request) -> bo_identity.Identity:
 BoIdentity = Annotated[bo_identity.Identity, Depends(_identity)]
 
 
+class _PilotActivation(BaseModel):
+    import_id: str = Field(min_length=1, max_length=80)
+    active: bool
+    expected_version: int = Field(ge=0)
+    reason: str = Field(min_length=3, max_length=300)
+
+
+class _PilotRun(BaseModel):
+    mandate_id: str = Field(min_length=1, max_length=80)
+    correlation_id: str | None = Field(default=None, max_length=80)
+
+
+@router.get("/pilot")
+def pilot_status(ident: BoIdentity) -> Any:
+    from openexecutive.bo.pilot.service import status
+    return status(ident)
+
+
+@router.put("/pilot/activation")
+def pilot_activation(body: _PilotActivation, ident: BoIdentity) -> Any:
+    from openexecutive.bo.pilot.service import change_activation
+    return change_activation(ident, **body.model_dump())
+
+
+@router.post("/pilot/runs", status_code=201)
+def pilot_run(body: _PilotRun, ident: BoIdentity) -> Any:
+    from openexecutive.bo.pilot.service import submit
+    return submit(ident, **body.model_dump())
+
+
+@router.post("/pilot/runs/{run_id}/telemetry/replay")
+def pilot_telemetry_replay(run_id: str, ident: BoIdentity) -> Any:
+    """Re-queue missing observation/telemetry envelopes from the persisted
+    evidence — idempotent, audited, never a new effect or provider call."""
+    from openexecutive.bo.pilot.service import replay_telemetry
+    return replay_telemetry(ident, run_id)
+
+
 class _SettingPatch(BaseModel):
     value: Any
     expected_version: int = Field(ge=0)
@@ -207,8 +245,8 @@ def _config_applied(ident: bo_identity.Identity, key: str,
             "appliedVersion": record["version"],
             "actorRef": opaque_actor_ref(ident.actor),
         })
-    except Exception:  # noqa: BLE001 — telemetry never breaks the write path
-        logger.warning("ConfigApplied emit failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — telemetry never breaks the write path
+        logger.warning("emiterea ConfigApplied a eșuat (%s)", type(exc).__name__)
 
 
 # --------------------------------------------------------------------------- #
@@ -315,15 +353,39 @@ def get_run(run_id: str,
 def telemetry_status(ident: BoIdentity) -> Any:
     bo_identity.require(ident, "telemetry:read")
     adapter = get_adapter()
+    cfg = adapter.resolve(ident.tenant)
     return {
+        # Bootstrap = the env/injected adapter the process was built with.
         "enabled": adapter.enabled,
         "transport": type(adapter.transport).__name__,
         "emitted": adapter.emitted,
         "dropped": adapter.dropped,
         "rejected": adapter.rejected,
         "schema_version": "bo.telemetry.v1",
-        "note": "Telemetria este oprită implicit; se activează doar prin "
-                "configurație explicită (BO_TELEMETRY_*).",
+        # Effective = what the next envelope for this tenant actually uses —
+        # administered bo.telemetry.* rows win over bootstrap. The token
+        # itself is server-only; only its configured/not-configured status
+        # and the env-var reference are exposed.
+        "effective": {
+            "enabled": cfg.enabled,
+            "transport": cfg.transport_kind,
+            "endpoint": cfg.endpoint or None,
+            "token_ref": cfg.token_ref,
+            "token_configured": cfg.token_configured,
+            # Credential↔destination binding state — the SecretRef NAME
+            # only, never the secret. „endpoint_without_ref"/
+            # „unprovisioned"/„missing" mean delivery refuses closed.
+            "credential_ref": cfg.credential_ref,
+            "credential_state": cfg.credential_state,
+            "incomplete": cfg.enabled
+            and cfg.transport_kind == "http"
+            and cfg.transport is None,
+            "source": cfg.source,
+        },
+        "note": "Telemetria este oprită implicit; se activează prin "
+                "BO_TELEMETRY_ENABLED sau prin setarea tenant "
+                "bo.telemetry.enabled — valoarea salvată are prioritate "
+                "față de bootstrap.",
     }
 
 
@@ -893,6 +955,81 @@ def retry_outbox(
     return routing_store.retry_outbox_entry(
         ident.tenant, event_id, reason=body.reason, actor=ident.actor,
     )
+
+
+class _RebindBody(BaseModel):
+    reason: str = Field(min_length=1, max_length=300)
+    event_ids: list[Annotated[str, Field(max_length=128)]] | None = Field(
+        default=None, max_length=200
+    )
+
+
+@router.post("/execution/outbox/rebind")
+def rebind_outbox(body: _RebindBody, ident: BoIdentity) -> Any:
+    """Explicit, audited re-association of undelivered envelopes with the
+    tenant's CURRENT destination for their kind — the only authorized way
+    to move backlog or legacy rows that carry no recorded binding.
+    Envelope bytes and identities are never rewritten; delivered rows are
+    untouched. Admin-only, reason mandatory."""
+    bo_identity.require(ident, "execution:write")
+    from openexecutive.bo.routing import store as routing_store
+
+    return routing_store.rebind_outbox(
+        ident.tenant, event_ids=body.event_ids, actor=ident.actor,
+        reason=body.reason,
+    )
+
+
+@router.get("/execution/audit-intents")
+def list_audit_intents(
+    ident: BoIdentity,
+    status: str | None = None,
+    limit: int = 200,
+    offset: int = 0,
+) -> Any:
+    """Operator evidence export — durable audit intents correlated with
+    the central journal: status, attempts, claim generation, and the
+    ``audit_row_id`` marker plus whether that row actually exists. An
+    orphan marker (journal restored without the row) shows as
+    ``journal_row_present=false`` — never implied delivered. Bounded,
+    tenant-scoped, secret-free by construction (rebind metadata only)."""
+    bo_identity.require(ident, "execution:read")
+    from openexecutive.bo.routing import store as routing_store
+
+    if status is not None and status not in {
+        "pending", "delivered", "failed",
+    }:
+        status = None
+    return routing_store.audit_intents_evidence(
+        ident.tenant, status=status, limit=limit, offset=offset,
+    )
+
+
+class _AuditRequeueBody(BaseModel):
+    intent_id: str | None = Field(default=None, max_length=128)
+    reason: str | None = Field(default=None, max_length=500)
+
+
+@router.post("/execution/outbox/audit-requeue")
+def audit_requeue(
+    ident: BoIdentity, body: _AuditRequeueBody | None = None,
+) -> Any:
+    """Explicit operator recovery for audit intents — parked ``failed``
+    ones go back to ``pending``; with ``intent_id``, a single ``delivered``
+    intent may be demoted ONLY when the journal verifiably lost its
+    evidence (restored/corrupt journal) — live evidence is refused.
+    Audited like the mutation it is. Admin-only."""
+    bo_identity.require(ident, "execution:write")
+    from openexecutive.bo.routing import store as routing_store
+
+    try:
+        return routing_store.requeue_failed_audit_intents(
+            ident.tenant, actor=ident.actor,
+            intent_id=body.intent_id if body else None,
+            reason=body.reason if body else None,
+        )
+    except ValueError as exc:
+        return _bo_json(409, "audit_requeue_refused", str(exc))
 
 
 class _WorkBody(BaseModel):

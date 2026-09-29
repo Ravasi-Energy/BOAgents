@@ -18,7 +18,7 @@ export class BoApiError extends Error {
   }
 }
 
-async function req<T>(
+export async function req<T>(
   path: string,
   init?: RequestInit,
 ): Promise<T> {
@@ -245,6 +245,24 @@ export interface BoTelemetryStatus {
   dropped: number;
   rejected: number;
   schema_version: string;
+  /** Configurația efectivă pentru tenantul curent: rândurile salvate
+   *  bo.telemetry.* câștigă față de bootstrap-ul de mediu. Tokenul rămâne
+   *  server-only — aici vedem doar referința și starea configured/missing. */
+  effective?: {
+    enabled: boolean;
+    transport: string;
+    endpoint: string | null;
+    token_ref: string;
+    token_configured: boolean;
+    /** Legătura credential↔destinație: numele SecretRef-ului sancționat
+     *  pentru endpointul efectiv (gol = niciun credential nu poate ajunge
+     *  acolo) și starea ei — „endpoint_without_ref"/„unprovisioned"/
+     *  „missing" înseamnă refuz controlat de livrare. Niciodată secretul. */
+    credential_ref?: string;
+    credential_state?: string;
+    incomplete: boolean;
+    source: Record<string, string>;
+  };
   note: string;
 }
 
@@ -446,6 +464,7 @@ export interface BoRoutingStatus {
   outbox_total: number;
   outbox_pending: number;
   outbox_dead: number;
+  outbox_unbound?: number;
   outbox_attempts: number;
   outbox_last_error: string | null;
   delivery: {
@@ -760,6 +779,32 @@ export function workBoRuns(workerId?: string): Promise<{
   });
 }
 
+// Postura telemetriei unei rulări pilot, raportată de GET /bo/pilot. Nu este
+// starea execuției: receiptul rămâne dovada efectului; aici urmărim doar
+// dacă observația persistată a ajuns în outboxul durabil.
+export interface BoRunTelemetry {
+  status: "ok" | "pending" | "degraded" | "dead" | "incident" | "unavailable" | "corrupt" | "none";
+  marker: string | null;
+  error: string | null;
+  expected: number;
+  queued: number;
+  delivered: number;
+  dead: number;
+  missing: number;
+  replayable: boolean;
+}
+
+export function replayBoRunTelemetry(runId: string): Promise<{
+  run_id: string;
+  enqueued: number;
+  existing: number;
+  telemetry: BoRunTelemetry;
+}> {
+  return req(`/pilot/runs/${encodeURIComponent(runId)}/telemetry/replay`, {
+    method: "POST",
+  });
+}
+
 export interface BoOutboxEntry {
   event_id: string;
   kind: string;
@@ -776,11 +821,17 @@ export interface BoOutboxEntry {
   last_error: string | null;
   lease_owner: string | null;
   lease_until: string | null;
+  /** Destinația înregistrată la enqueue: endpoint + NUMELE SecretRef-ului
+   *  (niciodată secretul). dest_bound=false = rând legacy pre-migrare —
+   *  livrarea refuză până la un rebind explicit, auditat. */
+  dest_endpoint: string | null;
+  dest_ref: string | null;
+  dest_bound: boolean;
 }
 
 export function listBoOutbox(
   delivered?: number,
-): Promise<{ entries: BoOutboxEntry[]; stats: Record<string, number> }> {
+): Promise<{ entries: BoOutboxEntry[]; stats: Record<string, number | string | null> }> {
   return req(
     `/execution/outbox${delivered !== undefined ? `?delivered=${delivered}` : ""}`,
   );
@@ -794,6 +845,90 @@ export function retryBoOutbox(
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ reason }),
+  });
+}
+
+/** Reasociere explicită, auditată: plicurile nelivrate (inclusiv rândurile
+ *  legacy fără legătură) primesc destinația curent efectivă pe kind-ul lor.
+ *  Octeții și identitățile nu se rescriu. Doar admin.
+ *  `audit` = starea reală a livrării evenimentului de audit către jurnal
+ *  (delivered/pending/failed) — intența e persistată atomic cu mutația. */
+export function rebindBoOutbox(
+  reason: string,
+  eventIds?: string[],
+): Promise<{ rebound: number; skipped_leased?: number; audit?: string }> {
+  return req("/execution/outbox/rebind", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ reason, event_ids: eventIds ?? null }),
+  });
+}
+
+/** Relansare explicită a intențiilor de audit parcate („failed”) — drain-ul
+ *  le reia către jurnal. Admin-only, auditat. */
+export function requeueBoAuditIntents(): Promise<{ requeued: number }> {
+  return req("/execution/outbox/audit-requeue", { method: "POST" });
+}
+
+// ---------------------------------------------------------------------------
+// Audit intents — dovadă operator (PILOT-10/11)
+// ---------------------------------------------------------------------------
+
+export interface BoAuditIntent {
+  intent_id: string;
+  event: string;
+  actor: string;
+  summary: string;
+  status: "pending" | "delivered" | "failed" | string;
+  created_at: string;
+  delivered_at: string | null;
+  attempts: number;
+  last_error: string | null;
+  drain_owner: string | null;
+  drain_until: string | null;
+  /** Id-ul rândului audit_log referit de marcajul dedup — null = jurnalul
+   *  nu are marcaj (dovada lipsește sau jurnalul e indisponibil). */
+  audit_row_id: number | null;
+  /** Marcajul pointează la un rând real? false = marcaj orfan. */
+  journal_row_present: boolean | null;
+  /** Marcajul poartă fingerprint de conținut? false = marcaj legacy
+   *  (pre-PILOT-10) — conținutul nu e verificabil; nu e conflict dovedit. */
+  content_verifiable: boolean | null;
+  /** Citirea marcajului acestui rând a eșuat — necunoscut, NU absent:
+   *  dovada poate exista; recuperarea nu se oferă. */
+  journal_read_error: boolean;
+}
+
+export function listBoAuditIntents(opts?: {
+  status?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<{
+  intents: BoAuditIntent[];
+  total: number;
+  journal_reachable: boolean;
+}> {
+  const q = new URLSearchParams();
+  if (opts?.status) q.set("status", opts.status);
+  if (opts?.limit) q.set("limit", String(opts.limit));
+  if (opts?.offset) q.set("offset", String(opts.offset));
+  const suffix = q.toString() ? `?${q}` : "";
+  return req(`/execution/audit-intents${suffix}`);
+}
+
+/** Recuperare explicită, individuală: demotează o intență `delivered` a
+ *  cărei dovadă a dispărut din jurnal (restaurare/reparare) — serverul
+ *  refuză 409 câtă vreme dovada e vie. Admin-only, auditat. */
+export function requeueBoAuditIntent(
+  intentId: string,
+  reason?: string,
+): Promise<{ requeued: number }> {
+  return req("/execution/outbox/audit-requeue", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(
+      reason ? { intent_id: intentId, reason } : { intent_id: intentId },
+    ),
   });
 }
 

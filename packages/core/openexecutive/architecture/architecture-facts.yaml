@@ -1382,7 +1382,7 @@ scheduler:
     client is restored, then chains the next nightly occurrence via
     seed_client_rotation (idempotent).
   module: openexecutive.scheduler
-  runner: openexecutive.scheduler.runner — asyncio task started in the FastAPI lifespan. Polls every 30s; `claim_due_actions` uses an UPDATE…RETURNING claim so a row is fired at most once per process. Single-worker assumption (do not run two scheduler processes against the same DB). Each poll is gated on an active company profile via `_company_profile_active()` (true when `load_or_create_profile().is_empty()` is false) — when no profile is configured the poll loop claims and dispatches no scheduled actions, so every due row (including the recurring principal-brief rows seeded once in the startup prologue) stays `pending` and fires only once a company profile is saved (the Executive has no company context to act on before then). The hold is logged once per gap and once on resume, not every poll.
+  runner: openexecutive.scheduler.runner — asyncio task started in the FastAPI lifespan. Polls every 30s; `claim_due_actions` uses an UPDATE…RETURNING claim so a row is fired at most once per process. Single-worker assumption (do not run two scheduler processes against the same DB). Each poll is gated on an active company profile via `_company_profile_active()` (true when `load_or_create_profile().is_empty()` is false) — when no profile is configured the poll loop claims and dispatches no scheduled actions, so every due row (including the recurring principal-brief rows seeded once in the startup prologue) stays `pending` and fires only once a company profile is saved (the Executive has no company context to act on before then). The hold is logged once per gap and once on resume, not every poll. A second loop-level gate holds claiming while the clients `.restore_blocked` marker exists — fail-CLOSED (a marker read error also holds), the inverse of the rotation pause's fail-open, because live state may belong to no client and due rows would run the wrong company's outbound work.
   table: |
     scheduled_actions (in episodic_memory.db). Schema (see
     memory/episodic.py):
@@ -2613,7 +2613,15 @@ workflows:
     resumers against one database. `_tick` runs the executor AFTER the
     timeout loop, which is what finally makes `on_timeout='auto_proceed'` do
     what its name says: `_handle_timeout` resolves the run and the same tick
-    executes it.
+    executes it. The startup sweep, `_tick`, AND the fire-and-forget
+    `_kick_resume` all hold while the clients `.restore_blocked` marker
+    exists (fail-closed, same rule as the scheduler gate) — a half-swapped
+    live state must not drive resumed runs, and a deferred kick leaves the
+    run `resolved` so the first unblocked tick claims it. Upstream,
+    `inbound_resolver.resolve_and_acknowledge` consumes the inbound reply
+    with a maintenance notice instead of resolving the gate — the human is
+    told to resend after recovery rather than have their answer act on the
+    wrong client's data.
 
     FENCING — the claim is not a lease. The stale sweep decides a worker is
     dead from a wall-clock guess (`_RESUME_STALE_AFTER`, 90 minutes, set
@@ -2983,6 +2991,13 @@ integrations:
     inbound email (at least 5 model calls per message, ``medium`` Honcho
     prefetch) and removed because the revision pass never reaches
     Gmail anyway (outbound mail is sent from the draft's tool loop).
+    ``poll_once`` skips the whole cycle while the client-slots
+    ``.restore_blocked`` marker exists — the poller never traverses the
+    HTTP gate, and consuming mail under mixed state would mark it read
+    and record it in ``_processed_ids`` before recovery. Skipping before
+    ``_mark_read`` leaves the mail unread and retriable, unlike the
+    socket-mode adapters (whose resolver replies once and consumes) or
+    the webhook channels (which get a 503 and rely on sender retry).
   slack: |
     openexecutive.integrations.slack_bot — async Bolt socket-mode
     adapter (``AsyncApp`` + ``AsyncSocketModeHandler``) embedded in the
@@ -3865,6 +3880,70 @@ clients:
     - First activation with no active client auto-snapshots the user's
       original company to _user_backup (same restore point the fixture
       switcher uses; POST /fixtures/unload brings it back).
+  failure_containment: |
+    activate_client_slot preflights the ChromaDBStore BEFORE the first live
+    mutation (its construction runs the persisted-schema guard); a refusal
+    there means zero LIVE-STATE mutations (the outgoing client's save-back
+    into its own slot may already have run — harmless, that copy is what it
+    should be) — the error propagates plainly and no recovery runs. A
+    failure INSIDE _restore_slot_state leaves live state half-swapped while
+    the sentinel still names the previous client, so activate immediately
+    re-restores the previous good state — the named slot, or _user_backup
+    when no client was active — through the same save-back-free
+    _force_restore-style path rotation uses (the mixed live state is
+    deliberately NOT saved back anywhere). The .restore_blocked marker is
+    the durable proof of the transition: activate writes it (phase
+    transition_started) after preflight but BEFORE the first live
+    mutation — a write failure aborts the switch with live state
+    untouched, so a transition without durable proof can never start. If
+    the recovery also fails, the marker is refreshed (phase
+    recovery_failed), the sentinel is quarantined
+    to .active_client.refused (kept as forensics — nothing ever reads it;
+    archive or delete it with the incident record), and an api/main.py
+    middleware returns 503 on every route except OPTIONS preflights,
+    /health and the fixture/slot ops needed to repair; the marker persists
+    across restarts so a booted-but-blocked API never serves mixed state —
+    only a verified restore deletes it, restart is never an unblock path.
+    The scheduler tick AND its boot prologue, the wait-for-human resumer
+    (startup sweep, tick, kicked resumes), the shared inbound resolver,
+    Executive.chat (covers Slack/Discord sockets and every chat caller) and
+    the email poller's whole poll cycle all hold on the same marker
+    (fail-CLOSED on read errors — the inverse of the rotation pause, which
+    fails open) so no due row, resumed run, chat turn or inbound message
+    can act on the wrong client's state. If the post-failure marker
+    refresh write fails too (the pre-mutation marker is already durable),
+    a process-local flag additionally fences this process until a verified
+    recovery clears it via _clear_restore_blocked. The marker write itself
+    is tmp-file + same-dir rename so a torn write cannot leave a
+    half-readable marker that loses restore_slug. rotation's
+    _force_restore follows the same rule: it writes its own marker before
+    restoring when none exists (cleared on verified completion) and keeps
+    an existing block fail-closed. The durability model claimed is a plain
+    write surviving a PROCESS restart on the same filesystem —
+    fsync/power-loss guarantees are not claimed. Scope note: the fixture
+    load/unload/reset mutation windows (fixture_loader) are NOT covered by
+    this marker — a crash mid-unload on an otherwise-healthy instance is
+    a pre-existing, separately-tracked exposure, not part of the client
+    transition fence. The
+    recovery await is shielded and looped under _FIXTURE_OP_LOCK — a
+    cancelled request still waits for the inner restore to finish before
+    the lock is released and the CancelledError re-raised — so a client
+    disconnect can never release the lock mid-restore into a second
+    writer. The _user_backup recovery path discards what the backup format
+    never carried first (_discard_state_not_in_backup: the per-client DB
+    tables incl. dynamic_workflows/watchlist sidecars/audit_dedup) and
+    _apply_state_from_source now also makes mcp_servers.json, skills/ and
+    the Chroma `skills` collection's source='company' rows authoritative —
+    a failed client's MCP credentials or authored skills cannot survive
+    into the user's restored state (that also means fixture loads treat
+    the source dir as authoritative for mcp/skills). Rotation's
+    _force_restore re-points a live marker's restore_slug at the client it
+    actually restored, and unload unlinks the .active_client sentinel
+    BEFORE the marker (never the inverse — a stale sentinel on an
+    unblocked instance would attribute user state to a client).
+    Recovery clears the marker only via a successful slot restore or
+    fixtures/unload — unload_fixture removes it AFTER
+    _apply_state_from_source returns.
   honcho: |
     Each client gets a STABLE Honcho workspace override
     (openexec-client-<slug>, no uuid) so per-person peer memory persists
@@ -4160,8 +4239,28 @@ bo:
     concurrent flushes race-safe, bo.router.delivery_batch_size /
     delivery_interval_s / delivery_max_attempts bound it, envelopes past the
     cap are dead-lettered (delivered=2, visible in status/UI), and catalog
-    syncs share the same outbox. A daemon worker drains it every
-    delivery_interval_s seconds (0 = POST /bo/routing/flush only). It NEVER
+    syncs share the same outbox. A daemon worker drains it per tenant —
+    delivery_interval_s is re-read on every wake (0 = POST /bo/routing/flush
+    only, for that tenant only) and the wait is the soonest tenant due time.
+    Every outbox row carries the destination binding resolved at enqueue
+    (dest_endpoint, dest_ref — SecretRef name only, dest_bound); delivery,
+    retry and replay follow only that binding, legacy unbound rows refuse
+    until an audited POST /bo/execution/outbox/rebind — lease-safe and
+    refusing delivered history. A sink binding ("", "") recorded while the
+    transport had no HTTP destination delivers only while the effective
+    transport is still a sink; a later administered HTTP destination
+    refuses until rebind. Telemetry credentials bind to destination+tenant:
+    bo.telemetry.token_ref accepts only operator-provisioned names
+    (BO_TELEMETRY_SECRET_REFS) or built-in bootstrap refs, and an
+    administered endpoint without its own provisioned ref refuses closed —
+    the bootstrap credential never follows an envelope to an administered
+    destination. The Guardian channel is symmetric: bo.exec.guardian_*
+    refs accept only BO_GUARDIAN_SECRET_REFS/built-ins, the persisted ref
+    is the one that would actually supply the token (bootstrap
+    BO_TELEMETRY_TOKEN fallback included, never onto an administered
+    endpoint), and receiver-supplied error detail is redacted before
+    last_error. Telemetry disabled per tenant suspends the telemetry kinds
+    only — kind="execution" envelopes keep draining. It NEVER
     changes the route, never blocks, never calls a provider, and never
     raises into the call path; with bo.router.observe_enabled=false
     (default) it is a no-op. bo.bots imports nothing from bo.routing —

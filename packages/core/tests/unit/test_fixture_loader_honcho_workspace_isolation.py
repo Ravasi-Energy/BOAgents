@@ -76,7 +76,7 @@ def test_load_fixture_switches_active_workspace(
     """After load_fixture, the active workspace id is per-fixture."""
     # Stub the actual fixture-loading bits we don't care about here.
     monkeypatch.setattr(fixture_loader, "_apply_state_from_source",
-                        lambda src, st: _async_return({"loaded_from": str(src)}))
+                        lambda src, st, **kw: _async_return({"loaded_from": str(src)}))
 
     # The fixture name must exist in the registry; create a stub fixture dir.
     fixture_root = tmp_path / "fixtures"
@@ -116,7 +116,7 @@ def test_unload_fixture_deletes_demo_workspace_and_clears_override(
 
     monkeypatch.setattr(
         fixture_loader, "_apply_state_from_source",
-        lambda src, st: _async_return({"restored": True}),
+        lambda src, st, **kw: _async_return({"restored": True}),
     )
 
     deletes: list[str | None] = []
@@ -142,7 +142,7 @@ def test_unload_with_no_active_override_skips_delete(
     (backup / "profile.yaml").write_text("name: ''\n")
     monkeypatch.setattr(
         fixture_loader, "_apply_state_from_source",
-        lambda src, st: _async_return({"restored": True}),
+        lambda src, st, **kw: _async_return({"restored": True}),
     )
 
     deletes: list[str | None] = []

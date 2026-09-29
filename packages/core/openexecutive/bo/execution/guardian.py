@@ -38,6 +38,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -92,20 +93,60 @@ def _setting(tenant: str, key: str, default: Any, db_path: Path | None) -> Any:
         return default
 
 
-def _link_config(
-    tenant: str, db_path: Path | None
-) -> tuple[str, str | None, float, bool]:
-    """(endpoint, token-or-None, timeout_s, auth_required).
+_GUARDIAN_BUILTIN_REFS = frozenset(
+    {"BO_GUARDIAN_TOKEN", "BO_GUARDIAN_POLICY_TOKEN", "BO_TELEMETRY_TOKEN"}
+)
 
-    ``BO_TELEMETRY_ENDPOINT``/``BO_TELEMETRY_TOKEN`` are honored as the
-    deployment-level transport contract (the gate sets them directly);
-    the persisted endpoint takes precedence and the environment is its
-    fallback. The named secret takes precedence over BO_TELEMETRY_TOKEN.
-    ``BO_TELEMETRY_ENDPOINT`` is a full URL — the base is
-    recovered by stripping ``/v1/...`` for the mandate-status calls."""
-    endpoint = str(
-        _setting(tenant, "bo.exec.guardian_endpoint", "", db_path)
-    ).rstrip("/")
+
+_GUARDIAN_REF_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+
+
+def provisioned_secret_refs(tenant: str | None = None) -> set[str]:
+    """Env-var names an administered Guardian secret ref may point at:
+    the built-in references plus the operator allow-list
+    ``BO_GUARDIAN_SECRET_REFS`` (comma-separated ``NAME`` or
+    ``NAME@tenant`` entries — a scoped entry is usable only by its own
+    tenant, so one tenant can never name another's credential).
+    Administering a SecretRef can never reach an arbitrary environment
+    variable."""
+    refs = set(_GUARDIAN_BUILTIN_REFS)
+    for raw in os.environ.get("BO_GUARDIAN_SECRET_REFS", "").split(","):
+        entry = raw.strip()
+        if not entry:
+            continue
+        name, sep, scope = entry.partition("@")
+        if not _GUARDIAN_REF_RE.match(name):
+            continue
+        if sep and scope.strip():
+            if tenant is None or scope.strip() == tenant:
+                refs.add(name)
+        else:
+            refs.add(name)
+    return refs
+
+
+def binding_for(tenant: str, db_path: Path | None) -> tuple[str, str]:
+    """(endpoint, secret_ref) — the Guardian authority destination for
+    outbox destination-binding. Same resolution as ``_link_config`` minus
+    the token material: the SecretRef NAME is what gets persisted on the
+    row, never the secret.
+
+    The recorded ref is the one that would actually supply the token:
+    the configured ref when provisioned; on the bootstrap channel (env
+    endpoint, no administered override) the ``BO_TELEMETRY_TOKEN``
+    fallback ``_link_config`` honors — a bound row never dead-letters on
+    a ref that was never going to be used. A tenant-administered endpoint
+    NEVER inherits the bootstrap token."""
+    try:
+        from openexecutive.bo.settings import store as settings_store
+
+        stored_endpoint, _stored = settings_store.get_stored_value(
+            tenant, "bo.exec.guardian_endpoint", db_path=db_path
+        )
+    except Exception:  # noqa: BLE001 — settings hiccup = safe default
+        stored_endpoint = None
+    endpoint = str(stored_endpoint or "").rstrip("/")
+    administered = bool(endpoint)
     env_endpoint = os.environ.get("BO_TELEMETRY_ENDPOINT", "").rstrip("/")
     if not endpoint and env_endpoint:
         endpoint = env_endpoint.split("/v1/")[0]
@@ -115,10 +156,39 @@ def _link_config(
             "BO_GUARDIAN_TOKEN", db_path,
         )
     )
+    if (
+        not administered
+        and not os.environ.get(secret_ref)
+        and os.environ.get("BO_TELEMETRY_TOKEN")
+    ):
+        secret_ref = "BO_TELEMETRY_TOKEN"
+    return endpoint, secret_ref
+
+
+def _link_config(
+    tenant: str, db_path: Path | None
+) -> tuple[str, str | None, float, bool]:
+    """(endpoint, token-or-None, timeout_s, auth_required).
+
+    ``BO_TELEMETRY_ENDPOINT``/``BO_TELEMETRY_TOKEN`` are honored as the
+    deployment-level transport contract (the gate sets them directly);
+    the persisted endpoint takes precedence and the environment is its
+    fallback. On the bootstrap channel the token falls back to
+    BO_TELEMETRY_TOKEN; a tenant-administered endpoint only ever
+    receives its explicitly administered ref — never the bootstrap
+    credential.
+    ``BO_TELEMETRY_ENDPOINT`` is a full URL — the base is
+    recovered by stripping ``/v1/...`` for the mandate-status calls."""
+    endpoint, secret_ref = binding_for(tenant, db_path)
+    # binding_for already reports the effective ref — including the
+    # BO_TELEMETRY_TOKEN fallback on the bootstrap channel. A bound or
+    # administered endpoint never substitutes another credential, and a
+    # ref provisioned for a different tenant (``NAME@other``) never
+    # resolves here.
     token = (
         os.environ.get(secret_ref)
-        or os.environ.get("BO_TELEMETRY_TOKEN")
-        or None
+        if secret_ref in provisioned_secret_refs(tenant)
+        else None
     )
     timeout_s = float(
         _setting(tenant, "bo.exec.guardian_timeout_s", 5, db_path)
@@ -142,6 +212,8 @@ def _policy_token(tenant: str, db_path: Path | None) -> str | None:
             "BO_GUARDIAN_POLICY_TOKEN", db_path,
         )
     )
+    if ref not in provisioned_secret_refs(tenant):
+        return None
     return os.environ.get(ref) or None
 
 
@@ -171,12 +243,20 @@ def _request(
     return resp.status, parsed if isinstance(parsed, dict) else {}
 
 
-def _error_detail(exc: urllib.error.HTTPError) -> str:
+def _error_detail(exc: urllib.error.HTTPError, token: str | None = None) -> str:
+    """Receiver-supplied error detail — redacted before it can persist.
+
+    A hostile receiver can reflect the Bearer credential back in the
+    error body; the detail that reaches ``last_error``/API/UI never
+    carries it."""
     try:
         body = json.loads(exc.read())
-        return str(body.get("detail") or body)[:200]
+        detail = str(body.get("detail") or body)[:200]
     except Exception:  # noqa: BLE001 — non-JSON error body
         return f"HTTP {exc.code}"
+    if token and token in detail:
+        detail = detail.replace(token, "[redat]")
+    return detail
 
 
 # --------------------------------------------------------------------------- #
@@ -246,7 +326,7 @@ def assert_effect_authorized(
     try:
         status, body = _request("GET", url, token, timeout_s)
     except urllib.error.HTTPError as exc:
-        detail = _error_detail(exc)
+        detail = _error_detail(exc, token)
         if exc.code >= 500 or detail in _RECEIVER_OFF_DETAILS:
             raise GuardianUnavailableError(
                 f"HTTP {exc.code}: {detail}"
@@ -335,7 +415,7 @@ def _assert_policy_rights(
     try:
         status, body = _request("GET", url, token, timeout_s)
     except urllib.error.HTTPError as exc:
-        detail = _error_detail(exc)
+        detail = _error_detail(exc, token)
         if exc.code >= 500 or detail in _RECEIVER_OFF_DETAILS:
             raise GuardianUnavailableError(
                 f"HTTP {exc.code}: {detail}"
@@ -396,23 +476,49 @@ def _resource_covered(resource: str, allowed: str) -> bool:
 # --------------------------------------------------------------------------- #
 
 def post_execution_event(
-    tenant: str, envelope: dict[str, Any], *, db_path: Path | None = None
+    tenant: str, envelope: dict[str, Any], *, db_path: Path | None = None,
+    destination: tuple[str, str] | None = None,
 ) -> dict[str, Any]:
     """Deliver one persisted execution envelope to Guardian.
+
+    ``destination=(endpoint, secret_ref)`` delivers through the binding
+    recorded on the outbox row at enqueue time — the envelope can only go
+    to its recorded authority endpoint with the recorded credential
+    reference; a missing env value is transient (provisioning may return),
+    never substituted.
 
     The caller (outbox delivery) maps outcomes:
     ``GuardianTransientError`` → stays pending; ``GuardianPermanentError``
     → dead-letter with the receiver's detail; any ack dict → delivered.
     """
-    endpoint, token, timeout_s, _required = _link_config(tenant, db_path)
-    if not endpoint:
-        raise GuardianTransientError(
-            "bo.exec.guardian_endpoint neconfigurat"
+    if destination is not None:
+        endpoint, secret_ref = destination
+        token = (
+            os.environ.get(secret_ref)
+            if secret_ref and secret_ref in provisioned_secret_refs(tenant)
+            else None
         )
-    if not token:
-        raise GuardianPermanentError(
-            "secretul Guardian nu este setat în mediul procesului"
+        timeout_s = float(
+            _setting(tenant, "bo.exec.guardian_timeout_s", 5, db_path)
         )
+        if not endpoint:
+            raise GuardianTransientError(
+                "destinația asociată plicului lipsește"
+            )
+        if not token:
+            raise GuardianTransientError(
+                "credentialul asociat plicului nu este provisionat"
+            )
+    else:
+        endpoint, token, timeout_s, _required = _link_config(tenant, db_path)
+        if not endpoint:
+            raise GuardianTransientError(
+                "bo.exec.guardian_endpoint neconfigurat"
+            )
+        if not token:
+            raise GuardianPermanentError(
+                "secretul Guardian nu este setat în mediul procesului"
+            )
     # Use the same authority base as status checks. The generic telemetry
     # endpoint may address observations, not the execution-event contract.
     url = f"{endpoint}/v1/execution-events"
@@ -421,7 +527,7 @@ def post_execution_event(
             "POST", url, token, timeout_s, body=envelope,
         )
     except urllib.error.HTTPError as exc:
-        detail = _error_detail(exc)
+        detail = _error_detail(exc, token)
         if exc.code >= 500 or exc.code == 429 or (
             exc.code == 404 and detail in _RECEIVER_OFF_DETAILS
         ):
@@ -436,6 +542,10 @@ def post_execution_event(
     if status >= 500:
         raise GuardianTransientError(f"HTTP {status}")
     ack_status = str(body.get("status") or "")
+    if token and token in ack_status:
+        # A hostile receiver can reflect the Bearer it just received —
+        # the persisted error never carries it back.
+        ack_status = ack_status.replace(token, "[redat]")
     if ack_status not in _ACK_OK:
         raise GuardianPermanentError(
             f"ack neașteptat: {ack_status or f'HTTP {status}'}"

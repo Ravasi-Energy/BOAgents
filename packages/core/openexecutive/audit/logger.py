@@ -181,6 +181,30 @@ _USAGE_SUM_COLS = """
 """
 
 
+class _DedupSeen(Exception):
+    """Internal: marker + matching fingerprint + live row — the caller is
+    answered with the original row id (a same-content retry is safe)."""
+
+
+class _DedupConflict(Exception):
+    """Internal: same dedup_key but different content fingerprint — the
+    caller's emit is refused; the marker must never be presented as proof
+    of a different operation."""
+
+
+def _dedup_fingerprint(
+    event_type: str, actor: str | None, summary: str, details_json: str | None
+) -> str:
+    """Content identity for a dedup key — same key + same fingerprint means
+    a retry of the same operation; same key + different fingerprint is a
+    conflict, not evidence."""
+    import hashlib
+
+    material = "|".join(
+        [event_type, actor or "", summary, details_json or ""])
+    return hashlib.sha256(material.encode()).hexdigest()
+
+
 class AuditLogger:
     """Synchronous SQLite writer/reader for audit events.
 
@@ -209,7 +233,22 @@ class AuditLogger:
                 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts DESC);
                 CREATE INDEX IF NOT EXISTS idx_audit_session ON audit_log(session_id);
                 CREATE INDEX IF NOT EXISTS idx_audit_type ON audit_log(event_type);
+                CREATE TABLE IF NOT EXISTS audit_dedup (
+                    dedup_key    TEXT PRIMARY KEY,
+                    audit_row_id INTEGER NOT NULL,
+                    fingerprint  TEXT,
+                    created_at   TEXT NOT NULL
+                );
             """)
+            dedup_cols = {row["name"] for row in conn.execute(
+                "PRAGMA table_info(audit_dedup)")}
+            if "fingerprint" not in dedup_cols:
+                try:
+                    conn.execute(
+                        "ALTER TABLE audit_dedup ADD COLUMN fingerprint TEXT")
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column" not in str(exc).lower():
+                        raise
             # Additive migrations. PRAGMA-guarded so a second boot is a no-op
             # (no migration tooling in this repo). Concurrent workers can race
             # the ALTER; SQLite raises OperationalError("duplicate column name")
@@ -228,6 +267,77 @@ class AuditLogger:
                     if "duplicate column" not in str(exc).lower():
                         raise
 
+    def has_detail(self, key: str, value: str) -> bool:
+        """True when a journal row already carries ``details_json[key]`` —
+        consumer-side dedup for durable-intent reconciliation (a rebind
+        intent that was emitted but whose mark-delivered crashed must not
+        produce a second journal row)."""
+        return self.detail_row_id(key, value) is not None
+
+    def detail_row_id(self, key: str, value: str) -> int | None:
+        """The audit row carrying ``details_json[key] == value``, or None.
+        Unlike ``has_detail`` this gives the caller the row id — needed to
+        backfill a dedup marker on rows emitted before ``audit_dedup``
+        existed."""
+        with _get_conn(self._db_path) as conn:
+            row = conn.execute(
+                "SELECT id FROM audit_log WHERE "
+                "json_extract(details_json, ?) = ? LIMIT 1",
+                (f"$.{key}", value),
+            ).fetchone()
+        return int(row["id"]) if row else None
+
+    def mark_dedup(self, dedup_key: str, audit_row_id: int) -> bool:
+        """Backfill a dedup marker for an EXISTING audit row — used when a
+        durable intent is confirmed present in a journal that predates
+        ``audit_dedup``. The fingerprint is computed from the stored row's
+        own fields, so the marker always describes the real evidence.
+        No-op when the key is already claimed."""
+        with _get_conn(self._db_path) as conn:
+            row = conn.execute(
+                "SELECT event_type, actor, summary, details_json "
+                "FROM audit_log WHERE id = ?", (audit_row_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            fingerprint = _dedup_fingerprint(
+                row["event_type"], row["actor"], row["summary"],
+                row["details_json"])
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO audit_dedup "
+                "(dedup_key, audit_row_id, fingerprint, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (dedup_key, audit_row_id, fingerprint, _now()),
+            )
+            return cur.rowcount == 1
+
+    def dedup_lookup(self, dedup_key: str) -> dict[str, Any] | None:
+        """Marker state for a dedup key: ``audit_row_id`` plus whether the
+        referenced audit row actually exists — the operator-facing way to
+        distinguish delivered evidence from an orphan marker (journal
+        restored without that row).
+
+        ``None`` means *provably no marker*. A read failure is NOT
+        absence: the exception propagates so callers can distinguish
+        "confirmed missing" from "unreadable" per row/per read
+        (OP13-A01-01) instead of reporting missing evidence."""
+        with _get_conn(self._db_path) as conn:
+            marker = conn.execute(
+                "SELECT audit_row_id, fingerprint FROM audit_dedup "
+                "WHERE dedup_key = ?", (dedup_key,),
+            ).fetchone()
+            if marker is None:
+                return None
+            live = conn.execute(
+                "SELECT 1 FROM audit_log WHERE id = ?",
+                (marker["audit_row_id"],),
+            ).fetchone() is not None
+        return {
+            "audit_row_id": int(marker["audit_row_id"]),
+            "journal_row_present": live,
+            "fingerprint": marker["fingerprint"],
+        }
+
     def log(
         self,
         event_type: str,
@@ -239,8 +349,15 @@ class AuditLogger:
         details: dict[str, Any] | None = None,
         full: dict[str, Any] | None = None,
         department: str | None = None,
+        dedup_key: str | None = None,
     ) -> int | None:
         """Insert one audit row. Returns row id, or None on failure.
+
+        ``dedup_key`` makes the insert idempotent at the journal level: the
+        marker lands in ``audit_dedup`` in the SAME transaction as the
+        ``audit_log`` row, so two racing emitters can never both commit a row
+        for the same key — the loser rolls back and this returns the original
+        row id. This is the guarantee check-then-write cannot give.
 
         `full` is an un-truncated drill-down payload (entire user messages,
         full tool inputs/results, full specialist queries). It is never
@@ -284,27 +401,73 @@ class AuditLogger:
                         "preview": full_json[: _FULL_MAX_LEN - 200],
                     })
             ts_value = _now()
-            with _get_conn(self._db_path) as conn:
-                cur = conn.execute(
-                    """
-                    INSERT INTO audit_log
-                        (ts, event_type, session_id, turn_id, actor, summary, details_json, full_json, department)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        ts_value,
-                        event_type,
-                        session_id,
-                        turn_id,
-                        actor,
-                        safe_summary,
-                        details_json,
-                        full_json,
-                        department,
-                    ),
+            fingerprint = (
+                _dedup_fingerprint(
+                    event_type, actor, safe_summary, details_json)
+                if dedup_key is not None else None
+            )
+            try:
+                with _get_conn(self._db_path) as conn:
+                    if dedup_key is not None:
+                        # Serialize emitters on this key: BEGIN IMMEDIATE
+                        # takes the write lock before the marker read, so
+                        # two racing emits can't both see it absent.
+                        conn.execute("BEGIN IMMEDIATE")
+                        marker = conn.execute(
+                            "SELECT audit_row_id, fingerprint FROM "
+                            "audit_dedup WHERE dedup_key = ?",
+                            (dedup_key,),
+                        ).fetchone()
+                        if marker is not None:
+                            live = conn.execute(
+                                "SELECT 1 FROM audit_log WHERE id = ?",
+                                (marker["audit_row_id"],),
+                            ).fetchone() is not None
+                            if live and (
+                                marker["fingerprint"] is None
+                                or marker["fingerprint"] == fingerprint
+                            ):
+                                raise _DedupSeen(marker["audit_row_id"])
+                            if live:
+                                raise _DedupConflict(dedup_key)
+                            # Orphan marker — the journal lost the row
+                            # (restore/repair). Re-emit the evidence and
+                            # re-point the marker atomically below.
+                    cur = conn.execute(
+                        """
+                        INSERT INTO audit_log
+                            (ts, event_type, session_id, turn_id, actor, summary, details_json, full_json, department)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            ts_value,
+                            event_type,
+                            session_id,
+                            turn_id,
+                            actor,
+                            safe_summary,
+                            details_json,
+                            full_json,
+                            department,
+                        ),
+                    )
+                    row_id = int(cur.lastrowid or 0)
+                    if dedup_key is not None:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO audit_dedup "
+                            "(dedup_key, audit_row_id, fingerprint, "
+                            "created_at) VALUES (?, ?, ?, ?)",
+                            (dedup_key, row_id, fingerprint, ts_value),
+                        )
+                return row_id
+            except _DedupSeen as seen:
+                return int(seen.args[0])
+            except _DedupConflict:
+                logger.warning(
+                    "audit.dedup_conflict dedup_key=%s event_type=%s",
+                    dedup_key, event_type,
                 )
-                row_id = int(cur.lastrowid or 0)
-            return row_id
+                return None
         except Exception:
             logger.warning("audit.log_failed event_type=%s", event_type, exc_info=True)
             return None
@@ -521,6 +684,7 @@ def log_event(
     details: dict[str, Any] | None = None,
     full: dict[str, Any] | None = None,
     department: str | None = None,
+    dedup_key: str | None = None,
 ) -> None:
     """Fire-and-forget convenience wrapper around the default logger.
 
@@ -548,6 +712,7 @@ def log_event(
             details=details,
             full=full,
             department=department,
+            dedup_key=dedup_key,
         )
     except Exception:
         logger.warning("audit.log_event_failed event_type=%s", event_type, exc_info=True)

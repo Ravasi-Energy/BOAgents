@@ -940,7 +940,8 @@ class TestExecutionEvents:
         attempts: dict[str, list[dict[str, Any]]] = {}
 
         def flaky(tenant: str, envelope: dict[str, Any],
-                  db_path: Any = None) -> dict[str, Any]:
+                  db_path: Any = None,
+                  destination: Any = None) -> dict[str, Any]:
             eid = envelope["eventId"]
             attempts.setdefault(eid, []).append(envelope)
             if len(attempts[eid]) == 1:
@@ -996,7 +997,8 @@ class TestExecutionEvents:
         _work(SyntheticCounterProvider(idempotent=True))
 
         def refuse(tenant: str, envelope: dict[str, Any],
-                   db_path: Any = None) -> dict[str, Any]:
+                   db_path: Any = None,
+                   destination: Any = None) -> dict[str, Any]:
             raise guardian.GuardianPermanentError(
                 "HTTP 422: schema:receipt.status"
             )

@@ -267,6 +267,8 @@ def verify_package(
     host_version: str = "1.0.0",
     now: datetime | None = None,
     verdict_ttl: timedelta = VERDICT_TTL,
+    operator_max_bytes: int | None = None,
+    operator_rollback_requires_approval: bool | None = None,
 ) -> Verdict:
     """Contract §4 order — short-circuit at the first rejection."""
     now = now or datetime.now(UTC)
@@ -347,7 +349,11 @@ def verify_package(
     #    on-disk inventory: any symlink → TRAVERSAL, unproven inventory →
     #    UNSIGNED_ARTIFACT, undeclared file → UNSIGNED_ARTIFACT. Only the
     #    ROOT manifest.json is exempt.
+    # Operator cap (bo.packages.max_package_bytes) tightens the trust-store
+    # policy — never loosens it.
     max_bytes = registry.policy["maxPackageBytes"]
+    if operator_max_bytes is not None:
+        max_bytes = min(max_bytes, operator_max_bytes)
     signed_paths = set(manifest["artifactDigests"])
     total = 0
     for rel, declared in manifest["artifactDigests"].items():
@@ -439,10 +445,20 @@ def verify_package(
                 f"{manifest['version']} already present with a different or unknown digest",
                 checks, **base)
         if cmp_ < 0:
+            # Two distinct gates: trust-store ``rollbackRequiresApproval``
+            # False means downgrades are switched OFF entirely (a tenant
+            # setting never re-enables what the enrolled registry forbids);
+            # when the registry allows them, the operator setting
+            # ``bo.packages.rollback_requires_approval`` decides whether a
+            # bound approval is demanded (True/default) or the downgrade is
+            # permitted freely (False — the admin owns both documents).
             if not registry.policy["rollbackRequiresApproval"]:
                 return _reject(
                     "ROLLBACK_UNAUTHORIZED",
                     "rollback not enabled in policy", checks, **base)
+            if operator_rollback_requires_approval is False:
+                checks.append("versioning")
+                return Verdict(True, checks=checks, **base)
             match = next(
                 (a for a in candidates
                  if a.approval_id not in consumed and a.matches(

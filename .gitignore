@@ -50,6 +50,7 @@ scripts/secrets.*.sh
 # Node
 packages/ui/node_modules/
 packages/ui/.next/
+packages/ui/.next-*/
 packages/ui/out/
 packages/ui/.turbo/
 packages/ui/tsconfig.tsbuildinfo

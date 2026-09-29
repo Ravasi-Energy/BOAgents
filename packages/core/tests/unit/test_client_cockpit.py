@@ -51,7 +51,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     monkeypatch.setattr(episodic, "DB_PATH", db_path)
     episodic.initialize_db(db_path)
 
-    async def _no_vector(_settings: Any, _app_state: Any) -> int:
+    async def _no_vector(_settings: Any, _app_state: Any, *, store: Any = None) -> int:
         return 0
 
     monkeypatch.setattr(slots, "_rebuild_vector_state", _no_vector)

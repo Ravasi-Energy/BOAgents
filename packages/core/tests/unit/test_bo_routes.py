@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from openexecutive.api.routes import bo as bo_route
 from openexecutive.bo.bots import examples
+from openexecutive.bo.settings.registry import REGISTRY
 
 from .bo_testkit import capture_audit, use_tmp_db
 
@@ -53,7 +54,7 @@ def test_settings_list_viewer_ok(client: TestClient) -> None:
     body = resp.json()
     assert body["tenant"] == "tenant-a"
     assert body["role"] == "viewer"
-    assert len(body["settings"]) == 35
+    assert len(body["settings"]) == len(REGISTRY)
     assert all(s["origin"] == "default" for s in body["settings"])
 
 

@@ -244,11 +244,18 @@ def is_restore_blocked() -> bool:
     """Shared fail-CLOSED check for background gates (scheduler tick,
     resumer, API middleware). Resolves settings lazily; any error —
     including a settings/read failure — means "cannot prove live state is
-    coherent", which is itself a block condition."""
+    coherent", which is itself a block condition. A settings object that
+    cannot even produce a real Path (test doubles) has no filesystem the
+    marker could live on — outside the production contract, so it does not
+    engage the fence."""
     try:
         from openexecutive.config import get_settings
 
-        return get_restore_blocked(get_settings()) is not None
+        settings = get_settings()
+        profile_path = getattr(settings, "company_profile_path", None)
+        if not isinstance(profile_path, Path):
+            return False
+        return get_restore_blocked(settings) is not None
     except Exception:
         return True
 

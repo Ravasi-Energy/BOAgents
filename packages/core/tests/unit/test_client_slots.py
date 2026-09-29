@@ -997,6 +997,25 @@ def test_restore_blocked_active_fails_closed_on_read_error(
     assert resumer._restore_blocked_active() is True
 
 
+def test_restore_blocked_ignores_settings_without_real_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Token-only test doubles (slack/discord/outbound wiring stubs) patch
+    get_settings with objects that have no company_profile_path — they have
+    no filesystem the marker could live on, so they must not engage the
+    production fence. The fail-closed branch is reserved for real settings
+    whose lookup fails."""
+    monkeypatch.setattr(
+        "openexecutive.config.get_settings", lambda: SimpleNamespace()
+    )
+    assert slots.is_restore_blocked() is False
+    monkeypatch.setattr(
+        "openexecutive.config.get_settings",
+        lambda: SimpleNamespace(company_profile_path="not-a-path"),
+    )
+    assert slots.is_restore_blocked() is False
+
+
 async def test_scheduler_tick_never_claims_while_restore_blocked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

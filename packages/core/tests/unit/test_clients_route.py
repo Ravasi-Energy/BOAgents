@@ -14,6 +14,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from openexecutive.api.routes import bo as bo_route
 from openexecutive.api.routes import clients as route
 from openexecutive.clients import slots
 
@@ -48,6 +49,7 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
     app = FastAPI()
     app.include_router(route.router)
+    bo_route.register_error_handlers(app)
     return TestClient(app)
 
 
@@ -249,3 +251,119 @@ def test_activate_route_late_refusal_auto_recovers_and_blocks(
     assert client.post("/clients/acme/activate").status_code == 200
     assert slots.get_restore_blocked(settings) is None
     assert client.get("/clients").json()["active"] == "acme"
+
+
+# ---------------------------------------------------------------- B4
+# Server-side BO identity/capability gate on client-slot mutations
+# (REM-AUDIT-01): the shared-secret transport gate alone cannot tell a
+# viewer session from an admin one — every mutation must refuse
+# viewer/operator BEFORE any slot effect runs.
+
+_RBAC_ENV = {
+    "BO_TENANT_ID": "tenant-a",
+    "BO_ADMIN_EMAILS": "admin@test",
+    "BACKEND_PROXY_SECRET": "test-proxy-only",
+}
+_RBAC_ADMIN = {
+    "x-caller-email": "admin@test",
+    "x-caller-proxy-secret": "test-proxy-only",
+}
+_RBAC_VIEWER = {
+    "x-caller-email": "viewer@test",
+    "x-caller-proxy-secret": "test-proxy-only",
+}
+_RBAC_OPERATOR = {"x-api-key": "svc-key"}  # service identity, no user
+
+
+def _rbac_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for k, v in _RBAC_ENV.items():
+        monkeypatch.setenv(k, v)
+
+
+def _mutation_requests(client: TestClient, headers: dict[str, str]) -> list:
+    """One request per mutating endpoint — the set B4 requires to refuse
+    non-admins before any effect."""
+    return [
+        client.post(
+            "/clients", headers=headers,
+            json={"display_name": "X", "source": "blank"},
+        ),
+        client.post("/clients/save", headers=headers),
+        client.post("/clients/ghost/activate", headers=headers),
+        client.patch(
+            "/clients/ghost", headers=headers, json={"status": "active"}
+        ),
+        client.delete("/clients/ghost", headers=headers),
+    ]
+
+
+def test_viewer_refused_before_any_effect(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _rbac_env(monkeypatch)
+    for resp in _mutation_requests(client, _RBAC_VIEWER):
+        assert resp.status_code == 403, resp.text
+        assert resp.json()["error"] == "forbidden"
+    # No slot was created as a side effect of the refused calls.
+    assert client.get("/clients", headers=_RBAC_ADMIN).json()["clients"] == []
+
+
+def test_operator_refused_before_any_effect(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _rbac_env(monkeypatch)
+    for resp in _mutation_requests(client, _RBAC_OPERATOR):
+        assert resp.status_code == 403, resp.text
+        assert resp.json()["error"] == "forbidden"
+    assert client.get("/clients", headers=_RBAC_ADMIN).json()["clients"] == []
+
+
+def test_admin_mutations_still_work(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _rbac_env(monkeypatch)
+    resp = client.post(
+        "/clients", headers=_RBAC_ADMIN,
+        json={"display_name": "Acme", "source": "blank"},
+    )
+    assert resp.status_code == 200, resp.text
+
+
+def test_forged_delegation_without_proxy_secret_refused(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A caller asserting an admin email WITHOUT the proxy delegation
+    credential must be refused — headers alone never authenticate."""
+    _rbac_env(monkeypatch)
+    forged = {"x-caller-email": "admin@test"}  # no proxy secret
+    resp = client.post(
+        "/clients", headers=forged,
+        json={"display_name": "X", "source": "blank"},
+    )
+    assert resp.status_code == 401
+    assert resp.json()["error"] == "unauthenticated"
+    assert client.get("/clients", headers=_RBAC_ADMIN).json()["clients"] == []
+
+
+def test_viewer_reads_allowed(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Read-only surfaces stay open to viewers — the gate is on writes."""
+    _rbac_env(monkeypatch)
+    assert client.get("/clients", headers=_RBAC_VIEWER).status_code == 200
+    assert (
+        client.get("/clients/cockpit", headers=_RBAC_VIEWER).status_code == 200
+    )
+
+
+def test_wrong_tenant_hint_refused(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _rbac_env(monkeypatch)
+    resp = client.post(
+        "/clients",
+        headers={**_RBAC_ADMIN, "x-bo-tenant": "tenant-b"},
+        json={"display_name": "X", "source": "blank"},
+    )
+    assert resp.status_code == 403
+    assert resp.json()["error"] == "tenant_mismatch"

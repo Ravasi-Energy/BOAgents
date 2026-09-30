@@ -501,13 +501,16 @@ async def _apply_state_from_source(
     store = ChromaDBStore(persist_directory=settings.vector_store_path)
     store.delete_company_docs()
     # Recent-research artifacts are per-company; never let a new company
-    # inherit the prior company's research.
+    # inherit the prior company's research. strict=True: a failed delete must
+    # abort the load — silently surviving rows are one company's data served
+    # under another's identity.
     store.delete_documents(
         collection=ChromaDBStore.RESEARCH_COLLECTION,
         where={"type": "recent_research"},
+        strict=True,
     )
-    store.delete_notion_docs()
-    store.delete_attachment_docs()
+    store.delete_notion_docs(strict=True)
+    store.delete_attachment_docs(strict=True)
     # Company-authored skills share the same per-company rule: the source
     # dir's skills/ is authoritative for files, and its indexed rows must
     # not survive a swap (a failed client's skills otherwise stay
@@ -523,6 +526,7 @@ async def _apply_state_from_source(
     store.delete_documents(
         collection=SKILLS_COLLECTION,
         where={"source": "company"},
+        strict=True,
     )
     for skill in list_skills():
         if skill.source == "company":
@@ -828,9 +832,10 @@ async def reset_all_state(
         store.delete_documents(
             collection=ChromaDBStore.RESEARCH_COLLECTION,
             where={"type": "recent_research"},
+            strict=True,
         )
-        store.delete_notion_docs()
-        store.delete_attachment_docs()
+        store.delete_notion_docs(strict=True)
+        store.delete_attachment_docs(strict=True)
         from openexecutive.knowledge.notion_sync import reset_local_state
 
         reset_local_state(profile_path=settings.company_profile_path)
@@ -846,6 +851,7 @@ async def reset_all_state(
         store.delete_documents(
             collection=SKILLS_COLLECTION,
             where={"source": "company"},
+            strict=True,
         )
 
         # 3. Episodic rows — includes chat history, voice personas, alerts

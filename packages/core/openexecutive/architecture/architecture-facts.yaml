@@ -2998,6 +2998,28 @@ integrations:
     ``_mark_read`` leaves the mail unread and retriable, unlike the
     socket-mode adapters (whose resolver replies once and consumes) or
     the webhook channels (which get a 503 and rely on sender retry).
+    Pagination + outcome bookkeeping (REM-AUDIT-01 B1/B2): each cycle
+    collects ALL unread refs before processing, following the
+    workspace-mcp ``page_token`` hint in the ``📄 PAGINATION`` line —
+    bounded by ``bo.mail.poll.max_pages_per_cycle`` (registry, 1–50,
+    default 10). Policy skips (self-sent, automated senders) are
+    CONSUMED via mark-read with an ``email_processed:{id}`` dedup
+    marker — an unread skip otherwise re-occupies every page of every
+    cycle (the starvation the single-page fetch had). ``_handle_email``
+    returns an explicit outcome: ``processed`` / ``skipped`` /
+    ``mark_read_failed`` / ``failed`` / ``uncertain`` /
+    ``failed_final``. A failed Executive turn is never consumed: the
+    message stays unread and is retried within
+    ``bo.mail.processing.max_attempts`` (registry, 1–10, default 3),
+    counted durably in ``email_process_attempt`` journal rows. Before
+    each Executive run an attempt bracket row is committed and
+    re-verified (dedup_lookup) — if a retry's attempt window already
+    contains an externally-visible ``tool_invocation`` (the egress
+    gate's gated tool sets), the outcome is ``uncertain`` and the
+    message is left unread for a human rather than risking a duplicate
+    send. The processed-row dedup marker lands BEFORE mark_read, so a
+    mark-read failure replays only the label change on the next cycle —
+    the Executive never runs twice for one message.
   slack: |
     openexecutive.integrations.slack_bot — async Bolt socket-mode
     adapter (``AsyncApp`` + ``AsyncSocketModeHandler``) embedded in the
@@ -3763,7 +3785,11 @@ clients:
     notes and/or files — returns a reviewable bundle + suggested slug,
     persists nothing), POST /clients/save (checkpoint active slot without
     switching), POST /clients/{slug}/activate, DELETE /clients/{slug}
-    (refuses the active slot).
+    (refuses the active slot). Every route resolves the BO identity
+    server-side before any slot effect: reads require ``clients:read``
+    (viewer+), every mutation requires ``clients:write`` (admin only) —
+    REM-AUDIT-01 B4 closed the gap where any authenticated caller could
+    swap or destroy the live company context.
   engagement_intake: |
     The engagement-setup path: POST /clients/generate runs the
     Council-configurable engagement_intake agent (module

@@ -915,16 +915,23 @@ async def _rebuild_vector_state(
 
     if store is None:
         store = ChromaDBStore(persist_directory=settings.vector_store_path)
+    # strict=True on every cleanup below: a delete that fails silently would
+    # leave the previous client's research/notion/attachment/skill rows
+    # readable under the incoming identity. Any failure must abort the
+    # transition — activate_client_slot's marker + recovery decide whether
+    # the live state is still coherent; publishing the new client on top of
+    # a partial cleanup is never acceptable.
     store.delete_company_docs()
     # Per-company research artifacts never carry across companies.
     store.delete_documents(
         collection=ChromaDBStore.RESEARCH_COLLECTION,
         where={"type": "recent_research"},
+        strict=True,
     )
-    store.delete_notion_docs()
+    store.delete_notion_docs(strict=True)
     # Inbound attachments are per-company too, and no longer swept by
     # delete_company_docs above now that they live in their own collection.
-    store.delete_attachment_docs()
+    store.delete_attachment_docs(strict=True)
     from openexecutive.knowledge.notion_sync import reset_local_state
 
     reset_local_state(profile_path=settings.company_profile_path)
@@ -948,7 +955,9 @@ async def _rebuild_vector_state(
             logger.exception("client-slots: reindex company doc failed: %s", doc.name)
 
     # Company-authored skills: drop the old client's rows, index the restored set.
-    store.delete_documents(collection=SKILLS_COLLECTION, where={"source": "company"})
+    store.delete_documents(
+        collection=SKILLS_COLLECTION, where={"source": "company"}, strict=True
+    )
     for skill in list_skills():
         if skill.source == "company":
             try:

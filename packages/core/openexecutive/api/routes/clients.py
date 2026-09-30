@@ -22,6 +22,22 @@ from openexecutive.api.intake_uploads import (
 router = APIRouter()
 
 
+def _capability(request: Request, capability: str) -> None:
+    """Resolve the caller's BO identity and require ``capability``.
+
+    These routes swap or destroy the entire live company context, so the
+    shared-secret transport gate alone is not enough: an authenticated
+    viewer (proxied session) or operator (x-api-key without caller email)
+    must be refused BEFORE any slot mutation runs. Identity resolution is
+    server-side only — the proxy's caller headers are trusted only with a
+    valid BACKEND_PROXY_SECRET, and the dev fallback stays admin as
+    documented in bo.identity.
+    """
+    from openexecutive.bo import identity as bo_identity
+
+    bo_identity.require(bo_identity.resolve_identity(request), capability)
+
+
 class CreateClientRequest(BaseModel):
     display_name: str = Field(..., max_length=200)
     slug: str | None = Field(default=None, max_length=64)
@@ -64,7 +80,8 @@ def _raise_for(exc: Exception) -> None:
 
 
 @router.get("/clients")
-async def list_clients() -> dict:
+async def list_clients(request: Request) -> dict:
+    _capability(request, "clients:read")
     from openexecutive.cli.fixture_loader import get_fixture_status
     from openexecutive.clients.rotation import rotation_in_progress
     from openexecutive.clients.slots import get_active_client, list_client_slots
@@ -81,7 +98,8 @@ async def list_clients() -> dict:
 
 
 @router.post("/clients")
-async def create_client(req: CreateClientRequest) -> dict:
+async def create_client(req: CreateClientRequest, request: Request) -> dict:
+    _capability(request, "clients:write")
     from openexecutive.clients.slots import ClientSlotError, create_client_slot
     from openexecutive.config import get_settings
 
@@ -101,6 +119,7 @@ async def create_client(req: CreateClientRequest) -> dict:
 
 @router.post("/clients/generate")
 async def generate_client(
+    request: Request,
     description: str = Form(""),
     files: list[UploadFile] = File(  # noqa: B008 — FastAPI multipart marker, mirrors chat.py
         default=[]
@@ -116,6 +135,7 @@ async def generate_client(
     activation. Nothing is persisted here — the UI posts the (possibly edited)
     bundle back to ``POST /clients`` with ``source="generated"``.
     """
+    _capability(request, "clients:write")
     from openexecutive.clients.slots import derive_client_slug
     from openexecutive.config import get_settings
     from openexecutive.fixtures.generator import (
@@ -173,8 +193,9 @@ async def generate_client(
 
 
 @router.post("/clients/save")
-async def save_client() -> dict:
+async def save_client(request: Request) -> dict:
     """Checkpoint the active client's live state into its slot."""
+    _capability(request, "clients:write")
     from openexecutive.clients.slots import ClientSlotError, save_active_client
     from openexecutive.config import get_settings
 
@@ -188,6 +209,7 @@ async def save_client() -> dict:
 @router.post("/clients/{slug}/activate")
 async def activate_client(slug: str, request: Request) -> dict:
     """Switch the live company context to this client (saving the current one)."""
+    _capability(request, "clients:write")
     from openexecutive.clients.slots import ClientSlotError, activate_client_slot
     from openexecutive.config import get_settings
 
@@ -201,12 +223,13 @@ async def activate_client(slug: str, request: Request) -> dict:
 
 
 @router.get("/clients/cockpit")
-async def clients_cockpit() -> dict:
+async def clients_cockpit(request: Request) -> dict:
     """Practice-wide board: one rollup card per client (active first).
 
     Read-only across live DB + parked slot snapshots; one broken slot
     degrades to an error-flagged card rather than failing the board.
     """
+    _capability(request, "clients:read")
     from datetime import UTC, datetime
 
     from openexecutive.clients.cockpit import practice_overview
@@ -220,8 +243,9 @@ async def clients_cockpit() -> dict:
 
 
 @router.patch("/clients/{slug}")
-async def patch_client_meta(slug: str, req: ClientMetaPatch) -> dict:
+async def patch_client_meta(slug: str, req: ClientMetaPatch, request: Request) -> dict:
     """Update a slot's engagement metadata (role, status, renewal, …)."""
+    _capability(request, "clients:write")
     from openexecutive.clients.slots import ClientSlotError, update_client_meta
     from openexecutive.config import get_settings
 
@@ -236,7 +260,8 @@ async def patch_client_meta(slug: str, req: ClientMetaPatch) -> dict:
 
 
 @router.delete("/clients/{slug}")
-async def delete_client(slug: str) -> dict:
+async def delete_client(slug: str, request: Request) -> dict:
+    _capability(request, "clients:write")
     from openexecutive.clients.slots import ClientSlotError, delete_client_slot
     from openexecutive.config import get_settings
 

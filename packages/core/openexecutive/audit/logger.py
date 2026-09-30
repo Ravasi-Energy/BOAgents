@@ -59,6 +59,10 @@ EVENT_TYPES: tuple[str, ...] = (
     "memory_snapshot",      # episodic context + company profile at turn entry
     "committee_review",     # committee-reviewed draft + critiques (pre-existing emit, now declared)
     "peer_memory",          # Honcho per-person memory — prefetch + sync_turn outcomes
+    # Email poller attempt bracket — one row per Executive run for a given
+    # message; its row id brackets the attempt's tool_invocation window so a
+    # retry can attribute (and refuse to repeat) a prior external effect.
+    "email_process_attempt",
 )
 
 

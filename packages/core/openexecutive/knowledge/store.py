@@ -32,7 +32,9 @@ class KnowledgeStore(ABC):
     def get_collection_count(self, collection: str) -> int: ...
 
     @abstractmethod
-    def delete_documents(self, collection: str, where: dict[str, Any]) -> None: ...
+    def delete_documents(
+        self, collection: str, where: dict[str, Any], *, strict: bool = False
+    ) -> None: ...
 
 
 class PersistedEmbeddingConfigError(RuntimeError):
@@ -303,7 +305,20 @@ class ChromaDBStore(KnowledgeStore):
         except Exception:
             return 0
 
-    def delete_documents(self, collection: str, where: dict[str, Any]) -> None:
+    def delete_documents(
+        self, collection: str, where: dict[str, Any], *, strict: bool = False
+    ) -> None:
+        """Delete rows matching ``where``.
+
+        ``strict`` is for client/factory-switch cleanup callers: a failed
+        delete there leaves one company's rows readable under the next
+        company's identity, so ANY failure — not just the persisted-schema
+        refusal — must propagate and abort the transition (the caller's
+        marker/recovery machinery then decides whether the live state is
+        coherent). Runtime callers (per-page sync deletes, route deletes)
+        keep the default tolerant mode: a failed delete is logged and the
+        operation reports what it actually did.
+        """
         try:
             col = self._get_or_create_collection(collection)
             col.delete(where=where)
@@ -314,7 +329,12 @@ class ChromaDBStore(KnowledgeStore):
             # survive a slot switch into client B's hands.
             raise
         except Exception:
-            pass
+            if strict:
+                raise
+            logging.getLogger(__name__).warning(
+                "delete_documents failed for %s (where=%s)",
+                collection, where, exc_info=True,
+            )
 
     def iter_chunk_metadata(self, collection: str) -> list[tuple[str, dict[str, Any]]]:
         """Return every ``(chunk_id, metadata)`` pair in *collection*.
@@ -434,13 +454,17 @@ class ChromaDBStore(KnowledgeStore):
         """Delete and recreate the company_docs collection, clearing all indexed documents."""
         self._drop_and_recreate(self.COMPANY_COLLECTION)
 
-    def delete_notion_docs(self) -> None:
+    def delete_notion_docs(self, *, strict: bool = False) -> None:
         """Drop synced Notion chunks from the isolated collection and any
         leftover COMPANY rows tagged ``type=notion`` (pre-isolation ingest)."""
-        self.delete_documents(collection=self.NOTION_COLLECTION, where={"type": "notion"})
-        self.delete_documents(collection=self.COMPANY_COLLECTION, where={"type": "notion"})
+        self.delete_documents(
+            collection=self.NOTION_COLLECTION, where={"type": "notion"}, strict=strict
+        )
+        self.delete_documents(
+            collection=self.COMPANY_COLLECTION, where={"type": "notion"}, strict=strict
+        )
 
-    def delete_attachment_docs(self) -> None:
+    def delete_attachment_docs(self, *, strict: bool = False) -> None:
         """Drop every inbound attachment chunk, plus any pre-isolation
         leftovers still tagged ``type=attachment`` in COMPANY.
 
@@ -457,5 +481,7 @@ class ChromaDBStore(KnowledgeStore):
         """
         self._drop_and_recreate(self.ATTACHMENT_COLLECTION)
         self.delete_documents(
-            collection=self.COMPANY_COLLECTION, where={"type": "attachment"}
+            collection=self.COMPANY_COLLECTION,
+            where={"type": "attachment"},
+            strict=strict,
         )

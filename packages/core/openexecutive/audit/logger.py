@@ -63,6 +63,10 @@ EVENT_TYPES: tuple[str, ...] = (
     # message; its row id brackets the attempt's tool_invocation window so a
     # retry can attribute (and refuse to repeat) a prior external effect.
     "email_process_attempt",
+    # Poller attempt close row — pairs with the open bracket above
+    # (email_attempt_result:{mid}:{n}); an open attempt without it is an
+    # interrupted turn and must never be retried automatically.
+    "email_attempt_result",
 )
 
 
@@ -502,7 +506,7 @@ class AuditLogger:
                 event.full = {"raw": raw_full}
         return event
 
-    def query(
+    def _filters(
         self,
         *,
         event_type: str | None = None,
@@ -511,12 +515,14 @@ class AuditLogger:
         q: str | None = None,
         since: str | None = None,
         until: str | None = None,
-        limit: int = 100,
-        offset: int = 0,
-    ) -> list[AuditEvent]:
-        limit = max(1, min(limit, 1000))
-        offset = max(0, offset)
-
+        min_id: int | None = None,
+        max_id: int | None = None,
+        details_substr: str | None = None,
+    ) -> tuple[str, list[Any]]:
+        """Shared WHERE builder for query/count. ``min_id``/``max_id``
+        bound the row-id window (a caller that knows its own bracket rows
+        can scan a slice exactly); ``details_substr`` is an escaped LIKE
+        on the serialized details JSON for per-key filtering."""
         clauses: list[str] = []
         params: list[Any] = []
         if event_type:
@@ -534,11 +540,43 @@ class AuditLogger:
         if until:
             clauses.append("ts <= ?")
             params.append(until)
+        if min_id is not None:
+            clauses.append("id > ?")
+            params.append(min_id)
+        if max_id is not None:
+            clauses.append("id < ?")
+            params.append(max_id)
+        if details_substr:
+            clauses.append(r"details_json LIKE ? ESCAPE '\'")
+            params.append(f"%{_escape_like(details_substr)}%")
         if q:
             clauses.append(r"summary LIKE ? ESCAPE '\'")
             params.append(f"%{_escape_like(q)}%")
+        return (("WHERE " + " AND ".join(clauses)) if clauses else "", params)
 
-        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    def query(
+        self,
+        *,
+        event_type: str | None = None,
+        session_id: str | None = None,
+        actor: str | None = None,
+        q: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        min_id: int | None = None,
+        max_id: int | None = None,
+        details_substr: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[AuditEvent]:
+        limit = max(1, min(limit, 1000))
+        offset = max(0, offset)
+
+        where, params = self._filters(
+            event_type=event_type, session_id=session_id, actor=actor, q=q,
+            since=since, until=until, min_id=min_id, max_id=max_id,
+            details_substr=details_substr,
+        )
         sql = (
             f"SELECT id, ts, event_type, session_id, turn_id, actor, summary, details_json, department "
             f"FROM audit_log {where} ORDER BY id DESC LIMIT ? OFFSET ?"
@@ -560,34 +598,38 @@ class AuditLogger:
         q: str | None = None,
         since: str | None = None,
         until: str | None = None,
+        min_id: int | None = None,
+        max_id: int | None = None,
+        details_substr: str | None = None,
     ) -> int:
-        clauses: list[str] = []
-        params: list[Any] = []
-        if event_type:
-            clauses.append("event_type = ?")
-            params.append(event_type)
-        if session_id:
-            clauses.append("session_id = ?")
-            params.append(session_id)
-        if actor:
-            clauses.append("actor = ?")
-            params.append(actor)
-        if since:
-            clauses.append("ts >= ?")
-            params.append(since)
-        if until:
-            clauses.append("ts <= ?")
-            params.append(until)
-        if q:
-            clauses.append(r"summary LIKE ? ESCAPE '\'")
-            params.append(f"%{_escape_like(q)}%")
-
-        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        """Exact COUNT under the same filters as :meth:`query` — never
+        truncated, unlike a query page capped at 1000 rows."""
+        where, params = self._filters(
+            event_type=event_type, session_id=session_id, actor=actor, q=q,
+            since=since, until=until, min_id=min_id, max_id=max_id,
+            details_substr=details_substr,
+        )
         if not self._db_path.exists():
             return 0
         with _get_conn(self._db_path) as conn:
             row = conn.execute(
                 f"SELECT COUNT(*) AS n FROM audit_log {where}", params
+            ).fetchone()
+        return int(row["n"]) if row else 0
+
+    def count_dedup_prefix(self, prefix: str) -> int:
+        """Exact count of dedup markers under ``prefix`` (LIKE-escaped).
+
+        Poller attempt brackets key per ``email_attempt:{mid}:{n}``, so a
+        prefix count is the durable per-message attempt counter — immune
+        to the 1000-row cap that truncates an unbounded ``query`` page.
+        """
+        if not self._db_path.exists():
+            return 0
+        with _get_conn(self._db_path) as conn:
+            row = conn.execute(
+                r"SELECT COUNT(*) AS n FROM audit_dedup WHERE dedup_key LIKE ? ESCAPE '\'",
+                (f"{_escape_like(prefix)}%",),
             ).fetchone()
         return int(row["n"]) if row else 0
 

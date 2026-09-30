@@ -2998,28 +2998,45 @@ integrations:
     ``_mark_read`` leaves the mail unread and retriable, unlike the
     socket-mode adapters (whose resolver replies once and consumes) or
     the webhook channels (which get a 503 and rely on sender retry).
-    Pagination + outcome bookkeeping (REM-AUDIT-01 B1/B2): each cycle
-    collects ALL unread refs before processing, following the
-    workspace-mcp ``page_token`` hint in the ``📄 PAGINATION`` line —
-    bounded by ``bo.mail.poll.max_pages_per_cycle`` (registry, 1–50,
-    default 10). Policy skips (self-sent, automated senders) are
-    CONSUMED via mark-read with an ``email_processed:{id}`` dedup
-    marker — an unread skip otherwise re-occupies every page of every
-    cycle (the starvation the single-page fetch had). ``_handle_email``
-    returns an explicit outcome: ``processed`` / ``skipped`` /
+    Pagination + outcome bookkeeping (REM-AUDIT-01 B1/B2, hardened by
+    REM-AUDIT-03): each cycle collects ALL unread refs before
+    processing, following the workspace-mcp ``page_token`` hint in the
+    ``📄 PAGINATION`` line — bounded by
+    ``bo.mail.poll.max_pages_per_cycle`` (registry, 1–50, default 10).
+    Policy skips (self-sent, automated senders) are CONSUMED via
+    mark-read with an ``email_processed:{id}`` dedup marker — an unread
+    skip otherwise re-occupies every page of every cycle (the
+    starvation the single-page fetch had). ``_handle_email`` returns an
+    explicit outcome: ``processed`` / ``skipped`` /
     ``mark_read_failed`` / ``failed`` / ``uncertain`` /
-    ``failed_final``. A failed Executive turn is never consumed: the
-    message stays unread and is retried within
-    ``bo.mail.processing.max_attempts`` (registry, 1–10, default 3),
-    counted durably in ``email_process_attempt`` journal rows. Before
-    each Executive run an attempt bracket row is committed and
-    re-verified (dedup_lookup) — if a retry's attempt window already
-    contains an externally-visible ``tool_invocation`` (the egress
-    gate's gated tool sets), the outcome is ``uncertain`` and the
-    message is left unread for a human rather than risking a duplicate
-    send. The processed-row dedup marker lands BEFORE mark_read, so a
-    mark-read failure replays only the label change on the next cycle —
-    the Executive never runs twice for one message.
+    ``failed_final`` / ``claimed``. Each attempt is a durable pair of
+    journal rows — an open ``email_process_attempt`` bracket written
+    AND verified before the Executive runs, then an
+    ``email_attempt_result`` close row (``executed`` /
+    ``executive_failed``). The attempt counter is an exact COUNT over
+    the dedup table (``count_dedup_prefix``), never a truncated query
+    page, so buried history can neither reset the budget nor hide
+    evidence. An open attempt with no close row is an interrupted turn:
+    an external effect may have landed and cannot be disproved → the
+    outcome is ``uncertain``, never retried automatically. A
+    closed-failed attempt may retry ONLY after a complete window scan
+    (``_query_all`` pages internally past the 1000-row cap) proves every
+    tool call was read-only per ``orchestrator.tool_effects`` — the
+    central classifier where any unknown/dynamic tool name is
+    conservatively effectful (broadcasts, department posts, unknown
+    MCP verbs all count). An ``email_processed:`` marker whose
+    journal row was lost is likewise uncertain, not success. The claim
+    itself is atomic: the bracket row carries a per-owner nonce so two
+    racing owners on one ``email_attempt:{mid}:{n}`` dedup key cannot
+    both commit — the loser gets a fingerprint conflict and reports
+    ``claimed``. Terminal outcomes (``uncertain`` / ``failed_final``)
+    are fenced provider-side with the ``OE-Terminal`` Gmail label —
+    the message stays UNREAD (never a false success) but the unread
+    query excludes ``-label:OE-Terminal``, so terminally-blocked mail
+    cannot starve legitimate mail queued behind it; a human reconciles
+    by removing the label. The processed-row dedup marker lands BEFORE
+    mark_read, so a mark-read failure replays only the label change on
+    the next cycle — the Executive never runs twice for one message.
   slack: |
     openexecutive.integrations.slack_bot — async Bolt socket-mode
     adapter (``AsyncApp`` + ``AsyncSocketModeHandler``) embedded in the

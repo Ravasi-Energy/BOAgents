@@ -54,6 +54,10 @@ class FakeGateway:
         self.search_args: list[dict[str, Any]] = []
         self.fetched: list[str] = []
         self.marked: list[str] = []
+        self.labeled: list[tuple[str, list[str]]] = []
+        # None → provider "doesn't know" the label yet → the poller must
+        # call manage_gmail_label(create); a string answers list directly.
+        self.labels_response: str | None = None
         self._mark_attempts = 0
 
     async def call_tool(self, payload: dict[str, Any]) -> str:
@@ -62,10 +66,23 @@ class FakeGateway:
         if name.endswith("search_gmail_messages"):
             self.search_args.append(args)
             return self.pages.popleft() if self.pages else ""
+        if name.endswith("list_gmail_labels"):
+            if self.labels_response is not None:
+                return self.labels_response
+            return "No labels found."
+        if name.endswith("manage_gmail_label"):
+            return (
+                "Label created successfully!\n"
+                "Name: OE-Terminal\nID: Label_99"
+            )
         if name.endswith("get_gmail_message_content"):
             self.fetched.append(args["message_id"])
             return self.contents.get(args["message_id"], "")
         if name.endswith("modify_gmail_message_labels"):
+            if args.get("add_label_ids"):
+                # Terminal fence — label add only, message stays UNREAD.
+                self.labeled.append((args["message_id"], args["add_label_ids"]))
+                return "OK"
             self._mark_attempts += 1
             if (
                 self.mark_calls_before_fail is not None
@@ -132,11 +149,12 @@ def isolated_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     )
     poller._processed_ids.clear()
     poller._retry_counts.clear()
-    monkeypatch.setattr(poller, "_EXTERNAL_EFFECT_TOOLS", None)
+    poller._terminal_label_id = None
     yield audit
     set_audit_logger(None)
     poller._processed_ids.clear()
     poller._retry_counts.clear()
+    poller._terminal_label_id = None
 
 
 def _poll(
@@ -181,8 +199,32 @@ def _attempt_row(audit: AuditLogger, message_id: str, session_id: str, n: int) -
         f"Processing attempt {n} for email {message_id}",
         actor="email",
         session_id=session_id,
-        details={"message_id": message_id, "attempt": n},
+        details={"message_id": message_id, "attempt": n, "owner": f"o{n}"},
         dedup_key=f"email_attempt:{message_id}:{n}",
+    )
+
+
+def _close_row(
+    audit: AuditLogger,
+    message_id: str,
+    session_id: str,
+    n: int,
+    result: str = "executive_failed",
+) -> None:
+    """Close an attempt the way _handle_email does — an open attempt with
+    no close row is an interrupted turn and is NEVER retryable."""
+    audit.log(
+        "email_attempt_result",
+        f"Attempt {n} for email {message_id}: {result}",
+        actor="email",
+        session_id=session_id,
+        details={
+            "message_id": message_id,
+            "attempt": n,
+            "owner": f"o{n}",
+            "result": result,
+        },
+        dedup_key=f"email_attempt_result:{message_id}:{n}",
     )
 
 
@@ -357,8 +399,8 @@ def test_mark_read_failure_replays_only_mark_read() -> None:
 
 
 def test_prior_external_effect_refuses_rerun(isolated_state: AuditLogger) -> None:
-    """A prior attempt that already sent mail must never be re-run —
-    reported uncertain, left unread for a human."""
+    """A prior CLOSED-failed attempt whose window contains a send must
+    never be re-run — reported uncertain, left unread for a human."""
     session = "email:t-m1"
     _attempt_row(isolated_state, "m1", session, 1)
     isolated_state.log(
@@ -368,6 +410,22 @@ def test_prior_external_effect_refuses_rerun(isolated_state: AuditLogger) -> Non
         actor="executive",
         details={"tool": "google_workspace__send_gmail_message"},
     )
+    _close_row(isolated_state, "m1", session, 1)
+    gateway = FakeGateway(contents={"m1": _raw_email("a@b.com")})
+    outcome, exec_mock = _handle(gateway)
+    assert outcome == "uncertain"
+    assert exec_mock.await_count == 0
+    assert gateway.marked == []
+
+
+def test_open_attempt_without_close_is_uncertain(
+    isolated_state: AuditLogger,
+) -> None:
+    """RA-B2-01: an attempt bracket with no close row is an interrupted
+    turn — an external effect may have landed and cannot be disproved.
+    Never retried automatically, even with zero tool rows on record."""
+    session = "email:t-m1"
+    _attempt_row(isolated_state, "m1", session, 1)  # no close row
     gateway = FakeGateway(contents={"m1": _raw_email("a@b.com")})
     outcome, exec_mock = _handle(gateway)
     assert outcome == "uncertain"
@@ -376,7 +434,8 @@ def test_prior_external_effect_refuses_rerun(isolated_state: AuditLogger) -> Non
 
 
 def test_prior_attempt_without_effect_retries(isolated_state: AuditLogger) -> None:
-    """A failed attempt that only ran read-only tools is safely retried."""
+    """A closed-failed attempt whose complete window holds only read-only
+    tools is demonstrably effect-free — retry is legitimate."""
     session = "email:t-m1"
     _attempt_row(isolated_state, "m1", session, 1)
     isolated_state.log(
@@ -386,6 +445,7 @@ def test_prior_attempt_without_effect_retries(isolated_state: AuditLogger) -> No
         actor="executive",
         details={"tool": "google_workspace__get_gmail_message_content"},
     )
+    _close_row(isolated_state, "m1", session, 1)
     gateway = FakeGateway(contents={"m1": _raw_email("a@b.com")})
     outcome, exec_mock = _handle(gateway)
     assert outcome == "processed"
@@ -399,6 +459,7 @@ def test_attempt_budget_exhausted_reports_final(isolated_state: AuditLogger) -> 
     session = "email:t-m1"
     for n in range(1, 4):  # registry default max_attempts = 3
         _attempt_row(isolated_state, "m1", session, n)
+        _close_row(isolated_state, "m1", session, n)
     poller._retry_counts.clear()  # "restart": in-process state gone
     gateway = FakeGateway(contents={"m1": _raw_email("a@b.com")})
     outcome, exec_mock = _handle(gateway)
@@ -421,7 +482,9 @@ def test_tool_calls_of_other_messages_do_not_poison_this_one(
         actor="executive",
         details={"tool": "google_workspace__send_gmail_message"},
     )
-    _attempt_row(isolated_state, "m1", session, 1)  # m1's failed attempt, no effects
+    _close_row(isolated_state, "other", session, 1)
+    _attempt_row(isolated_state, "m1", session, 1)
+    _close_row(isolated_state, "m1", session, 1)  # no effects in window
     gateway = FakeGateway(contents={"m1": _raw_email("a@b.com")})
     outcome, exec_mock = _handle(gateway)
     assert outcome == "processed"
@@ -453,3 +516,244 @@ def test_mail_settings_have_bounded_validation() -> None:
 def test_mail_setting_falls_back_to_default_on_store_failure() -> None:
     assert poller._mail_setting("bo.mail.poll.max_pages_per_cycle") == 10
     assert poller._mail_setting("bo.mail.processing.max_attempts") == 3
+
+
+# ------------------------------------------------------- REM-AUDIT-03
+#
+# Reproducerea reziduurilor raportate de auditul SOL02 la head 021f7ec.
+
+
+def test_terminal_messages_fenced_out_of_enumeration(
+    isolated_state: AuditLogger,
+) -> None:
+    """RA-B1-01: a page of terminal (uncertain) mail must not re-occupy
+    the leading unread pages forever — each gets the OE-Terminal label
+    provider-side (stays UNREAD — never a false success), and the unread
+    query itself carries the `-label:` exclusion."""
+    session = "email:t-x"
+    for i in range(3):
+        _attempt_row(isolated_state, f"term{i}", session, 1)  # open → uncertain
+    gateway = FakeGateway(
+        pages=[_page("term0", "term1", "term2", "real1")],
+        contents={
+            "term0": _raw_email("a@b.com"),
+            "term1": _raw_email("a@b.com"),
+            "term2": _raw_email("a@b.com"),
+            "real1": _raw_email("alice@example.com"),
+        },
+    )
+    exec_mock = _poll(gateway)
+    # Every terminal fenced via add_label_ids, none marked read.
+    assert sorted(mid for mid, _ in gateway.labeled) == [
+        "term0", "term1", "term2"
+    ]
+    assert all(ids == ["Label_99"] for _, ids in gateway.labeled)
+    for mid in ("term0", "term1", "term2"):
+        assert mid not in gateway.marked
+    # Legit mail behind them still processed in the same bounded cycle.
+    assert "real1" in gateway.marked
+    assert exec_mock.await_count == 1
+    # The provider query itself excludes the fenced label.
+    assert "-label:OE-Terminal" in gateway.search_args[0]["query"]
+
+
+def test_terminal_label_created_when_missing(
+    isolated_state: AuditLogger,
+) -> None:
+    """First fence on a mailbox without the label: list → miss → create
+    → label applied with the created id."""
+    session = "email:t-x"
+    _attempt_row(isolated_state, "term0", session, 1)
+    calls: list[str] = []
+
+    class G(FakeGateway):
+        async def call_tool(self, payload):  # type: ignore[override]
+            calls.append(payload["name"])
+            return await super().call_tool(payload)
+
+    gateway = G(
+        pages=[_page("term0")],
+        contents={"term0": _raw_email("a@b.com")},
+    )
+    _poll(gateway)
+    assert "google_workspace__list_gmail_labels" in calls
+    assert "google_workspace__manage_gmail_label" in calls
+    assert gateway.labeled == [("term0", ["Label_99"])]
+
+
+def test_orphan_processed_marker_is_uncertain(
+    isolated_state: AuditLogger,
+) -> None:
+    """RA-B2-01a: an orphan `email_processed:` marker (journal lost the
+    row it points to) is NOT proof of success — the message must be
+    fenced uncertain, not mark-read as if processed."""
+    audit = isolated_state
+    row_id = audit.log(
+        "integration_inbound",
+        "Processed email from a@b.com",
+        actor="email",
+        session_id="email:t-m1",
+        details={"channel": "email", "message_id": "m1", "outcome": "processed"},
+        dedup_key="email_processed:m1",
+    )
+    # Simulate journal loss: the row is gone, the marker remains.
+    from openexecutive.audit.logger import _get_conn
+
+    with _get_conn(audit._db_path) as conn:  # noqa: SLF001
+        conn.execute("DELETE FROM audit_log WHERE id = ?", (row_id,))
+    marker = audit.dedup_lookup("email_processed:m1")
+    assert marker is not None and not marker["journal_row_present"]
+
+    gateway = FakeGateway(contents={"m1": _raw_email("a@b.com")})
+    outcome, exec_mock = _handle(gateway)
+    assert outcome == "uncertain"
+    assert exec_mock.await_count == 0
+    assert gateway.marked == []
+
+
+def test_unknown_tool_counts_as_effectful(isolated_state: AuditLogger) -> None:
+    """RA-B2-04: a tool name outside every known read-only set — including
+    broadcast/department dispatch and dynamically registered tools — is
+    conservatively effectful and blocks the retry."""
+    session = "email:t-m1"
+    for i, tool in enumerate((
+        "send_company_broadcast",
+        "send_department_message",
+        "acme_corp__post_webhook",   # unknown dynamic tool
+        "run_workflow",              # internal mutator, not an egress tool
+    )):
+        mid = f"m{i}"
+        _attempt_row(isolated_state, mid, session, 1)
+        isolated_state.log(
+            "tool_invocation",
+            tool,
+            session_id=session,
+            actor="executive",
+            details={"tool": tool},
+        )
+        _close_row(isolated_state, mid, session, 1)
+        gateway = FakeGateway(contents={mid: _raw_email("a@b.com")})
+        outcome, exec_mock = _handle(gateway, message_id=mid)
+        assert outcome == "uncertain", tool
+        assert exec_mock.await_count == 0
+
+
+def test_journal_read_error_is_not_absence(
+    isolated_state: AuditLogger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RA-B2-02: a failing journal read must not count as 'no attempts' —
+    the message defers (failed), Executive never runs."""
+
+    def _boom(*a: Any, **k: Any) -> int:
+        raise RuntimeError("journal corrupt")
+
+    monkeypatch.setattr(
+        isolated_state, "count_dedup_prefix", _boom
+    )
+    gateway = FakeGateway(contents={"m1": _raw_email("a@b.com")})
+    outcome, exec_mock = _handle(gateway)
+    assert outcome == "failed"
+    assert exec_mock.await_count == 0
+    assert gateway.marked == []
+
+
+def test_deep_history_does_not_reset_budget_or_hide_effect(
+    isolated_state: AuditLogger,
+) -> None:
+    """RA-B2-02: with >1000 unrelated rows between the attempt evidence
+    and now, the truncated-window reasoning of the old code would have
+    seen 'no attempts'. The dedup-keyed count still enforces the budget
+    and still finds the effectful tool inside the window."""
+    audit = isolated_state
+    session = "email:t-m1"
+    _attempt_row(audit, "m1", session, 1)
+    audit.log(
+        "tool_invocation",
+        "send_gmail_message",
+        session_id=session,
+        actor="executive",
+        details={"tool": "google_workspace__send_gmail_message"},
+    )
+    _close_row(audit, "m1", session, 1)
+    # Bury the evidence under 1100 unrelated rows in the same session —
+    # the old limit=1000 query would have returned none of the attempt
+    # rows and retried the send.
+    for i in range(1100):
+        audit.log(
+            "tool_invocation",
+            f"noise {i}",
+            session_id=session,
+            actor="executive",
+            details={"tool": "google_workspace__search_gmail_messages"},
+        )
+    gateway = FakeGateway(contents={"m1": _raw_email("a@b.com")})
+    outcome, exec_mock = _handle(gateway)
+    assert outcome == "uncertain"
+    assert exec_mock.await_count == 0
+
+
+def test_concurrent_handle_runs_executive_once(
+    isolated_state: AuditLogger,
+) -> None:
+    """RA-B2-03: two racing handlers for the same message — the atomic
+    dedup claim admits exactly one owner; the loser sees 'claimed' and
+    never runs the Executive. Exactly one external effect possible."""
+    gateway = FakeGateway(contents={"m1": _raw_email("a@b.com")})
+    barrier = asyncio.Event()
+    calls = {"n": 0}
+
+    async def _exec(*a: Any, **k: Any) -> None:
+        calls["n"] += 1
+        barrier.set()
+        await asyncio.sleep(0)  # widen the interleave window
+
+    async def _two() -> list[str]:
+        with (
+            patch.object(poller, "get_settings", return_value=_settings()),
+            patch.object(poller, "_run_executive", new=_exec),
+        ):
+            return await asyncio.gather(
+                poller._handle_email(gateway, "m1", "t-m1", EXEC),
+                poller._handle_email(gateway, "m1", "t-m1", EXEC),
+            )
+
+    outcomes = asyncio.run(_two())
+    assert calls["n"] == 1
+    # Winner processed; loser bailed on the claim or saw the open attempt
+    # — either way no second run, exactly one mark-read.
+    assert "processed" in outcomes
+    assert set(outcomes) - {"processed", "claimed", "uncertain"} == set()
+    assert gateway.marked.count("m1") == 1
+
+
+def test_poll_once_concurrent_cycles_single_effect(
+    isolated_state: AuditLogger,
+) -> None:
+    """RA-B2-03 at the loop level: two gather'd poll_once calls over the
+    same unread page produce exactly one Executive run and one effectful
+    dispatch path — the in-process lock serializes the frontier."""
+    gateway = FakeGateway(
+        pages=[_page("m1"), _page("m1")],
+        contents={"m1": _raw_email("a@b.com")},
+    )
+    calls = {"n": 0}
+
+    async def _exec(*a: Any, **k: Any) -> None:
+        calls["n"] += 1
+        await asyncio.sleep(0.01)
+
+    async def _two_cycles() -> None:
+        with (
+            patch.object(poller, "get_settings", return_value=_settings()),
+            patch.object(poller, "_run_executive", new=_exec),
+            patch(
+                "openexecutive.clients.slots.is_restore_blocked",
+                return_value=False,
+            ),
+        ):
+            await asyncio.gather(
+                poller.poll_once(gateway), poller.poll_once(gateway)
+            )
+
+    asyncio.run(_two_cycles())
+    assert calls["n"] == 1

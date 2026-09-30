@@ -67,6 +67,10 @@ EVENT_TYPES: tuple[str, ...] = (
     # (email_attempt_result:{mid}:{n}); an open attempt without it is an
     # interrupted turn and must never be retried automatically.
     "email_attempt_result",
+    # Durable counter row for a failed content fetch (email_fetch_fail:
+    # {mid}:{n}) — kept in its own dedup family so it never pollutes the
+    # Executive-attempt brackets, but still bounds retries durably.
+    "email_fetch_failed",
 )
 
 
@@ -748,6 +752,13 @@ def log_event(
             session_id = ctx_session
         if turn_id is None:
             turn_id = ctx_turn
+    from openexecutive.audit.context import get_active_attempt_ref
+    attempt_ref = get_active_attempt_ref()
+    if attempt_ref is not None:
+        # Copy, never mutate the caller's dict. Rows emitted inside an
+        # attempt scope — including ones with session_id=NULL — stay
+        # attributable to the exact message/attempt that produced them.
+        details = {**(details or {}), "attempt_ref": attempt_ref}
     try:
         get_audit_logger().log(
             event_type,

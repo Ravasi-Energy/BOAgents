@@ -1,11 +1,12 @@
 """Central side-effect classification for executable tools.
 
 One place decides whether a tool invocation could have produced an
-externally visible (or durable mutating) effect. The email poller's
-duplicate-effect guard relies on it: a retry may only run when every
-prior tool call in the attempt window is provably read-only — anything
-else (mutators, broadcast/department dispatch, skills, and any unknown
-dynamic tool name) is treated conservatively as effectful.
+externally visible (or durable mutating) effect. The classification
+feeds evidence/readback surfaces (operator attribution of audit rows);
+it is NOT an authorization primitive — the email poller's retry policy
+no longer consults tool windows at all (a closed ``executive_failed``
+attempt is ``uncertain`` by construction, because a missing
+``tool_invocation`` row can never prove an effect did not happen).
 
 This is deliberately NOT the gateway's egress roster: the egress sets
 gate *recipient authorization* for a handful of Google tools, while this
@@ -13,14 +14,13 @@ inventory answers a different question — "could this call have changed
 something?". A broadcast to Slack/Discord is not gated by the Gmail
 roster but absolutely is an external effect.
 
-Classification rule: a tool is read-only only if it is on the explicit
-allowlist or its server-prefixed MCP name carries a universally
-read-shaped verb (``search_*``, ``get_*``, ``list_*``, ``read_*``,
-``fetch_*``, ``download_*``, ``check_*``). Everything else — every
-``send_*``, ``create_*``, ``manage_*``, ``delete_*``, ``update_*``,
-``upsert_*``, ``schedule_*``, ``run_*``, ``archive_*``, ``ack_*``,
-broadcast, and any unknown name — is treated as effectful. Unknown is
-never assumed safe.
+Classification rule: a tool is read-only only when its *exact,
+fully-qualified identifier* is explicitly registered below — internal
+Executive tool names in ``_READ_ONLY_INTERNAL`` or attested MCP
+``server__tool`` names in ``_READ_ONLY_MCP``. Verb-shaped prefixes
+(``get_*``, ``list_*``, ``check_*`` …) carry NO weight: a mutator named
+``acme_corp__get_inventory`` must never pass as read-only, and any
+unknown or dynamically-discovered tool is conservatively effectful.
 """
 from __future__ import annotations
 
@@ -41,32 +41,28 @@ _READ_ONLY_INTERNAL: frozenset[str] = frozenset({
     "search_skills",
 })
 
-# MCP tools arrive namespaced as ``{server}__{verb}_{rest}``. Only these
-# verb stems are provably read-shaped on the workspace-mcp surface; a
-# stem outside the list is NOT assumed safe (drafts, shares and label
-# mutations are effects too).
-_READ_ONLY_MCP_VERBS: tuple[str, ...] = (
-    "search_",
-    "get_",
-    "list_",
-    "read_",
-    "fetch_",
-    "download_",
-    "check_",
-)
+# MCP tools arrive namespaced as ``{server}__{tool}``. Only these exact,
+# attested identifiers are read-only — the workspace-mcp Gmail read
+# surface the poller itself drives (contract verified on workspace-mcp
+# 1.21.1). A *name alone* never qualifies a tool: no verb-prefix
+# inference, no substring rules, no per-server wildcard. Every other
+# namespaced tool — drafts, sends, shares, label mutations, and anything
+# discovered dynamically — is effectful by construction.
+_READ_ONLY_MCP: frozenset[str] = frozenset({
+    "google_workspace__search_gmail_messages",
+    "google_workspace__get_gmail_message_content",
+    "google_workspace__get_gmail_attachment_content",
+    "google_workspace__list_gmail_labels",
+})
 
 
 def is_read_only_tool(tool_name: str) -> bool:
-    """True only for provably read-only tools. Unknown → False."""
+    """True only for explicitly registered read-only tools.
+    Unknown or dynamic names → False."""
     name = (tool_name or "").strip()
     if not name:
         return False
-    if name in _READ_ONLY_INTERNAL:
-        return True
-    if "__" in name:
-        _, _, tool = name.partition("__")
-        return any(tool.startswith(v) for v in _READ_ONLY_MCP_VERBS)
-    return False
+    return name in _READ_ONLY_INTERNAL or name in _READ_ONLY_MCP
 
 
 def has_external_effect(tool_name: str) -> bool:

@@ -3013,19 +3013,33 @@ integrations:
     journal rows — an open ``email_process_attempt`` bracket written
     AND verified before the Executive runs, then an
     ``email_attempt_result`` close row (``executed`` /
-    ``executive_failed``). The attempt counter is an exact COUNT over
-    the dedup table (``count_dedup_prefix``), never a truncated query
-    page, so buried history can neither reset the budget nor hide
-    evidence. An open attempt with no close row is an interrupted turn:
-    an external effect may have landed and cannot be disproved → the
-    outcome is ``uncertain``, never retried automatically. A
-    closed-failed attempt may retry ONLY after a complete window scan
-    (``_query_all`` pages internally past the 1000-row cap) proves every
-    tool call was read-only per ``orchestrator.tool_effects`` — the
-    central classifier where any unknown/dynamic tool name is
-    conservatively effectful (broadcasts, department posts, unknown
-    MCP verbs all count). An ``email_processed:`` marker whose
-    journal row was lost is likewise uncertain, not success. The claim
+    ``executive_failed``, committed-verified). The attempt counter is
+    an exact COUNT over the dedup table (``count_dedup_prefix``), never
+    a truncated query page, so buried history can neither reset the
+    budget nor hide evidence. REM-AUDIT-07 removed the shared-session
+    window scan entirely: once any Executive attempt row exists the
+    message is ``uncertain`` — open-without-close (interrupted turn),
+    orphaned/malformed evidence, ``executive_failed`` (a missing
+    ``tool_invocation`` row can never prove zero effects; the write is
+    post-dispatch and best-effort), or ``executed`` without its
+    processed marker. Auto-retry after an Executive turn is gone by
+    design — fenced for a human, with a machine-readable ``reason`` in
+    the outcome row. Claim identity is message-scoped and purely
+    durable: ``email_attempt:{mid}:{n}`` with ``n`` from the journal
+    count only (no volatile in-process counters), so two processes
+    with divergent histories cannot fork the key space — BEGIN
+    IMMEDIATE serializes them and the loser reports ``claimed``
+    without consuming an attempt. Failed content fetches are counted
+    durably in a separate dedup family (``email_fetch_fail:{mid}:{n}``
+    → ``email_fetch_failed`` rows), bounded by
+    ``bo.mail.processing.max_attempts``. Inside the attempt,
+    ``audit.context.attempt_scope`` stamps every emitted row —
+    including ``session_id=NULL`` broadcast rows — with the explicit
+    ``attempt_ref`` (``{mid}:{n}:{owner}``) for operator attribution.
+    An ``email_processed:`` marker whose
+    journal row was lost is likewise uncertain, not success; a policy
+    skip whose marker cannot be proven committed defers instead of
+    marking read. The claim
     itself is atomic: the bracket row carries a per-owner nonce so two
     racing owners on one ``email_attempt:{mid}:{n}`` dedup key cannot
     both commit — the loser gets a fingerprint conflict and reports

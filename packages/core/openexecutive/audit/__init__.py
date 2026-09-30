@@ -5,8 +5,10 @@ tool invocations, scheduled actions, alerts, inbound integration events)
 into a SQLite table for later review and search.
 """
 from openexecutive.audit.context import (
+    attempt_scope,
     bind_turn,
     clear_turn,
+    get_active_attempt_ref,
     get_active_ids,
     get_active_session_id,
     get_active_turn_id,
@@ -23,8 +25,10 @@ from openexecutive.audit.logger import (
 __all__ = [
     "AuditEvent",
     "AuditLogger",
+    "attempt_scope",
     "bind_turn",
     "clear_turn",
+    "get_active_attempt_ref",
     "get_active_ids",
     "get_active_session_id",
     "get_active_turn_id",

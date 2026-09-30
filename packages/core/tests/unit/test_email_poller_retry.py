@@ -10,11 +10,13 @@ mark-read so they stop occupying the unread window.
 
 B2 — the pre-fix handler ran ``_mark_read`` unconditionally after the
 Executive call, so a failed turn consumed the message silently. The fix
-returns an explicit outcome per message: failures stay unread and are
-retried within a bounded attempt budget (persisted in the audit journal
-so it survives restarts), and a prior attempt that already produced an
-externally-visible tool call is never re-run — it is reported
-``uncertain`` for a human instead of risking a duplicate send.
+returns an explicit outcome per message: pre-Executive failures (fetch
+glitches, journal outages) stay unread and are retried within a bounded
+DURABLE attempt budget (``email_fetch_fail:`` markers — never volatile
+in-process counters), while any message that ever started an Executive
+turn is terminal ``uncertain`` once it fails: a missing tool_invocation
+row cannot prove zero effects, so automatic resubmit was removed —
+a human reconciles fenced uncertain mail.
 """
 from __future__ import annotations
 
@@ -148,12 +150,10 @@ def isolated_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         "openexecutive.bo.db.DB_PATH", tmp_path / "nonexistent-bo.db"
     )
     poller._processed_ids.clear()
-    poller._retry_counts.clear()
     poller._terminal_label_id = None
     yield audit
     set_audit_logger(None)
     poller._processed_ids.clear()
-    poller._retry_counts.clear()
     poller._terminal_label_id = None
 
 
@@ -339,30 +339,46 @@ def test_restore_block_mid_cycle_leaves_rest_unread() -> None:
 # ---------------------------------------------------------------- B2
 
 
-def test_executive_failure_leaves_message_unread_and_retried() -> None:
-    """B2 core: a failed Executive turn must NOT consume the message —
-    no mark-read, and the next cycle retries it."""
+def test_executive_failure_is_uncertain_and_never_retried() -> None:
+    """B2 core + RA-B2-05: a failed Executive turn must NOT consume the
+    message — and must NOT be retried either. A missing tool_invocation
+    row can never prove no external effect landed (the journal write is
+    post-dispatch and best-effort), so the honest outcome is uncertain:
+    unread, fenced, left for a human. Auto-retry is deliberately gone."""
     gateway = FakeGateway(
         contents={"m1": _raw_email("a@b.com")},
     )
     failing = AsyncMock(side_effect=RuntimeError("LLM exploded"))
     outcome, _ = _handle(gateway, run_exec=failing)
-    assert outcome == "failed"
+    assert outcome == "uncertain"
     assert gateway.marked == []
 
-    # Retry on a later cycle succeeds and only then is it consumed.
+    # A later cycle re-evaluates: the closed executive_failed attempt is
+    # terminal — the Executive never runs for this message again.
     outcome, ok = _handle(gateway)
-    assert outcome == "processed"
-    assert ok.await_count == 1
-    assert gateway.marked == ["m1"]
+    assert outcome == "uncertain"
+    assert ok.await_count == 0
+    assert gateway.marked == []
 
 
-def test_empty_fetch_is_not_consumed() -> None:
+def test_empty_fetch_is_not_consumed(isolated_state: AuditLogger) -> None:
+    """An empty fetch stays unread and retriable — and is now counted
+    DURABLY (email_fetch_fail marker), so the bound survives restarts
+    and cannot diverge across processes."""
     gateway = FakeGateway(contents={"m1": ""})
     outcome, exec_mock = _handle(gateway)
     assert outcome == "failed"
     assert exec_mock.await_count == 0
     assert gateway.marked == []
+    assert isolated_state.count_dedup_prefix("email_fetch_fail:m1:") == 1
+    # Second failure — the journal, not any in-process counter, holds it.
+    outcome2, _ = _handle(gateway)
+    assert outcome2 == "failed"
+    assert isolated_state.count_dedup_prefix("email_fetch_fail:m1:") == 2
+    # Third reaches the registry default budget (3) → terminal.
+    outcome3, _ = _handle(gateway)
+    assert outcome3 == "failed_final"
+    assert isolated_state.count_dedup_prefix("email_fetch_fail:m1:") == 3
 
 
 def test_skip_marks_read_and_journals() -> None:
@@ -433,9 +449,13 @@ def test_open_attempt_without_close_is_uncertain(
     assert gateway.marked == []
 
 
-def test_prior_attempt_without_effect_retries(isolated_state: AuditLogger) -> None:
-    """A closed-failed attempt whose complete window holds only read-only
-    tools is demonstrably effect-free — retry is legitimate."""
+def test_closed_failed_attempt_is_uncertain_even_with_clean_window(
+    isolated_state: AuditLogger,
+) -> None:
+    """RA-B2-05: a closed executive_failed attempt whose window shows only
+    read-only tools is STILL uncertain — a missing tool_invocation row is
+    not proof of zero effects, so the old 'demonstrably clean → retry'
+    path is gone by design. The honest degradation is a human reconcile."""
     session = "email:t-m1"
     _attempt_row(isolated_state, "m1", session, 1)
     isolated_state.log(
@@ -448,19 +468,27 @@ def test_prior_attempt_without_effect_retries(isolated_state: AuditLogger) -> No
     _close_row(isolated_state, "m1", session, 1)
     gateway = FakeGateway(contents={"m1": _raw_email("a@b.com")})
     outcome, exec_mock = _handle(gateway)
-    assert outcome == "processed"
-    assert exec_mock.await_count == 1
+    assert outcome == "uncertain"
+    assert exec_mock.await_count == 0
+    assert gateway.marked == []
 
 
-def test_attempt_budget_exhausted_reports_final(isolated_state: AuditLogger) -> None:
-    """The persisted attempt rows bound retries across restarts — the
-    in-process counter is cleared (restart analogue) and the journal
-    alone must enforce the budget."""
-    session = "email:t-m1"
+def test_fetch_failure_budget_exhausted_reports_final(
+    isolated_state: AuditLogger,
+) -> None:
+    """Durable fetch-failure markers bound retries across restarts — no
+    in-process counter is consulted, so clearing process state (restart
+    analogue) cannot reset the budget."""
+    audit = isolated_state
     for n in range(1, 4):  # registry default max_attempts = 3
-        _attempt_row(isolated_state, "m1", session, n)
-        _close_row(isolated_state, "m1", session, n)
-    poller._retry_counts.clear()  # "restart": in-process state gone
+        audit.log(
+            "email_fetch_failed",
+            f"Content fetch failed for email m1 (failure {n})",
+            actor="email",
+            session_id="email:t-m1",
+            details={"message_id": "m1", "fetch_failure": n},
+            dedup_key=f"email_fetch_fail:m1:{n}",
+        )
     gateway = FakeGateway(contents={"m1": _raw_email("a@b.com")})
     outcome, exec_mock = _handle(gateway)
     assert outcome == "failed_final"
@@ -468,11 +496,13 @@ def test_attempt_budget_exhausted_reports_final(isolated_state: AuditLogger) -> 
     assert gateway.marked == []
 
 
-def test_tool_calls_of_other_messages_do_not_poison_this_one(
+def test_tool_calls_of_other_messages_never_unlock_retry(
     isolated_state: AuditLogger,
 ) -> None:
-    """Attribution is per-message: a send on another mail's attempt window
-    must not poison this message's retry."""
+    """RA-B2-07: two messages sharing one thread/session — m2's bracket
+    interleaves m1's attempt rows. The old session-range window scan
+    misattributed boundaries and could hide m1's effect; now ANY exec
+    attempt on m1 is terminal-uncertain, regardless of what surrounds it."""
     session = "email:t-m1"  # same thread — the hard case
     _attempt_row(isolated_state, "other", session, 1)
     isolated_state.log(
@@ -484,11 +514,12 @@ def test_tool_calls_of_other_messages_do_not_poison_this_one(
     )
     _close_row(isolated_state, "other", session, 1)
     _attempt_row(isolated_state, "m1", session, 1)
-    _close_row(isolated_state, "m1", session, 1)  # no effects in window
+    _close_row(isolated_state, "m1", session, 1)  # executive_failed
     gateway = FakeGateway(contents={"m1": _raw_email("a@b.com")})
     outcome, exec_mock = _handle(gateway)
-    assert outcome == "processed"
-    assert exec_mock.await_count == 1
+    assert outcome == "uncertain"
+    assert exec_mock.await_count == 0
+    assert gateway.marked == []
 
 
 # ------------------------------------------------------- settings bounds
@@ -757,3 +788,205 @@ def test_poll_once_concurrent_cycles_single_effect(
 
     asyncio.run(_two_cycles())
     assert calls["n"] == 1
+
+
+# ------------------------------------------------------- REM-AUDIT-07
+#
+# Fail-closed attempt lifecycle: an Executive attempt row is always
+# terminal (uncertain) — auto-retry is gone. Claim identity is purely
+# durable; evidence rows carry the explicit attempt_ref.
+
+
+def test_deceptive_read_shaped_names_are_effectful() -> None:
+    """RA-B4-01: a mutator behind a get_/list_/check_-shaped MCP name must
+    NEVER classify as read-only — only exact registered identifiers do."""
+    from openexecutive.orchestrator.tool_effects import (
+        has_external_effect,
+        is_read_only_tool,
+    )
+
+    for name in (
+        "acme_corp__get_inventory",
+        "acme_corp__list_things",
+        "acme_corp__check_stock",
+        "acme_corp__fetch_report",
+        "google_workspace__get_secret_keys",  # right prefix, wrong server row
+        "evil__search_and_destroy",
+        "",
+    ):
+        assert not is_read_only_tool(name), name
+        assert has_external_effect(name), name
+
+
+def test_registered_read_only_names_still_classify() -> None:
+    """Positive control: the exact attested identifiers remain read-only."""
+    from openexecutive.orchestrator.tool_effects import (
+        has_external_effect,
+        is_read_only_tool,
+    )
+
+    for name in (
+        "consult_specialist",
+        "web_search",
+        "google_workspace__search_gmail_messages",
+        "google_workspace__get_gmail_message_content",
+        "google_workspace__list_gmail_labels",
+    ):
+        assert is_read_only_tool(name), name
+        assert not has_external_effect(name), name
+
+
+def test_divergent_histories_converge_on_one_claim_key(
+    isolated_state: AuditLogger,
+) -> None:
+    """RA-B2-06: two "processes" with different local histories must race
+    on the SAME durable claim key. Process A suffered a fetch failure
+    (now journaled, not a volatile counter); both then evaluate
+    attempt_count=0 and claim email_attempt:m1:1 — BEGIN IMMEDIATE
+    serializes them, exactly one Executive run."""
+    audit = isolated_state
+    # A's fetch failure — durable, visible to every process.
+    audit.log(
+        "email_fetch_failed",
+        "Content fetch failed for email m1",
+        actor="email",
+        session_id="email:t-m1",
+        details={"message_id": "m1", "fetch_failure": 1},
+        dedup_key="email_fetch_fail:m1:1",
+    )
+    gateway = FakeGateway(contents={"m1": _raw_email("a@b.com")})
+    calls = {"n": 0}
+
+    async def _exec(*a: Any, **k: Any) -> None:
+        calls["n"] += 1
+        await asyncio.sleep(0)
+
+    async def _two() -> list[str]:
+        with (
+            patch.object(poller, "get_settings", return_value=_settings()),
+            patch.object(poller, "_run_executive", new=_exec),
+        ):
+            return await asyncio.gather(
+                poller._handle_email(gateway, "m1", "t-m1", EXEC),
+                poller._handle_email(gateway, "m1", "t-m1", EXEC),
+            )
+
+    outcomes = asyncio.run(_two())
+    assert calls["n"] == 1
+    assert "processed" in outcomes
+    # ONE attempt marker — divergent in-process counters cannot fork the
+    # key space any more (there are none).
+    assert audit.count_dedup_prefix("email_attempt:m1:") == 1
+    assert gateway.marked.count("m1") == 1
+
+
+def test_attempt_ref_stamped_on_turn_rows(
+    isolated_state: AuditLogger,
+) -> None:
+    """RA-B4-02 evidence fix: rows emitted inside the attempt scope —
+    including ones with session_id NULL — carry the explicit
+    attempt_ref for operator attribution."""
+    from openexecutive.audit import log_event
+
+    async def _exec_with_orphan_row(*a: Any, **k: Any) -> None:
+        # A broadcast-style emit with NO bound turn context.
+        log_event(
+            "tool_invocation",
+            "send_company_broadcast",
+            actor="executive",
+            details={"tool": "send_company_broadcast"},
+        )
+
+    gateway = FakeGateway(contents={"m1": _raw_email("a@b.com")})
+    outcome, _ = _handle(gateway, run_exec=AsyncMock(side_effect=_exec_with_orphan_row))
+    assert outcome == "processed"
+
+    rows = isolated_state.query(event_type="tool_invocation", limit=10)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.session_id is None  # the broadcast-style NULL session
+    ref = (row.details or {}).get("attempt_ref")
+    assert ref is not None and ref.startswith("m1:1:")
+
+
+def test_uncommitted_close_row_is_uncertain(
+    isolated_state: AuditLogger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An Executive success whose close row the journal swallows
+    (log()→None) must NOT be presented as processed — the next-cycle
+    evidence is an open attempt, i.e. uncertain. Fail closed now."""
+    real_log = isolated_state.log
+
+    def _swallow_close(event_type: str, *a: Any, **k: Any) -> Any:
+        if event_type == "email_attempt_result":
+            return None
+        return real_log(event_type, *a, **k)
+
+    monkeypatch.setattr(isolated_state, "log", _swallow_close)
+    gateway = FakeGateway(contents={"m1": _raw_email("a@b.com")})
+    outcome, exec_mock = _handle(gateway)
+    assert outcome == "uncertain"
+    assert exec_mock.await_count == 1
+    assert gateway.marked == []
+
+
+def test_uncommitted_processed_marker_is_uncertain(
+    isolated_state: AuditLogger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """log()→None on the email_processed marker must not degrade to a
+    silent consume — no mark-read without durable proof of processing."""
+    real_log = isolated_state.log
+
+    def _swallow_marker(event_type: str, *a: Any, **k: Any) -> Any:
+        if k.get("dedup_key") == "email_processed:m1":
+            return None
+        return real_log(event_type, *a, **k)
+
+    monkeypatch.setattr(isolated_state, "log", _swallow_marker)
+    gateway = FakeGateway(contents={"m1": _raw_email("a@b.com")})
+    outcome, exec_mock = _handle(gateway)
+    assert outcome == "uncertain"
+    assert exec_mock.await_count == 1
+    assert gateway.marked == []
+
+
+def test_skip_without_durable_marker_stays_unread(
+    isolated_state: AuditLogger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A policy skip whose marker never committed must defer — marking
+    read without evidence would make the mail vanish with no trace."""
+    real_log = isolated_state.log
+
+    def _swallow_marker(event_type: str, *a: Any, **k: Any) -> Any:
+        if k.get("dedup_key") == "email_processed:m1":
+            return None
+        return real_log(event_type, *a, **k)
+
+    monkeypatch.setattr(isolated_state, "log", _swallow_marker)
+    gateway = FakeGateway(contents={"m1": _raw_email(EXEC)})  # self-sent
+    outcome, exec_mock = _handle(gateway)
+    assert outcome == "failed"
+    assert exec_mock.await_count == 0
+    assert gateway.marked == []
+
+
+def test_null_session_tool_row_does_not_unlock_retry(
+    isolated_state: AuditLogger,
+) -> None:
+    """RA-B4-02: a broadcast-style tool row with session_id NULL was
+    invisible to the old session-range window scan and unlocked a retry.
+    Attempt presence alone now decides — never the window."""
+    session = "email:t-m1"
+    _attempt_row(isolated_state, "m1", session, 1)
+    isolated_state.log(
+        "tool_invocation",
+        "send_company_broadcast",
+        actor="executive",
+        session_id=None,  # emitted outside a bound turn
+        details={"tool": "send_company_broadcast"},
+    )
+    _close_row(isolated_state, "m1", session, 1)
+    gateway = FakeGateway(contents={"m1": _raw_email("a@b.com")})
+    outcome, exec_mock = _handle(gateway)
+    assert outcome == "uncertain"
+    assert exec_mock.await_count == 0

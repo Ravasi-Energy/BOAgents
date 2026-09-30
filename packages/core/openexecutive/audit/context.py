@@ -34,6 +34,16 @@ _audit_session_id: ContextVar[str | None] = ContextVar(
 _audit_turn_id: ContextVar[str | None] = ContextVar(
     "audit_turn_id", default=None
 )
+# Explicit attempt identity for frontier work (email poller processing
+# attempts). Stamped onto `details["attempt_ref"]` by log_event so every
+# row emitted inside the attempt — including ones with session_id=NULL,
+# e.g. a broadcast dispatched outside a bound turn — can be attributed
+# back to the exact message/attempt/owner that produced it. Retry
+# decisions never consult these rows; the ref exists for evidence and
+# operator readback.
+_audit_attempt_ref: ContextVar[str | None] = ContextVar(
+    "audit_attempt_ref", default=None
+)
 
 
 def get_active_ids() -> tuple[str | None, str | None]:
@@ -47,6 +57,24 @@ def get_active_session_id() -> str | None:
 
 def get_active_turn_id() -> str | None:
     return _audit_turn_id.get()
+
+
+def get_active_attempt_ref() -> str | None:
+    return _audit_attempt_ref.get()
+
+
+@contextlib.contextmanager
+def attempt_scope(ref: str | None) -> Iterator[None]:
+    """Bind the explicit attempt identity for the duration of a `with`
+    block — same save/restore discipline as set_turn(). Emitted rows get
+    `details["attempt_ref"]` via log_event; callers that write through
+    AuditLogger.log() directly carry the ref in their own details."""
+    prior = _audit_attempt_ref.get()
+    _audit_attempt_ref.set(ref)
+    try:
+        yield
+    finally:
+        _audit_attempt_ref.set(prior)
 
 
 def bind_turn(*, session_id: str | None, turn_id: str | None) -> None:

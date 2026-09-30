@@ -35,10 +35,6 @@ POLL_INTERVAL_SECONDS = get_settings().email_poll_interval_seconds
 # _PROCESSED_DEDUP_PREFIX / _ATTEMPT_EVENT below.
 _processed_ids: set[str] = set()
 
-# In-process attempt counter — complements the persisted attempt rows (an
-# executive-free failure like an empty fetch leaves no attempt row).
-_retry_counts: dict[str, int] = {}
-
 _SKIP_SENDERS = ("noreply", "no-reply", "mailer-daemon", "postmaster", "do-not-reply")
 
 # Pagination contract — verified against workspace-mcp 1.21.1
@@ -51,9 +47,14 @@ _PAGE_TOKEN_RE = re.compile(r"page_token='([^']+)")
 # Journal evidence types emitted by this module.
 _ATTEMPT_EVENT = "email_process_attempt"
 _RESULT_EVENT = "email_attempt_result"
+_FETCH_FAIL_EVENT = "email_fetch_failed"
 _PROCESSED_DEDUP_PREFIX = "email_processed:"
 _ATTEMPT_DEDUP_PREFIX = "email_attempt:"
 _RESULT_DEDUP_PREFIX = "email_attempt_result:"
+# Failed content fetches are counted durably in their own dedup family —
+# never mixed into the Executive-attempt brackets (an email_attempt row
+# means the turn ran, and the effect question becomes unanswerable).
+_FETCH_FAIL_DEDUP_PREFIX = "email_fetch_fail:"
 
 # Provider-side durable fence for terminal states (uncertain/failed_final):
 # a real Gmail label, added to the message but never marking it read. The
@@ -424,8 +425,6 @@ async def poll_once(gateway: MCPGateway) -> None:
         # happened, so the Executive is never re-run for it.
         if outcome in ("processed", "skipped", "uncertain", "failed_final"):
             _processed_ids.add(mid)
-        elif outcome == "failed":
-            _retry_counts[mid] = _retry_counts.get(mid, 0) + 1
         if outcome in ("uncertain", "failed_final"):
             # Provider-side fence so the terminal message stops occupying
             # the leading unread pages. It stays unread — never a false
@@ -450,31 +449,35 @@ def _query_all(
 
 
 def _attempts_state(
-    audit_logger: Any, message_id: str, session_id: str, max_attempts: int
-) -> tuple[str, int]:
+    audit_logger: Any, message_id: str, max_attempts: int
+) -> tuple[str, int, str]:
     """Evaluate this message's durable attempt lifecycle.
 
-    Returns ``(state, next_attempt_no)`` where state is:
+    Returns ``(state, next_attempt_no, reason)`` where state is:
 
-    ``"clean"``     — no attempts yet, or every prior attempt is CLOSED
-                      with result=executive_failed AND a complete window
-                      scan proves no effectful tool ran. Retry is
-                      legitimate: absence of effect is demonstrated.
-    ``"uncertain"`` — an attempt row exists without its close row
-                      (interrupted mid-turn → an effect may have landed),
-                      a marker/close row is orphaned (the journal lost the
-                      referenced evidence), or a prior attempt's window
-                      contains a non-read-only tool call. NEVER retried
-                      automatically — a human reconciles.
-    ``"exhausted"`` — the durable attempt budget is spent.
+    ``"clean"``     — no Executive attempt exists yet and the durable
+                      fetch-failure budget is not spent. Only then is a
+                      first attempt legitimate.
+    ``"uncertain"`` — an Executive attempt row exists: open-without-close
+                      (interrupted mid-turn), orphaned/malformed evidence,
+                      ``executive_failed`` (a missing tool_invocation row
+                      can NEVER prove no effect landed — the journal
+                      write is post-dispatch and best-effort), or
+                      ``executed`` without its processed marker. NEVER
+                      retried automatically — a human reconciles.
+    ``"exhausted"`` — the durable failure budget is spent.
     ``"failed"``    — the journal could not be read; nothing may be
                       inferred, so the message simply stays unread.
 
-    Per-message state lives in the dedup-keyed bracket rows themselves
-    (``email_attempt:{mid}:{n}`` opens, ``email_attempt_result:{mid}:{n}``
-    closes) — counts come from COUNT over the dedup table and every
-    marker read propagates errors, so history truncation can neither
-    reset the budget nor hide an effect.
+    Attempt identity is message-scoped and fully durable: the claim key
+    is ``email_attempt:{mid}:{n}`` with ``n`` derived ONLY from the
+    journal's attempt-marker count — never from volatile in-process
+    state — so two processes with divergent histories converge on the
+    same key and BEGIN IMMEDIATE serializes them (RA-B2-06). No
+    session-wide row-range inference is used anywhere: a shared
+    session_id cannot misattribute one message's rows to another
+    (RA-B2-07), and a NULL-session tool row can never become invisible
+    evidence (RA-B4-02).
     """
     try:
         attempt_count = audit_logger.count_dedup_prefix(
@@ -485,22 +488,36 @@ def _attempts_state(
             "journal unreadable counting attempts for message=%s — "
             "deferring (unknown is not absent)", message_id,
         )
-        return "failed", 0
+        return "failed", 0, "journal_unreadable"
 
     if attempt_count == 0:
-        prior = _retry_counts.get(message_id, 0)
-        if prior >= max_attempts:
-            return "exhausted", prior + 1
-        return "clean", prior + 1
+        # No Executive turn ever started for this message — the only
+        # durable failures to account for are content-fetch failures.
+        try:
+            fetch_fails = audit_logger.count_dedup_prefix(
+                f"{_FETCH_FAIL_DEDUP_PREFIX}{message_id}:"
+            )
+        except Exception:
+            logger.warning(
+                "journal unreadable counting fetch failures for "
+                "message=%s — deferring", message_id,
+            )
+            return "failed", 0, "journal_unreadable"
+        if fetch_fails >= max_attempts:
+            return "exhausted", fetch_fails + 1, "fetch_attempts_exhausted"
+        return "clean", 1, ""
 
-    # Fetch this message's attempt rows in id order — complete scan keyed
-    # on the exact details JSON substring, never a session-wide page.
+    # Any Executive attempt row means a turn ran for this message. Every
+    # completion state below is terminal-uncertain: whether an external
+    # effect landed is unprovable from journal contents alone, because a
+    # tool_invocation row can be silently absent (best-effort write after
+    # the call returned). We still read the rows to report a precise
+    # operator-facing reason.
     try:
         attempts = sorted(
             _query_all(
                 audit_logger,
                 event_type=_ATTEMPT_EVENT,
-                session_id=session_id,
                 details_substr=f'"message_id": "{message_id}"',
             ),
             key=lambda e: e.id,
@@ -510,38 +527,17 @@ def _attempts_state(
             "journal unreadable reading attempts for message=%s — "
             "deferring (unknown is not absent)", message_id,
         )
-        return "failed", 0
+        return "failed", 0, "journal_unreadable"
 
     if len(attempts) != attempt_count:
         # A claim marker exists whose attempt row the journal lost —
-        # an attempt ran whose window cannot be located → unknown.
-        return "uncertain", attempt_count + 1
-
-    # Boundaries in the shared session stream: a tool_invocation inside
-    # (open_id, next_bracket_or_close_id) belongs to that attempt.
-    try:
-        session_brackets = sorted(
-            e.id
-            for e in _query_all(
-                audit_logger,
-                event_type=_ATTEMPT_EVENT,
-                session_id=session_id,
-            )
-        )
-    except Exception:
-        logger.warning(
-            "journal unreadable reading session brackets for "
-            "message=%s — deferring", message_id,
-        )
-        return "failed", 0
-
-    from openexecutive.orchestrator.tool_effects import has_external_effect
+        # an attempt ran whose evidence cannot be located → unknown.
+        return "uncertain", attempt_count + 1, "attempt_evidence_lost"
 
     for attempt in attempts:
         n = int(attempt.details.get("attempt") or 0)
         if n <= 0:
-            # Malformed bracket: cannot order the window → unknown.
-            return "uncertain", attempt_count + 1
+            return "uncertain", attempt_count + 1, "malformed_attempt_row"
         try:
             close = audit_logger.dedup_lookup(
                 f"{_RESULT_DEDUP_PREFIX}{message_id}:{n}"
@@ -551,12 +547,12 @@ def _attempts_state(
                 "journal unreadable reading attempt result for "
                 "message=%s attempt=%d — deferring", message_id, n,
             )
-            return "failed", 0
+            return "failed", 0, "journal_unreadable"
         if close is None or not close.get("journal_row_present"):
-            # Open-without-close (interrupted mid-turn) or an orphaned
-            # close marker: whether an external effect landed is
-            # unprovable → UNKNOWN, blocked for auto-retry.
-            return "uncertain", attempt_count + 1
+            # Open-without-close (interrupted mid-turn, dead owner) or an
+            # orphaned close marker — an effect may have landed and no
+            # lease/expiry may downgrade that to retryable.
+            return "uncertain", attempt_count + 1, "open_or_orphaned_attempt"
         try:
             close_row = audit_logger.get(close["audit_row_id"])
         except Exception:
@@ -564,42 +560,21 @@ def _attempts_state(
         if close_row is None:
             # Marker points at a row the journal can no longer return —
             # incomplete evidence is unknown, never retryable.
-            return "uncertain", attempt_count + 1
+            return "uncertain", attempt_count + 1, "close_row_lost"
         result = (close_row.details or {}).get("result")
         if result == "executed":
             # Executive completed but the processed marker did not
             # survive/land — replaying would duplicate its effects.
-            return "uncertain", attempt_count + 1
-        if result != "executive_failed":
-            return "uncertain", attempt_count + 1
-        upper = next(
-            (b for b in session_brackets if b > attempt.id),
-            close["audit_row_id"],
-        )
-        upper = min(upper, close["audit_row_id"] + 1)
-        try:
-            window_tools = _query_all(
-                audit_logger,
-                event_type="tool_invocation",
-                session_id=session_id,
-                min_id=attempt.id,
-                max_id=upper,
-            )
-        except Exception:
-            logger.warning(
-                "journal unreadable scanning attempt window for "
-                "message=%s — treating as uncertain", message_id,
-            )
-            return "uncertain", attempt_count + 1
-        for tool_row in window_tools:
-            tool_name = str((tool_row.details or {}).get("tool") or "")
-            if has_external_effect(tool_name):
-                return "uncertain", attempt_count + 1
+            return "uncertain", attempt_count + 1, "executed_without_marker"
+        if result == "executive_failed":
+            # The turn started and failed; absent tool rows are NOT proof
+            # of zero effects (RA-B2-05). Auto-retry ends here.
+            return "uncertain", attempt_count + 1, "executive_failed_unproven"
+        return "uncertain", attempt_count + 1, "unknown_attempt_result"
 
-    next_no = max(attempt_count, _retry_counts.get(message_id, 0)) + 1
-    if next_no > max_attempts:
-        return "exhausted", next_no
-    return "clean", next_no
+    # Unreachable — every attempt outcome maps to a state above — but
+    # never fall through to clean on inconsistent evidence.
+    return "uncertain", attempt_count + 1, "inconsistent_attempt_state"
 
 
 def _claim_attempt(
@@ -654,10 +629,17 @@ def _close_attempt(
     attempt_no: int,
     owner: str,
     result: str,
-) -> None:
-    """Write the attempt's close row (``executed``/``executive_failed``).
-    Best-effort: if it does not commit, the next cycle sees an open
-    attempt and fails closed as ``uncertain`` — never as retryable."""
+) -> bool:
+    """Write the attempt's close row (``executed``/``executive_failed``)
+    and prove it committed durably under our owner nonce.
+
+    Returns True only when the dedup marker exists, its journal row is
+    live, and the row is ours. ``log()`` returns None on failure instead
+    of raising — a swallowed write must never be read as "nothing
+    happened": the caller maps an unproven close to ``uncertain``, and an
+    orphaned open attempt also fails closed as ``uncertain`` next cycle.
+    """
+    dedup_key = f"{_RESULT_DEDUP_PREFIX}{message_id}:{attempt_no}"
     audit_logger.log(
         _RESULT_EVENT,
         f"Attempt {attempt_no} for email {message_id}: {result}",
@@ -669,8 +651,89 @@ def _close_attempt(
             "owner": owner,
             "result": result,
         },
-        dedup_key=f"{_RESULT_DEDUP_PREFIX}{message_id}:{attempt_no}",
+        dedup_key=dedup_key,
     )
+    try:
+        marker = audit_logger.dedup_lookup(dedup_key)
+    except Exception:
+        return False
+    if marker is None or not marker.get("journal_row_present"):
+        return False
+    try:
+        row = audit_logger.get(marker["audit_row_id"])
+    except Exception:
+        return False
+    return bool(row and (row.details or {}).get("owner") == owner)
+
+
+def _record_fetch_failure(
+    audit_logger: Any,
+    message_id: str,
+    session_id: str,
+    max_attempts: int,
+) -> str:
+    """Account durably for a failed/empty content fetch. Returns the
+    outcome to report: ``failed`` (retriable), ``failed_final`` (budget
+    spent — fenced for a human), or ``uncertain`` when an Executive
+    attempt already exists (its lifecycle governs; a transient fetch
+    failure must not restart or re-label that history)."""
+    try:
+        if audit_logger.count_dedup_prefix(
+            f"{_ATTEMPT_DEDUP_PREFIX}{message_id}:"
+        ) > 0:
+            return "uncertain"
+        prior = audit_logger.count_dedup_prefix(
+            f"{_FETCH_FAIL_DEDUP_PREFIX}{message_id}:"
+        )
+    except Exception:
+        logger.warning(
+            "journal unreadable recording fetch failure for message=%s — "
+            "deferring (unknown is not absent)", message_id,
+        )
+        return "failed"
+    dedup_key = f"{_FETCH_FAIL_DEDUP_PREFIX}{message_id}:{prior + 1}"
+    audit_logger.log(
+        _FETCH_FAIL_EVENT,
+        f"Content fetch failed for email {message_id} "
+        f"(failure {prior + 1})",
+        actor="email",
+        session_id=session_id,
+        details={
+            "message_id": message_id,
+            "fetch_failure": prior + 1,
+            "owner": uuid.uuid4().hex,
+        },
+        dedup_key=dedup_key,
+    )
+    try:
+        marker = audit_logger.dedup_lookup(dedup_key)
+        committed = marker is not None and marker.get("journal_row_present")
+    except Exception:
+        committed = False
+    total = prior + 1 if committed else prior
+    if total >= max_attempts:
+        from openexecutive.audit import log_event as audit_log
+
+        audit_log(
+            "integration_inbound",
+            f"Email fetch gave up for message {message_id} after "
+            f"{total} failed fetch attempt(s)",
+            actor="email",
+            session_id=session_id,
+            details={
+                "channel": "email",
+                "message_id": message_id,
+                "outcome": "failed_final",
+                "reason": "fetch_attempts_exhausted",
+                "attempts": total,
+            },
+        )
+        logger.warning(
+            "message=%s exceeded the fetch attempt budget (%d) — left "
+            "unread for human review", message_id, max_attempts,
+        )
+        return "failed_final"
+    return "failed"
 
 
 async def _consume_skipped(
@@ -689,9 +752,11 @@ async def _consume_skipped(
     ``email_processed:`` dedup marker is written for the same reason — the
     skip decision is terminal.
     """
-    from openexecutive.audit import log_event as audit_log
+    from openexecutive.audit import get_audit_logger
 
-    audit_log(
+    audit_logger = get_audit_logger()
+    dedup_key = f"{_PROCESSED_DEDUP_PREFIX}{message_id}"
+    audit_logger.log(
         "integration_inbound",
         f"Skipped inbound email {message_id} ({reason})",
         actor="email",
@@ -702,8 +767,24 @@ async def _consume_skipped(
             "from": from_addr,
             "outcome": reason,
         },
-        dedup_key=f"{_PROCESSED_DEDUP_PREFIX}{message_id}",
+        dedup_key=dedup_key,
     )
+    # Consume ONLY if the marker is provably committed — marking read
+    # without durable evidence would make a skipped mail vanish with no
+    # trace (a swallowed log() write must never become "nothing happened").
+    try:
+        marker = audit_logger.dedup_lookup(dedup_key)
+        marker_committed = bool(
+            marker is not None and marker.get("journal_row_present")
+        )
+    except Exception:
+        marker_committed = False
+    if not marker_committed:
+        logger.warning(
+            "skip evidence for message=%s not durable — deferring instead "
+            "of consuming without a trace", message_id,
+        )
+        return "failed"
     return "skipped" if await _mark_read(gateway, message_id, user_email) else "mark_read_failed"
 
 
@@ -720,14 +801,16 @@ async def _handle_email(
     ``mark_read_failed`` Executive ran (or journal already proves it did)
                          but the provider refused the label change — the
                          dedup marker prevents a duplicate run next cycle.
-    ``failed``           Transient/executive failure — message stays unread
-                         and retriable within the bounded attempt budget.
-    ``uncertain``        Prior attempt evidence is incomplete (open
-                         bracket, orphan marker, lost close row) or the
-                         attempt window contains a non-read-only tool
-                         call — never re-run automatically; fenced with
-                         the provider-side OE-Terminal label.
-    ``failed_final``     Attempt budget exhausted — stays unread, fenced.
+    ``failed``           Transient failure BEFORE any Executive turn —
+                         fetch glitch or journal unreadable — retriable
+                         within the bounded durable budget.
+    ``uncertain``        An Executive attempt exists (open, closed
+                         failed, executed-without-marker) or required
+                         evidence could not be committed — never re-run
+                         automatically; fenced with the provider-side
+                         OE-Terminal label for a human to reconcile.
+    ``failed_final``     Durable failure budget exhausted — stays
+                         unread, fenced.
     ``claimed``          A concurrent owner holds the attempt claim —
                          not ours to run; re-evaluated next cycle.
     """
@@ -788,10 +871,19 @@ async def _handle_email(
         logger.debug("get_content raw=<empty>")
 
     # An empty fetch is a transient provider glitch, not a decision — the
-    # message must stay unread and retriable rather than be consumed unseen.
+    # message must stay unread and retriable rather than be consumed
+    # unseen. The failure is accounted durably (never by volatile
+    # in-process counters) so the bound survives restarts and converges
+    # across processes; a pre-existing Executive attempt makes the
+    # message uncertain instead — its lifecycle decides, not this fetch.
     if not raw or not raw.strip():
         logger.warning("empty content for message=%s", message_id)
-        return "failed"
+        return _record_fetch_failure(
+            audit_logger,
+            message_id,
+            f"email:{thread_id}" if thread_id else "email:unparsed",
+            _mail_setting("bo.mail.processing.max_attempts"),
+        )
 
     # Minimal guard: skip self-sent (prevents reply loops) and known automated senders.
     from_line = next((ln for ln in raw.splitlines() if ln.lower().startswith("from:")), "")
@@ -869,14 +961,17 @@ async def _handle_email(
     )
 
     # Durable per-message attempt lifecycle (open row + close row, both
-    # dedup-keyed and journal-verified). An open attempt without a close
-    # row is an interrupted turn — an external effect may have landed —
-    # so it is never retried automatically. A closed-failed attempt may
-    # retry ONLY when a complete window scan proves every tool call it
-    # made was read-only: absence of evidence is not evidence of absence.
+    # dedup-keyed and journal-verified). Once ANY Executive attempt row
+    # exists, the message is terminal-uncertain: an interrupted turn may
+    # have produced an external effect, and a missing tool_invocation row
+    # can never prove otherwise (the write is post-dispatch and
+    # best-effort — RA-B2-05). Automatic retry is deliberately reduced to
+    # the pre-Executive stages only; an operator reconciles uncertain
+    # mail manually. This degradation is reported, never presented as
+    # success.
     max_attempts = _mail_setting("bo.mail.processing.max_attempts")
-    state, attempt_no = _attempts_state(
-        audit_logger, message_id, session_id, max_attempts
+    state, attempt_no, reason = _attempts_state(
+        audit_logger, message_id, max_attempts
     )
     if state == "failed":
         return "failed"
@@ -893,21 +988,22 @@ async def _handle_email(
                 "thread_id": thread_id,
                 "from": from_addr,
                 "outcome": "failed_final",
+                "reason": reason,
                 "attempts": attempt_no - 1,
             },
         )
         logger.warning(
-            "message=%s exceeded the processing attempt budget (%d) — left "
+            "message=%s exceeded the processing attempt budget (%d, %s) — left "
             "unread for human review",
-            message_id, max_attempts,
+            message_id, max_attempts, reason,
         )
         return "failed_final"
     if state == "uncertain":
         audit_log(
             "integration_inbound",
             f"Email processing left in uncertain state for message "
-            f"{message_id} — prior attempt evidence is incomplete or "
-            "already produced a non-read-only effect",
+            f"{message_id} — a prior Executive attempt exists and "
+            f"absence of effect cannot be proven ({reason})",
             actor="email",
             session_id=session_id,
             details={
@@ -916,13 +1012,14 @@ async def _handle_email(
                 "thread_id": thread_id,
                 "from": from_addr,
                 "outcome": "uncertain_partial_effect",
+                "reason": reason,
                 "attempt": attempt_no,
             },
         )
         logger.warning(
-            "message=%s: prior attempt evidence incomplete/effectful — "
+            "message=%s: prior attempt evidence incomplete (%s) — "
             "re-run refused to avoid duplicate effects; left unread",
-            message_id,
+            message_id, reason,
         )
         return "uncertain"
 
@@ -950,31 +1047,67 @@ async def _handle_email(
             message_id, attempt_no,
         )
         return "failed"
+    # Every audit row emitted inside the turn — including broadcast rows
+    # with session_id=NULL — carries the explicit attempt identity so a
+    # human can attribute effects to this exact message/attempt/owner.
+    from openexecutive.audit.context import attempt_scope
+
+    attempt_ref = f"{message_id}:{attempt_no}:{owner}"
     try:
-        await _run_executive(
-            gateway, _strip_reply_to(raw), message_id, thread_id, from_addr, session_id
-        )
+        with attempt_scope(attempt_ref):
+            await _run_executive(
+                gateway, _strip_reply_to(raw), message_id, thread_id,
+                from_addr, session_id,
+            )
     except Exception:
         logger.exception("Executive raised for message=%s", message_id)
-        # Close as failed: a retry is legitimate only if the window scan
-        # proves this attempt produced nothing effectful. If the close
-        # row itself fails to commit, the open attempt reads as
-        # interrupted → uncertain next cycle (fail closed).
-        _close_attempt(
+        # The turn started and failed. An absent tool_invocation row can
+        # never prove zero effects (the journal write is post-dispatch
+        # and best-effort), so the honest outcome is UNKNOWN — fenced,
+        # never resubmitted automatically (RA-B2-05). An uncommitted
+        # close row fails closed the same way next cycle.
+        closed = _close_attempt(
             audit_logger, message_id, session_id, attempt_no, owner,
             "executive_failed",
         )
-        return "failed"
+        audit_log(
+            "integration_inbound",
+            f"Executive attempt failed for message {message_id} — "
+            "effect presence unprovable; fenced for operator review "
+            "(auto-retry removed)",
+            actor="email",
+            session_id=session_id,
+            details={
+                "channel": "email",
+                "message_id": message_id,
+                "thread_id": thread_id,
+                "from": from_addr,
+                "outcome": "uncertain_partial_effect",
+                "reason": "executive_failed_unproven",
+                "attempt": attempt_no,
+                "close_committed": closed,
+            },
+        )
+        return "uncertain"
 
-    _close_attempt(
+    if not _close_attempt(
         audit_logger, message_id, session_id, attempt_no, owner, "executed",
-    )
+    ):
+        # The turn ran to completion but its close row is not provably
+        # durable — next cycle the open attempt reads as interrupted →
+        # uncertain. Report it honestly now rather than pretending.
+        logger.warning(
+            "executed close row for message=%s attempt=%d not durable — "
+            "reporting uncertain", message_id, attempt_no,
+        )
+        return "uncertain"
 
     # The evidence row + dedup marker land atomically BEFORE the provider
     # label change: a mark-read failure (or a crash in between) leaves the
     # message unread but provably processed — the next cycle replays only
-    # the mark-read, never the Executive.
-    audit_log(
+    # the mark-read, never the Executive. The marker write itself is
+    # verified: a swallowed log() must not become "nothing happened".
+    audit_logger.log(
         "integration_inbound",
         f"Processed email from {from_addr}: {subject}" if subject
         else f"Processed email from {from_addr}",
@@ -991,6 +1124,20 @@ async def _handle_email(
         },
         dedup_key=dedup_key,
     )
+    try:
+        marker = audit_logger.dedup_lookup(dedup_key)
+        marker_committed = bool(
+            marker is not None and marker.get("journal_row_present")
+        )
+    except Exception:
+        marker_committed = False
+    if not marker_committed:
+        logger.warning(
+            "processed marker for message=%s not durable — the executed "
+            "close row will read as uncertain next cycle; not marking read",
+            message_id,
+        )
+        return "uncertain"
     if await _mark_read(gateway, message_id, user_email):
         return "processed"
     return "mark_read_failed"

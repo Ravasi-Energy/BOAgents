@@ -45,11 +45,11 @@ def isolated_audit(tmp_path: Path) -> Path:
     episodic_memory.db nor see each other's markers."""
     set_audit_logger(AuditLogger(db_path=tmp_path / "audit.db"))
     poller._processed_ids.clear()
-    poller._retry_counts.clear()
+    poller._terminal_label_id = None
     yield tmp_path / "audit.db"
     set_audit_logger(None)
     poller._processed_ids.clear()
-    poller._retry_counts.clear()
+    poller._terminal_label_id = None
 
 
 def _settings() -> Any:

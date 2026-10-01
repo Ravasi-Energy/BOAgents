@@ -9,6 +9,7 @@ until a slot is explicitly created.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
@@ -95,6 +96,68 @@ async def list_clients(request: Request) -> dict:
         "rotation_in_progress": rotation_in_progress(settings),
         "clients": list_client_slots(settings),
     }
+
+
+@router.get("/clients/turn-blockers")
+async def list_turn_blockers(request: Request) -> dict:
+    """Open/uncertain turn leases blocking client switches (RA13-A02-01).
+
+    The admin surface for the durable turn/switch barrier: each entry
+    carries the turn id, kind, per-client ref, owner, status and reason —
+    exactly what a refused activate/restore reports. ``switch_in_progress``
+    tells the UI a switch currently holds the barrier (new turns deferred).
+    The ``owner`` field (pid:nonce) is withheld from non-admin viewers.
+    """
+    from openexecutive.bo import identity as bo_identity
+    from openexecutive.bo import turn_barrier
+
+    ident = bo_identity.resolve_identity(request)
+    bo_identity.require(ident, "clients:read")
+    try:
+        bo_identity.require(ident, "clients:write")
+        can_write = True
+    except bo_identity.ForbiddenError:
+        can_write = False
+    blockers = turn_barrier.blockers()
+    if not can_write:
+        blockers = [
+            {k: v for k, v in b.items() if k != "owner"} for b in blockers
+        ]
+    return {
+        "switch_in_progress": turn_barrier.switch_in_progress(),
+        "blockers": blockers,
+    }
+
+
+class ReconcileTurnRequest(BaseModel):
+    resolution: Literal["verified", "attested"]
+
+
+@router.post("/clients/turn-blockers/{turn_id}/reconcile")
+async def reconcile_turn_blocker(
+    turn_id: str, req: ReconcileTurnRequest, request: Request
+) -> dict:
+    """Operator reconciliation of a blocking turn lease (RA13-A02-01).
+
+    ``verified`` — the caller checked the journal/provider evidence for the
+    turn's outcome. ``attested`` — the operator explicitly accepts the
+    decision. Either way the lease closes with the resolution recorded;
+    the row is never deleted, so the trail survives. An ``active`` lease
+    refuses (409): its owner may still complete it — reconcile once it
+    has expired to ``uncertain``."""
+    from openexecutive.bo import identity as bo_identity
+    from openexecutive.bo import turn_barrier
+
+    ident = bo_identity.resolve_identity(request)
+    bo_identity.require(ident, "clients:write")
+    try:
+        return turn_barrier.reconcile_turn(
+            turn_id, resolution=req.resolution, actor=ident.actor
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except turn_barrier.ReconcileRefusedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/clients")

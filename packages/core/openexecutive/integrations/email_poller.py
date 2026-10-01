@@ -1449,66 +1449,211 @@ async def _handle_email(
         return _journal_scope_refusal(
             audit_logger, message_id, scope, "scope_changed_pre_claim"
         )
-    owner = uuid.uuid4().hex
-    claim = _claim_attempt(
-        audit_logger, message_id, session_id, attempt_no, owner, scope
-    )
-    if claim == "lost":
-        logger.info(
-            "message=%s attempt=%d claimed by another owner — not re-running",
-            message_id, attempt_no,
-        )
-        # "claimed" is neither terminal nor a failure: the message is not
-        # recorded locally and consumes no retry budget — next cycle the
-        # winner's marker (processed) or open attempt (uncertain) decides.
-        return "claimed"
-    if claim != "claimed":
-        logger.warning(
-            "attempt bracket for message=%s attempt=%d not durable — "
-            "deferring rather than risking unattributed external effects",
-            message_id, attempt_no,
-        )
-        return "failed"
-    # Every audit row emitted inside the turn — including broadcast rows
-    # with session_id=NULL — carries the explicit attempt identity so a
-    # human can attribute effects to this exact message/attempt/owner.
-    # Restore-block re-checked right before the turn: it shrinks (cannot
-    # close) the window in which a journal swap strands the attempt's
-    # evidence in a rolled-back DB.
-    from openexecutive.audit.context import attempt_scope
-    from openexecutive.clients.slots import is_restore_blocked
+    # Durable turn lease BEFORE the journal claim (RA13-A02-01): the lease
+    # lives in the unswapped coordination store (bo_agents.db), so a client
+    # switch can never start while this turn is in flight — the swap can
+    # no longer strand the attempt's evidence in a parked journal. If a
+    # switch is already in progress, admission refuses and the message
+    # simply stays unread for the next cycle (no evidence written yet, so
+    # deferral is honest).
+    from openexecutive.bo import turn_barrier as _barrier
 
-    if is_restore_blocked() or not _scope_still_current(
-        audit_logger, scope
+    # Cross-context evidence check (RA13-A02-01): the lease table lives
+    # outside the swapped journal, so a turn that ran (or may have run)
+    # under a previous client is visible here even when this journal has
+    # no marker for the message. Effect history for this provider message
+    # → fence as uncertain, never re-execute.
+    if await asyncio.to_thread(
+        _barrier.ref_has_effect_history,
+        "email", message_id, mailbox=scope.mailbox,
     ):
-        logger.warning(
-            "message=%s: scope changed mid-operation — refusing to start "
-            "the Executive turn in the new context", message_id,
-        )
-        return "failed"
-    attempt_ref = f"{scope.token}:{message_id}:{attempt_no}:{owner}"
-    try:
-        with attempt_scope(attempt_ref):
-            await _run_executive(
-                gateway, _strip_reply_to(raw), message_id, thread_id,
-                from_addr, session_id,
-            )
-    except Exception:
-        logger.exception("Executive raised for message=%s", message_id)
-        # The turn started and failed. An absent tool_invocation row can
-        # never prove zero effects (the journal write is post-dispatch
-        # and best-effort), so the honest outcome is UNKNOWN — fenced,
-        # never resubmitted automatically (RA-B2-05). An uncommitted
-        # close row fails closed the same way next cycle.
-        closed = _close_attempt(
-            audit_logger, message_id, session_id, attempt_no, owner,
-            "executive_failed", scope,
-        )
         audit_log(
             "integration_inbound",
-            f"Executive attempt failed for message {message_id} — "
-            "effect presence unprovable; fenced for operator review "
-            "(auto-retry removed)",
+            f"Email {message_id} fenced: unswapped turn history shows a "
+            "prior effect under another context",
+            actor="email",
+            session_id=session_id,
+            details={
+                "channel": "email",
+                "message_id": message_id,
+                "outcome": "uncertain_partial_effect",
+                "reason": "cross_context_turn_history",
+            },
+            dedup_key=(
+                f"{_SCOPE_REFUSED_DEDUP_PREFIX}{scope.token}:"
+                f"turn_history:{message_id}"
+            ),
+        )
+        logger.warning(
+            "message=%s fenced — unswapped lease history shows a prior "
+            "turn for this provider message; left unread", message_id,
+        )
+        return "uncertain"
+
+    try:
+        turn_lease = await asyncio.to_thread(
+            _barrier.admit_turn,
+            "email", ref=message_id, scope_token=scope.token,
+            mailbox=scope.mailbox, wait_s=0,
+        )
+    except _barrier.SwitchBusyError:
+        logger.info(
+            "message=%s deferred — client switch in progress; the mail "
+            "stays unread and is retried next cycle", message_id,
+        )
+        return "failed"
+    except _barrier.TurnAdmissionError:
+        logger.warning(
+            "message=%s deferred — turn coordination store unavailable; "
+            "unknown is not absent", message_id,
+        )
+        return "failed"
+
+    try:
+        owner = uuid.uuid4().hex
+        claim = _claim_attempt(
+            audit_logger, message_id, session_id, attempt_no, owner, scope
+        )
+        if claim == "lost":
+            logger.info(
+                "message=%s attempt=%d claimed by another owner — "
+                "not re-running",
+                message_id, attempt_no,
+            )
+            # "claimed" is neither terminal nor a failure: the message is
+            # not recorded locally and consumes no retry budget — next
+            # cycle the winner's marker (processed) or open attempt
+            # (uncertain) decides.
+            await asyncio.to_thread(
+                _barrier.complete_turn, turn_lease, outcome="lost_claim"
+            )
+            return "claimed"
+        if claim != "claimed":
+            logger.warning(
+                "attempt bracket for message=%s attempt=%d not durable — "
+                "deferring rather than risking unattributed external effects",
+                message_id, attempt_no,
+            )
+            await asyncio.to_thread(
+                _barrier.complete_turn, turn_lease,
+                outcome="claim_not_durable",
+            )
+            return "failed"
+        # Every audit row emitted inside the turn — including broadcast
+        # rows with session_id=NULL — carries the explicit attempt
+        # identity so a human can attribute effects to this exact
+        # message/attempt/owner. Restore-block re-checked right before
+        # the turn: it shrinks (cannot close) the window in which a
+        # journal swap strands the attempt's evidence in a rolled-back DB.
+        from openexecutive.audit.context import attempt_scope
+        from openexecutive.clients.slots import is_restore_blocked
+
+        if (
+            is_restore_blocked()
+            or not _scope_still_current(audit_logger, scope)
+            or not await asyncio.to_thread(
+                _barrier.turn_still_valid, turn_lease
+            )
+        ):
+            logger.warning(
+                "message=%s: scope changed mid-operation — refusing to "
+                "start the Executive turn in the new context", message_id,
+            )
+            await asyncio.to_thread(
+                _barrier.complete_turn, turn_lease, outcome="refused_pre_run"
+            )
+            return "failed"
+        attempt_ref = f"{scope.token}:{message_id}:{attempt_no}:{owner}"
+        try:
+            with attempt_scope(attempt_ref):
+                await _run_executive(
+                    gateway, _strip_reply_to(raw), message_id, thread_id,
+                    from_addr, session_id,
+                )
+        except Exception:
+            logger.exception("Executive raised for message=%s", message_id)
+            # The turn started and failed. An absent tool_invocation row
+            # can never prove zero effects (the journal write is
+            # post-dispatch and best-effort), so the honest outcome is
+            # UNKNOWN — fenced, never resubmitted automatically
+            # (RA-B2-05). An uncommitted close row fails closed the same
+            # way next cycle.
+            closed = _close_attempt(
+                audit_logger, message_id, session_id, attempt_no, owner,
+                "executive_failed", scope,
+            )
+            await asyncio.to_thread(
+                _barrier.fail_turn_uncertain,
+                turn_lease, reason="executive_failed_unproven",
+            )
+            audit_log(
+                "integration_inbound",
+                f"Executive attempt failed for message {message_id} — "
+                "effect presence unprovable; fenced for operator review "
+                "(auto-retry removed)",
+                actor="email",
+                session_id=session_id,
+                details={
+                    "channel": "email",
+                    "message_id": message_id,
+                    "thread_id": thread_id,
+                    "from": from_addr,
+                    "outcome": "uncertain_partial_effect",
+                    "reason": "executive_failed_unproven",
+                    "attempt": attempt_no,
+                    "close_committed": closed,
+                },
+            )
+            return "uncertain"
+
+        if not _close_attempt(
+            audit_logger, message_id, session_id, attempt_no, owner,
+            "executed", scope,
+        ):
+            # The turn ran to completion but its close row is not provably
+            # durable — next cycle the open attempt reads as interrupted →
+            # uncertain. Report it honestly now rather than pretending.
+            logger.warning(
+                "executed close row for message=%s attempt=%d not "
+                "durable — reporting uncertain", message_id, attempt_no,
+            )
+            await asyncio.to_thread(
+                _barrier.fail_turn_uncertain,
+                turn_lease, reason="close_not_durable",
+            )
+            return "uncertain"
+
+        # The evidence row + dedup marker land atomically BEFORE the
+        # provider label change: a mark-read failure (or a crash in
+        # between) leaves the message unread but provably processed — the
+        # next cycle replays only the mark-read, never the Executive. The
+        # marker write itself is verified: a swallowed log() must not
+        # become "nothing happened". Scope re-validated: the turn may
+        # have run while the context changed under us — the terminal
+        # evidence/mark-read must not land in the new context (the open
+        # attempt in the original journal reads as uncertain, which is
+        # the honest state).
+        if not _scope_still_current(
+            audit_logger, scope
+        ) or not await asyncio.to_thread(
+            _barrier.turn_still_valid, turn_lease
+        ):
+            # The lease/scope check at the effect boundary: a completed
+            # switch bumps the epoch, so a stale turn refuses its
+            # terminal evidence — and crucially the lease row itself (in
+            # bo_agents.db, unswapped) still records that this turn ran,
+            # so the incoming context's poller is not flying blind.
+            await asyncio.to_thread(
+                _barrier.fail_turn_uncertain,
+                turn_lease, reason="context_changed_post_effect",
+            )
+            return _journal_scope_refusal(
+                audit_logger, message_id, scope, "scope_changed_post_effect"
+            )
+        audit_logger.log(
+            "integration_inbound",
+            f"Processed email from {from_addr}: {subject}" if subject
+            else f"Processed email from {from_addr}",
             actor="email",
             session_id=session_id,
             details={
@@ -1516,76 +1661,53 @@ async def _handle_email(
                 "message_id": message_id,
                 "thread_id": thread_id,
                 "from": from_addr,
-                "outcome": "uncertain_partial_effect",
-                "reason": "executive_failed_unproven",
+                "subject": subject,
+                "outcome": "processed",
                 "attempt": attempt_no,
-                "close_committed": closed,
+                "scope": scope.token,
+                "mailbox": scope.mailbox,
             },
+            dedup_key=dedup_key,
         )
-        return "uncertain"
-
-    if not _close_attempt(
-        audit_logger, message_id, session_id, attempt_no, owner,
-        "executed", scope,
-    ):
-        # The turn ran to completion but its close row is not provably
-        # durable — next cycle the open attempt reads as interrupted →
-        # uncertain. Report it honestly now rather than pretending.
-        logger.warning(
-            "executed close row for message=%s attempt=%d not durable — "
-            "reporting uncertain", message_id, attempt_no,
+        try:
+            marker = audit_logger.dedup_lookup(dedup_key)
+            marker_committed = bool(
+                marker is not None and marker.get("journal_row_present")
+            )
+        except Exception:
+            marker_committed = False
+        if not marker_committed:
+            logger.warning(
+                "processed marker for message=%s not durable — the "
+                "executed close row will read as uncertain next cycle; "
+                "not marking read",
+                message_id,
+            )
+            await asyncio.to_thread(
+                _barrier.fail_turn_uncertain,
+                turn_lease, reason="marker_not_durable",
+            )
+            return "uncertain"
+        if await _mark_read(
+            gateway, message_id, user_email, scope, audit_logger
+        ):
+            await asyncio.to_thread(
+                _barrier.complete_turn, turn_lease, outcome="processed"
+            )
+            return "processed"
+        await asyncio.to_thread(
+            _barrier.complete_turn, turn_lease, outcome="processed_unmarked"
         )
-        return "uncertain"
-
-    # The evidence row + dedup marker land atomically BEFORE the provider
-    # label change: a mark-read failure (or a crash in between) leaves the
-    # message unread but provably processed — the next cycle replays only
-    # the mark-read, never the Executive. The marker write itself is
-    # verified: a swallowed log() must not become "nothing happened".
-    # Scope re-validated: the turn may have run while the context changed
-    # under us — the terminal evidence/mark-read must not land in the new
-    # context (the open attempt in the original journal reads as
-    # uncertain, which is the honest state).
-    if not _scope_still_current(audit_logger, scope):
-        return _journal_scope_refusal(
-            audit_logger, message_id, scope, "scope_changed_post_effect"
+        return "mark_read_failed"
+    except BaseException:
+        # Cancellation/kill anywhere between admission and completion:
+        # the turn may have partially run — an unproven effect is
+        # 'uncertain', never "absent". fail_turn_uncertain CAS-es on
+        # status='active', so a lease already resolved above is untouched.
+        await asyncio.to_thread(
+            _barrier.fail_turn_uncertain, turn_lease, reason="interrupted"
         )
-    audit_logger.log(
-        "integration_inbound",
-        f"Processed email from {from_addr}: {subject}" if subject
-        else f"Processed email from {from_addr}",
-        actor="email",
-        session_id=session_id,
-        details={
-            "channel": "email",
-            "message_id": message_id,
-            "thread_id": thread_id,
-            "from": from_addr,
-            "subject": subject,
-            "outcome": "processed",
-            "attempt": attempt_no,
-            "scope": scope.token,
-            "mailbox": scope.mailbox,
-        },
-        dedup_key=dedup_key,
-    )
-    try:
-        marker = audit_logger.dedup_lookup(dedup_key)
-        marker_committed = bool(
-            marker is not None and marker.get("journal_row_present")
-        )
-    except Exception:
-        marker_committed = False
-    if not marker_committed:
-        logger.warning(
-            "processed marker for message=%s not durable — the executed "
-            "close row will read as uncertain next cycle; not marking read",
-            message_id,
-        )
-        return "uncertain"
-    if await _mark_read(gateway, message_id, user_email, scope, audit_logger):
-        return "processed"
-    return "mark_read_failed"
+        raise
 
 
 async def _run_executive(

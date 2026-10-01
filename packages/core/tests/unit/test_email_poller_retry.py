@@ -139,8 +139,9 @@ def isolated_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
       gets a fresh tmp DB — durable cross-"restart" state is real SQLite,
       only the file location is redirected;
     - the people DB (roster lookups) is empty;
-    - the bo settings DB points at a nonexistent path so ``_mail_setting``
-      returns registry defaults;
+    - the bo DB is initialized but empty — ``_mail_setting`` returns
+      registry defaults, and the turn barrier store exists (a missing
+      file reads as *unavailable*, which would fence every message);
     - the in-process caches are cleared so tests are order-independent.
     """
     audit = AuditLogger(db_path=tmp_path / "audit.db")
@@ -148,8 +149,11 @@ def isolated_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(people_store, "DB_PATH", tmp_path / "people.db")
     people_store.initialize_db()
     monkeypatch.setattr(
-        "openexecutive.bo.db.DB_PATH", tmp_path / "nonexistent-bo.db"
+        "openexecutive.bo.db.DB_PATH", tmp_path / "bo.db"
     )
+    from openexecutive.bo import turn_barrier
+
+    turn_barrier.initialize_db()
     poller.reset_mail_caches()
     yield audit
     set_audit_logger(None)

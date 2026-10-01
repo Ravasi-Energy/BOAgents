@@ -78,17 +78,24 @@ async def fixtures_reset(request: Request) -> dict:
     hit the deleted-then-recreated collection through the previous
     store instance.
     """
-    from openexecutive.cli.fixture_loader import reset_all_state
+    from openexecutive.cli.fixture_loader import (
+        FixtureActiveError,
+        reset_all_state,
+    )
     from openexecutive.config import get_settings
 
     settings = get_settings()
-    return await reset_all_state(settings, app_state=request.app.state)
+    try:
+        return await reset_all_state(settings, app_state=request.app.state)
+    except FixtureActiveError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/fixtures/unload")
 async def fixtures_unload(request: Request) -> dict:
     """Restore the user's original state from the backup directory."""
     from openexecutive.cli.fixture_loader import (
+        FixtureActiveError,
         FixtureNotFoundError,
         unload_fixture,
     )
@@ -99,6 +106,8 @@ async def fixtures_unload(request: Request) -> dict:
         result = await unload_fixture(settings)
     except FixtureNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except FixtureActiveError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     # Mirror the load route: replace the shared store so subsequent requests
     # see the freshly-rebuilt company_docs collection.
@@ -115,6 +124,7 @@ async def fixtures_unload(request: Request) -> dict:
 @router.post("/fixtures/{name}/load")
 async def load_fixture(name: str, request: Request) -> dict:
     from openexecutive.cli.fixture_loader import (
+        FixtureActiveError,
         FixtureNotFoundError,
         load_fixture_any,
     )
@@ -130,6 +140,8 @@ async def load_fixture(name: str, request: Request) -> dict:
         result = await load_fixture_any(name, settings)
     except FixtureNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except FixtureActiveError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     # If the app has a shared store in state, replace it with a fresh instance
     # so the new company_docs collection is visible to subsequent requests.

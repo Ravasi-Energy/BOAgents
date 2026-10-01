@@ -4310,6 +4310,33 @@ bo:
     execution:read (viewer), execution:write (admin), execution:operate
     (operator). retention.sweep removes only FINISHED runs past
     retention_days; the audit log is out of scope.
+  turn_barrier: |
+    bo/turn_barrier (REM-AUDIT-14, RA13-A02-01) is the durable turn/switch
+    barrier: ``bo_turn_leases`` (one row per admitted Executive turn:
+    turn_id, kind, ref, tenant, client_slug, scope_token, mailbox, owner,
+    epoch, status active|uncertain|closed, bounded lease) plus a singleton
+    ``bo_switch_state`` (epoch + in_progress + op), all in bo_agents.db —
+    deliberately the store that NEVER swaps with the per-client journal,
+    so coordination survives slot save/restore, factory reset and process
+    restart. admit_turn and begin_switch serialize on BEGIN IMMEDIATE: a
+    turn admitted first blocks the switch (bounded wait
+    ``bo.switch.max_wait_seconds`` then a 409 refusal naming the blocking
+    turn ids — the ``switch_in_progress`` flag symmetrically refuses new
+    admissions), and a lease expiring sweeps to ``uncertain`` — never
+    auto-cleared, operator reconciles via POST
+    /clients/turn-blockers/{id}/reconcile (``verified``|``attested``, the
+    row is kept). Workers re-validate epoch+owner+status at the effect
+    boundary (``turn_still_valid``); a completed switch bumps the epoch so
+    a stale worker refuses its terminal writes. Boot runs
+    ``clear_stale_switch`` (flag only — fail-closed marker stays) and
+    ``seed_open_attempts``: open ``email_attempt@`` markers without close
+    rows become ``uncertain`` leases — absence of the close is never proof
+    the effect did not happen. ``ref_has_effect_history`` doubles as the
+    unswapped fence: same (mailbox, provider mid) already run/uncertain
+    under ANY scope → fence, different mailbox → independent (RA11-B01).
+    No transaction is held across the LLM call — durable claims plus
+    short BEGIN IMMEDIATE transactions. The barrier cannot be disabled;
+    its two settings are bounded knobs, not an off switch.
   routing_observe: |
     bo/routing (VAL3-01) is the observe-mode model router: an administered
     catalog (provider/model/version, capabilities, regions, cost and quality

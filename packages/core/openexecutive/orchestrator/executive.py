@@ -352,6 +352,58 @@ def _emit_cache_event(
     )
 
 
+def _barrier_turn(kind: str) -> Any:
+    """Admit a durable turn lease around an Executive entry point (RA13-A02-01).
+
+    The lease lives in the unswapped coordination store (bo_agents.db), so a
+    client switch/restore can never start while a turn is in flight and
+    strand its journal evidence in a parked snapshot. Refusal while a
+    switch is in progress yields a maintenance message instead of running;
+    interruption or exception mid-turn marks the lease ``uncertain`` — it
+    blocks later switching until an operator reconciles it, because a lost
+    write can never prove the external effect didn't happen."""
+    import functools
+
+    def deco(fn: Any) -> Any:
+        @functools.wraps(fn)
+        async def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+            from openexecutive.bo import turn_barrier as _tb
+
+            try:
+                lease = await asyncio.to_thread(_tb.admit_turn, kind)
+            except _tb.SwitchBusyError:
+                yield (
+                    "I'm switching client workspaces — please resend your "
+                    "message in a moment."
+                )
+                return
+            except _tb.TurnAdmissionError:
+                logger.exception("turn admission failed — refusing turn")
+                yield (
+                    "I can't start work right now — the coordination store "
+                    "is unavailable. Please try again in a moment."
+                )
+                return
+            try:
+                async for item in fn(self, *args, **kwargs):
+                    yield item
+            except BaseException:
+                # Abandoned/cancelled/failed mid-turn — effects may have
+                # partially landed. The lease becomes 'uncertain' and blocks
+                # switching until reconciled; it is never silently dropped.
+                await asyncio.to_thread(
+                    _tb.fail_turn_uncertain, lease, reason="turn_interrupted"
+                )
+                raise
+            await asyncio.to_thread(
+                _tb.complete_turn, lease, outcome="completed"
+            )
+
+        return wrapper
+
+    return deco
+
+
 class Executive:
     """The Executive orchestrator — the single voice the user always interacts with.
 
@@ -473,6 +525,7 @@ class Executive:
     # Sentinel yielded when specialist calls are in flight — lets callers send keepalives.
     _THINKING = "\x01"
 
+    @_barrier_turn("executive")
     async def stream_chat(
         self,
         user_message: str,
@@ -694,6 +747,7 @@ class Executive:
                 co_present_person_ids=co_present_person_ids,
             )
 
+    @_barrier_turn("executive")
     async def stream_chat_with_committee(
         self,
         user_message: str,

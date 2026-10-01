@@ -37,6 +37,7 @@ values (``bo.turns.lease_seconds``, ``bo.switch.max_wait_seconds``).
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sqlite3
@@ -85,6 +86,18 @@ CREATE INDEX IF NOT EXISTS bo_turn_leases_status
     ON bo_turn_leases (status);
 CREATE INDEX IF NOT EXISTS bo_turn_leases_ref
     ON bo_turn_leases (kind, ref);
+CREATE TABLE IF NOT EXISTS bo_control_audit (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    action      TEXT NOT NULL,
+    turn_id     TEXT,
+    actor       TEXT NOT NULL,
+    resolution  TEXT,
+    reason      TEXT,
+    detail      TEXT,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS bo_control_audit_turn
+    ON bo_control_audit (turn_id);
 """
 
 
@@ -878,19 +891,35 @@ def reconcile_turn(
             conn.execute("ROLLBACK")
             return {"turn_id": turn_id, "status": row["status"]}
         prior = row["reason"]
+        reconciled_reason = (
+            f"{prior}|reconciled_by:{actor}" if prior
+            else f"reconciled_by:{actor}"
+        )
         conn.execute(
             "UPDATE bo_turn_leases SET status='closed', resolution=?, "
             "reason=?, updated_at=? "
             "WHERE turn_id=? AND status='uncertain'",
+            (resolution, reconciled_reason, _iso(_now()), turn_id),
+        )
+        # Durable audit evidence lives in THIS transaction, in the
+        # unswapped coordination store — the episodic audit log the
+        # forward below targets is journal-swapped per client, so a
+        # reconcile recorded only there could be parked out of sight.
+        # If this COMMIT fails nothing lands: no unevidenced unblock.
+        conn.execute(
+            "INSERT INTO bo_control_audit (action, turn_id, actor, "
+            "resolution, reason, detail, created_at) "
+            "VALUES ('turn_reconcile', ?, ?, ?, ?, ?, ?)",
             (
-                resolution,
-                f"{prior}|reconciled_by:{actor}" if prior
-                else f"reconciled_by:{actor}",
+                turn_id, actor, resolution, prior,
+                json.dumps({"reason": reconciled_reason}),
                 _iso(_now()),
-                turn_id,
             ),
         )
         conn.execute("COMMIT")
+    # Best-effort forward into the main audit trail; the atomic evidence
+    # already landed in bo_control_audit, so an I/O error here is logged
+    # but cannot silently lose the reconciliation record.
     try:
         from openexecutive.audit import log_event
 
@@ -901,5 +930,35 @@ def reconcile_turn(
             details={"turn_id": turn_id, "resolution": resolution},
         )
     except Exception:
-        logger.exception("turn_barrier: reconcile audit failed")
+        logger.exception(
+            "turn_barrier: reconcile audit forward failed "
+            "(durable row is in bo_control_audit)")
     return {"turn_id": turn_id, "status": "closed", "resolution": resolution}
+
+
+def control_audit(turn_id: str | None = None) -> list[dict[str, Any]]:
+    """Durable control-plane audit rows (unswapped coordination store).
+
+    These are the authoritative evidence for operator actions such as
+    ``turn_reconcile`` — written in the same transaction as the state
+    change, so an action never lands without its record. Returns [] when
+    the store is missing (fail-closed readers treat that as uncertain).
+    """
+    if not _db_path().exists():
+        return []
+    try:
+        with _conn() as conn:
+            _ensure_schema(conn)  # adds the table to pre-existing stores
+            if turn_id is None:
+                rows = conn.execute(
+                    "SELECT * FROM bo_control_audit ORDER BY id"
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM bo_control_audit WHERE turn_id=? "
+                    "ORDER BY id",
+                    (turn_id,),
+                ).fetchall()
+            return [dict(r) for r in rows]
+    except sqlite3.Error:
+        return []

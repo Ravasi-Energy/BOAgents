@@ -89,6 +89,40 @@ def test_reconcile_refuses_active_lease(barrier_db):
     tb.end_switch(op)
 
 
+def test_reconcile_audit_is_atomic_with_state(barrier_db, monkeypatch):
+    """RA15-BO01-02: a reconcile must never close a lease without durable
+    audit evidence. The evidence row is written in the SAME transaction
+    in the unswapped coordination store, so an I/O error in the main
+    (journal-swapped) audit log cannot silently lose the record."""
+    import openexecutive.audit as audit
+
+    lease = tb.admit_turn("email", ref="m-audit", wait_s=0)
+    _expire(barrier_db, lease)
+
+    def _boom(*a, **k):
+        raise OSError("audit db gone")
+
+    monkeypatch.setattr(audit, "log_event", _boom)
+    out = tb.reconcile_turn(
+        lease.turn_id, resolution="verified", actor="op-7"
+    )
+    assert out["status"] == "closed"
+    rows = tb.control_audit(lease.turn_id)
+    assert len(rows) == 1
+    assert rows[0]["action"] == "turn_reconcile"
+    assert rows[0]["actor"] == "op-7"
+    assert rows[0]["resolution"] == "verified"
+
+
+def test_reconcile_refusal_writes_no_audit(barrier_db):
+    lease = tb.admit_turn("email", ref="m-noaudit", wait_s=0)
+    with pytest.raises(tb.ReconcileRefusedError):
+        tb.reconcile_turn(
+            lease.turn_id, resolution="attested", actor="op"
+        )
+    assert tb.control_audit(lease.turn_id) == []
+
+
 def test_second_switch_cannot_acquire(barrier_db):
     """CAS on in_progress: a second begin_switch can never hold the
     barrier while a live one does (cross-process exclusion)."""

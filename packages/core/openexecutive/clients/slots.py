@@ -596,6 +596,7 @@ async def _restore_slot_state(
         _restore_db_from_file(slot / "state.db")
     _ensure_schemas()
     _restore_global_tables(preserved)
+    _rebind_mail_scope_after_restore(slot.name)
     seeded: dict[str, Any] = {}
     if is_blank:
         # Generated (seed) slots carry people.yaml / departments.yaml /
@@ -644,6 +645,41 @@ async def _restore_slot_state(
         "mcp_config_changed": mcp_changed,
         **seeded,
     }
+
+
+def _rebind_mail_scope_after_restore(client_slug: str) -> None:
+    """Attest the restored journal's mail-processing scope to this client.
+
+    The activation is itself the operator's attestation that the restored
+    journal now belongs to ``client_slug`` — this re-points only the
+    client component of an EXISTING mail-scope binding (never binds an
+    unbound journal, never crosses a tenant, never rewrites the recorded
+    mailbox). It also drops the poller's process-local caches so verdicts
+    cached under the previous context cannot leak into the new one
+    (RA11-B01). Failures are contained: the poller refuses work on a
+    journal it cannot attribute rather than consuming under a stale
+    scope."""
+    try:
+        from openexecutive.audit.logger import AuditLogger
+        from openexecutive.bo.identity import configured_tenant
+        from openexecutive.integrations import email_poller, mail_scope
+
+        email_poller.reset_mail_caches()
+        rebound = mail_scope.rebind_for_client(
+            AuditLogger(db_path=_episodic_db_path()),
+            tenant=configured_tenant(),
+            client_slug=client_slug,
+        )
+        if rebound:
+            logger.info(
+                "client-slots: mail scope rebound to client %s", client_slug
+            )
+    except Exception:
+        logger.warning(
+            "client-slots: mail scope rebind after restore failed — the "
+            "poller will refuse until the binding is repaired",
+            exc_info=True,
+        )
 
 
 def _seed_from_slot_files(settings: Any, slot: Path) -> dict[str, Any]:

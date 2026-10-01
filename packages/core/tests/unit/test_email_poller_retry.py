@@ -12,8 +12,9 @@ B2 — the pre-fix handler ran ``_mark_read`` unconditionally after the
 Executive call, so a failed turn consumed the message silently. The fix
 returns an explicit outcome per message: pre-Executive failures (fetch
 glitches, journal outages) stay unread and are retried within a bounded
-DURABLE attempt budget (``email_fetch_fail:`` markers — never volatile
-in-process counters), while any message that ever started an Executive
+DURABLE attempt budget (``email_fetch_fail@{scope}:`` markers — never
+volatile in-process counters), while any message that ever started an
+Executive
 turn is terminal ``uncertain`` once it fails: a missing tool_invocation
 row cannot prove zero effects, so automatic resubmit was removed —
 a human reconciles fenced uncertain mail.
@@ -149,12 +150,10 @@ def isolated_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         "openexecutive.bo.db.DB_PATH", tmp_path / "nonexistent-bo.db"
     )
-    poller._processed_ids.clear()
-    poller._terminal_label_id = None
+    poller.reset_mail_caches()
     yield audit
     set_audit_logger(None)
-    poller._processed_ids.clear()
-    poller._terminal_label_id = None
+    poller.reset_mail_caches()
 
 
 def _poll(
@@ -193,14 +192,31 @@ def _handle(
     return outcome, exec_mock
 
 
+def _test_scope(audit: AuditLogger) -> Any:
+    """Bind + return the processing scope the patched test settings
+    resolve to — the same (tenant, client, mailbox) inputs _handle/_poll
+    run under (RA11-B01: every marker family is scope-keyed now)."""
+    with patch.object(poller, "get_settings", return_value=_settings()):
+        scope, refusal = poller._resolve_scope(audit)
+    assert scope is not None, f"test scope refused: {refusal}"
+    return scope
+
+
 def _attempt_row(audit: AuditLogger, message_id: str, session_id: str, n: int) -> None:
+    scope = _test_scope(audit)
     audit.log(
         "email_process_attempt",
         f"Processing attempt {n} for email {message_id}",
         actor="email",
         session_id=session_id,
-        details={"message_id": message_id, "attempt": n, "owner": f"o{n}"},
-        dedup_key=f"email_attempt:{message_id}:{n}",
+        details={
+            "message_id": message_id,
+            "attempt": n,
+            "owner": f"o{n}",
+            "scope": scope.token,
+            "mailbox": scope.mailbox,
+        },
+        dedup_key=f"email_attempt@{scope.token}:{message_id}:{n}",
     )
 
 
@@ -213,6 +229,7 @@ def _close_row(
 ) -> None:
     """Close an attempt the way _handle_email does — an open attempt with
     no close row is an interrupted turn and is NEVER retryable."""
+    scope = _test_scope(audit)
     audit.log(
         "email_attempt_result",
         f"Attempt {n} for email {message_id}: {result}",
@@ -223,8 +240,10 @@ def _close_row(
             "attempt": n,
             "owner": f"o{n}",
             "result": result,
+            "scope": scope.token,
+            "mailbox": scope.mailbox,
         },
-        dedup_key=f"email_attempt_result:{message_id}:{n}",
+        dedup_key=f"email_attempt_result@{scope.token}:{message_id}:{n}",
     )
 
 
@@ -370,15 +389,17 @@ def test_empty_fetch_is_not_consumed(isolated_state: AuditLogger) -> None:
     assert outcome == "failed"
     assert exec_mock.await_count == 0
     assert gateway.marked == []
-    assert isolated_state.count_dedup_prefix("email_fetch_fail:m1:") == 1
+    tok = _test_scope(isolated_state).token
+    ff = f"email_fetch_fail@{tok}:m1:"
+    assert isolated_state.count_dedup_prefix(ff) == 1
     # Second failure — the journal, not any in-process counter, holds it.
     outcome2, _ = _handle(gateway)
     assert outcome2 == "failed"
-    assert isolated_state.count_dedup_prefix("email_fetch_fail:m1:") == 2
+    assert isolated_state.count_dedup_prefix(ff) == 2
     # Third reaches the registry default budget (3) → terminal.
     outcome3, _ = _handle(gateway)
     assert outcome3 == "failed_final"
-    assert isolated_state.count_dedup_prefix("email_fetch_fail:m1:") == 3
+    assert isolated_state.count_dedup_prefix(ff) == 3
 
 
 def test_skip_marks_read_and_journals() -> None:
@@ -480,6 +501,7 @@ def test_fetch_failure_budget_exhausted_reports_final(
     in-process counter is consulted, so clearing process state (restart
     analogue) cannot reset the budget."""
     audit = isolated_state
+    tok = _test_scope(audit).token
     for n in range(1, 4):  # registry default max_attempts = 3
         audit.log(
             "email_fetch_failed",
@@ -487,7 +509,7 @@ def test_fetch_failure_budget_exhausted_reports_final(
             actor="email",
             session_id="email:t-m1",
             details={"message_id": "m1", "fetch_failure": n},
-            dedup_key=f"email_fetch_fail:m1:{n}",
+            dedup_key=f"email_fetch_fail@{tok}:m1:{n}",
         )
     gateway = FakeGateway(contents={"m1": _raw_email("a@b.com")})
     outcome, exec_mock = _handle(gateway)
@@ -615,24 +637,25 @@ def test_terminal_label_created_when_missing(
 def test_orphan_processed_marker_is_uncertain(
     isolated_state: AuditLogger,
 ) -> None:
-    """RA-B2-01a: an orphan `email_processed:` marker (journal lost the
-    row it points to) is NOT proof of success — the message must be
-    fenced uncertain, not mark-read as if processed."""
+    """RA-B2-01a: an orphan `email_processed@{scope}` marker (journal
+    lost the row it points to) is NOT proof of success — the message
+    must be fenced uncertain, not mark-read as if processed."""
     audit = isolated_state
+    tok = _test_scope(audit).token
     row_id = audit.log(
         "integration_inbound",
         "Processed email from a@b.com",
         actor="email",
         session_id="email:t-m1",
         details={"channel": "email", "message_id": "m1", "outcome": "processed"},
-        dedup_key="email_processed:m1",
+        dedup_key=f"email_processed@{tok}:m1",
     )
     # Simulate journal loss: the row is gone, the marker remains.
     from openexecutive.audit.logger import _get_conn
 
     with _get_conn(audit._db_path) as conn:  # noqa: SLF001
         conn.execute("DELETE FROM audit_log WHERE id = ?", (row_id,))
-    marker = audit.dedup_lookup("email_processed:m1")
+    marker = audit.dedup_lookup(f"email_processed@{tok}:m1")
     assert marker is not None and not marker["journal_row_present"]
 
     gateway = FakeGateway(contents={"m1": _raw_email("a@b.com")})
@@ -842,9 +865,10 @@ def test_divergent_histories_converge_on_one_claim_key(
     """RA-B2-06: two "processes" with different local histories must race
     on the SAME durable claim key. Process A suffered a fetch failure
     (now journaled, not a volatile counter); both then evaluate
-    attempt_count=0 and claim email_attempt:m1:1 — BEGIN IMMEDIATE
+    attempt_count=0 and claim email_attempt@{scope}:m1:1 — BEGIN IMMEDIATE
     serializes them, exactly one Executive run."""
     audit = isolated_state
+    tok = _test_scope(audit).token
     # A's fetch failure — durable, visible to every process.
     audit.log(
         "email_fetch_failed",
@@ -852,7 +876,7 @@ def test_divergent_histories_converge_on_one_claim_key(
         actor="email",
         session_id="email:t-m1",
         details={"message_id": "m1", "fetch_failure": 1},
-        dedup_key="email_fetch_fail:m1:1",
+        dedup_key=f"email_fetch_fail@{tok}:m1:1",
     )
     gateway = FakeGateway(contents={"m1": _raw_email("a@b.com")})
     calls = {"n": 0}
@@ -876,7 +900,7 @@ def test_divergent_histories_converge_on_one_claim_key(
     assert "processed" in outcomes
     # ONE attempt marker — divergent in-process counters cannot fork the
     # key space any more (there are none).
-    assert audit.count_dedup_prefix("email_attempt:m1:") == 1
+    assert audit.count_dedup_prefix(f"email_attempt@{tok}:m1:") == 1
     assert gateway.marked.count("m1") == 1
 
 
@@ -906,7 +930,8 @@ def test_attempt_ref_stamped_on_turn_rows(
     row = rows[0]
     assert row.session_id is None  # the broadcast-style NULL session
     ref = (row.details or {}).get("attempt_ref")
-    assert ref is not None and ref.startswith("m1:1:")
+    tok = _test_scope(isolated_state).token
+    assert ref is not None and ref.startswith(f"{tok}:m1:1:")
 
 
 def test_uncommitted_close_row_is_uncertain(
@@ -936,9 +961,10 @@ def test_uncommitted_processed_marker_is_uncertain(
     """log()→None on the email_processed marker must not degrade to a
     silent consume — no mark-read without durable proof of processing."""
     real_log = isolated_state.log
+    tok = _test_scope(isolated_state).token
 
     def _swallow_marker(event_type: str, *a: Any, **k: Any) -> Any:
-        if k.get("dedup_key") == "email_processed:m1":
+        if k.get("dedup_key") == f"email_processed@{tok}:m1":
             return None
         return real_log(event_type, *a, **k)
 
@@ -956,9 +982,10 @@ def test_skip_without_durable_marker_stays_unread(
     """A policy skip whose marker never committed must defer — marking
     read without evidence would make the mail vanish with no trace."""
     real_log = isolated_state.log
+    tok = _test_scope(isolated_state).token
 
     def _swallow_marker(event_type: str, *a: Any, **k: Any) -> Any:
-        if k.get("dedup_key") == "email_processed:m1":
+        if k.get("dedup_key") == f"email_processed@{tok}:m1":
             return None
         return real_log(event_type, *a, **k)
 

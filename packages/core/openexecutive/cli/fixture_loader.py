@@ -898,6 +898,7 @@ async def reset_all_state(
                 "user_preferences",
                 "workflow_runs",
                 "audit_log",
+                "audit_dedup",
                 "eval_runs",
                 "external_signals",
                 "watchlist",

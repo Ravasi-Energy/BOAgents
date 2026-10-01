@@ -461,6 +461,25 @@ REGISTRY: dict[str, SettingSpec] = {
         validate=lambda v: _validate_int(
             v, minimum=1, maximum=10, label="Tentativele maxime"),
     ),
+    "bo.mail.scope.bound_mailbox": SettingSpec(
+        key="bo.mail.scope.bound_mailbox",
+        type="text",
+        default="",
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="mail",
+        label_ro="Căsuță de e-mail atestată pentru jurnal",
+        label_en="Attested mailbox for this journal",
+        help_ro="Atestare explicită că adresa EXEC_EMAIL_ADDRESS configurată este căsuța pe care acest jurnal de procesare o deservește. Obligatorie când jurnalul poartă evidență veche fără scope sau când adresa configurată s-a schimbat — fără ea mesajele ambigue rămân necitite. Valoarea este consumată (ștearsă) la prima utilizare — o singură tranziție per atestare.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Se aplică la următorul ciclu de polling; markerii ambigui nu se adoptă retroactiv niciodată.",
+        acceptance_ro="Gol = neatostat; o valoare care nu coincide cu adresa configurată nu leagă nimic.",
+        validate=lambda v: _validate_text(
+            v, min_len=0, max_len=254, label="Căsuța atestată"),
+    ),
     "bo.router.observe_enabled": SettingSpec(
         key="bo.router.observe_enabled",
         type="boolean",

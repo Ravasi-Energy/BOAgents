@@ -64,13 +64,19 @@ EVENT_TYPES: tuple[str, ...] = (
     # retry can attribute (and refuse to repeat) a prior external effect.
     "email_process_attempt",
     # Poller attempt close row — pairs with the open bracket above
-    # (email_attempt_result:{mid}:{n}); an open attempt without it is an
-    # interrupted turn and must never be retried automatically.
+    # (email_attempt_result@{scope}:{mid}:{n}); an open attempt without
+    # it is an interrupted turn and must never be retried automatically.
     "email_attempt_result",
-    # Durable counter row for a failed content fetch (email_fetch_fail:
-    # {mid}:{n}) — kept in its own dedup family so it never pollutes the
-    # Executive-attempt brackets, but still bounds retries durably.
+    # Durable counter row for a failed content fetch
+    # (email_fetch_fail@{scope}:{mid}:{n}) — kept in its own dedup family
+    # so it never pollutes the Executive-attempt brackets, but still
+    # bounds retries durably.
     "email_fetch_failed",
+    # NOTE: "mail_scope_bound" is deliberately NOT listed here — the
+    # /audit/log POST endpoint accepts only EVENT_TYPES, and a binding row
+    # must exist ONLY through the dedup-marker path (mail_scope.py), never
+    # via an arbitrary caller. EVENT_TYPES feeds that endpoint's
+    # allowlist, so listing it would open a binding-forgery surface.
 )
 
 
@@ -624,7 +630,7 @@ class AuditLogger:
     def count_dedup_prefix(self, prefix: str) -> int:
         """Exact count of dedup markers under ``prefix`` (LIKE-escaped).
 
-        Poller attempt brackets key per ``email_attempt:{mid}:{n}``, so a
+        Poller attempt brackets key per ``email_attempt@{scope}:{mid}:{n}``, so a
         prefix count is the durable per-message attempt counter — immune
         to the 1000-row cap that truncates an unbounded ``query`` page.
         """

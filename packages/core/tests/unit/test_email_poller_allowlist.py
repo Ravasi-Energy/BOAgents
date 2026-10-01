@@ -44,12 +44,10 @@ def isolated_audit(tmp_path: Path) -> Path:
     default logger at a tmp DB so tests neither leak rows into a stray
     episodic_memory.db nor see each other's markers."""
     set_audit_logger(AuditLogger(db_path=tmp_path / "audit.db"))
-    poller._processed_ids.clear()
-    poller._terminal_label_id = None
+    poller.reset_mail_caches()
     yield tmp_path / "audit.db"
     set_audit_logger(None)
-    poller._processed_ids.clear()
-    poller._terminal_label_id = None
+    poller.reset_mail_caches()
 
 
 def _settings() -> Any:

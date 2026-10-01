@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -27,7 +28,7 @@ os.environ.pop("OE_PUBLIC_DEPLOYMENT", None)
 
 
 @pytest.fixture(autouse=True)
-def _isolated_turn_barrier_db(tmp_path, monkeypatch):
+def _isolated_turn_barrier_db(monkeypatch):
     """Per-test bo_agents.db for the turn barrier (RA13-A02-01).
 
     The module-level default is a per-process file — fine for barrier
@@ -37,13 +38,23 @@ def _isolated_turn_barrier_db(tmp_path, monkeypatch):
     fail-closed on a missing store file, so tests that only read must
     still see an initialized (empty) store. Tests that pass an explicit
     ``db_path`` are unaffected.
+
+    The file lives in its own temp dir, NOT the test's ``tmp_path`` —
+    tests that assert exact ``tmp_path`` contents (e.g. company_profile
+    atomicity checks) must not observe it.
     """
+    import shutil
+
     from openexecutive.bo import db as bo_db
     from openexecutive.bo import turn_barrier
 
-    monkeypatch.setattr(bo_db, "DB_PATH", tmp_path / "bo_agents.db")
+    bo_dir = tempfile.mkdtemp(prefix="oe_bo_test_")
+    monkeypatch.setattr(bo_db, "DB_PATH", Path(bo_dir) / "bo_agents.db")
     turn_barrier.initialize_db()
-    yield
+    try:
+        yield
+    finally:
+        shutil.rmtree(bo_dir, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)

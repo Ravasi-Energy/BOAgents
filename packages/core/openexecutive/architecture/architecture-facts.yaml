@@ -3003,13 +3003,46 @@ integrations:
     processing, following the workspace-mcp ``page_token`` hint in the
     ``📄 PAGINATION`` line — bounded by
     ``bo.mail.poll.max_pages_per_cycle`` (registry, 1–50, default 10).
+    RA11-B01 processing scope (``integrations.mail_scope``): every
+    durable marker family is keyed ``<family>@{scope}:{mid}`` where
+    ``{scope}`` is a versioned hash of (tenant, client/slot or a
+    per-install generated identity when unslotted, declared mailbox),
+    bound into the journal itself via ``mail_scope_binding:v{n}``
+    rows — the journal declares which processing context its evidence
+    belongs to instead of trusting live configuration, so a second
+    mailbox sharing the journal or a client switch can never consume
+    another context's markers, cache entries, or OE-Terminal label id.
+    An unbound journal carrying ANY prior evidence — legacy
+    (unscoped, pre-scope) markers, scoped markers whose binding rows
+    were lost, or an orphaned ``mail_scope_binding:`` marker —
+    refuses until the operator attests the mailbox via the
+    ``bo.mail.scope.bound_mailbox`` setting; legacy rows are never
+    backfilled and keep their message unread for human
+    reconciliation. The attestation is single-shot: the poller clears
+    the setting (audited ``bo_setting_change``) before it may
+    authorize a bind, so a forgotten value cannot adopt a future
+    journal. The NEWEST well-formed binding row is authoritative and
+    must verify — marker back-reference, field types, re-derived
+    token — a forged or torn ``mail_scope_bound`` row refuses the
+    journal rather than falling back to an older verified binding
+    (``binding_malformed``). ``mail_scope_bound`` is absent from the
+    public audit ``EVENT_TYPES``, so ``POST /audit/log`` cannot mint
+    a binding. ``reset_all_state`` wipes ``audit_dedup`` together
+    with ``audit_log`` — orphan markers would otherwise wedge the
+    mail channel as a permanent legacy refusal. Every mutating step (claim, close, mark-read,
+    fence, skip evidence) re-validates the captured scope against the
+    live tenant/slot/mailbox — mid-operation drift refuses the effect
+    in the new context. An unresolvable scope refuses the whole cycle
+    before enumeration; per-message refusals report ``scope_blocked``
+    and stay unread.
     Policy skips (self-sent, automated senders) are CONSUMED via
-    mark-read with an ``email_processed:{id}`` dedup marker — an unread
+    mark-read with an ``email_processed@{scope}:{id}`` dedup marker —
+    an unread
     skip otherwise re-occupies every page of every cycle (the
     starvation the single-page fetch had). ``_handle_email`` returns an
     explicit outcome: ``processed`` / ``skipped`` /
     ``mark_read_failed`` / ``failed`` / ``uncertain`` /
-    ``failed_final`` / ``claimed``. Each attempt is a durable pair of
+    ``failed_final`` / ``claimed`` / ``scope_blocked``. Each attempt is a durable pair of
     journal rows — an open ``email_process_attempt`` bracket written
     AND verified before the Executive runs, then an
     ``email_attempt_result`` close row (``executed`` /
@@ -3025,23 +3058,23 @@ integrations:
     processed marker. Auto-retry after an Executive turn is gone by
     design — fenced for a human, with a machine-readable ``reason`` in
     the outcome row. Claim identity is message-scoped and purely
-    durable: ``email_attempt:{mid}:{n}`` with ``n`` from the journal
+    durable: ``email_attempt@{scope}:{mid}:{n}`` with ``n`` from the journal
     count only (no volatile in-process counters), so two processes
     with divergent histories cannot fork the key space — BEGIN
     IMMEDIATE serializes them and the loser reports ``claimed``
     without consuming an attempt. Failed content fetches are counted
-    durably in a separate dedup family (``email_fetch_fail:{mid}:{n}``
+    durably in a separate dedup family (``email_fetch_fail@{scope}:{mid}:{n}``
     → ``email_fetch_failed`` rows), bounded by
     ``bo.mail.processing.max_attempts``. Inside the attempt,
     ``audit.context.attempt_scope`` stamps every emitted row —
     including ``session_id=NULL`` broadcast rows — with the explicit
-    ``attempt_ref`` (``{mid}:{n}:{owner}``) for operator attribution.
-    An ``email_processed:`` marker whose
+    ``attempt_ref`` (``{scope}:{mid}:{n}:{owner}``) for operator attribution.
+    An ``email_processed@{scope}:`` marker whose
     journal row was lost is likewise uncertain, not success; a policy
     skip whose marker cannot be proven committed defers instead of
     marking read. The claim
     itself is atomic: the bracket row carries a per-owner nonce so two
-    racing owners on one ``email_attempt:{mid}:{n}`` dedup key cannot
+    racing owners on one ``email_attempt@{scope}:{mid}:{n}`` dedup key cannot
     both commit — the loser gets a fingerprint conflict and reports
     ``claimed``. Terminal outcomes (``uncertain`` / ``failed_final``)
     are fenced provider-side with the ``OE-Terminal`` Gmail label —

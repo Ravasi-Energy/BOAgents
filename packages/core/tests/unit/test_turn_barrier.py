@@ -515,3 +515,122 @@ def test_decorated_generator_fenced_mid_stream(barrier_db):
     assert "chunk-2" not in out
     assert any("workspace change" in str(i) for i in out[1:])
     assert tail_writes == []
+
+
+def test_zombie_audit_writes_never_cross_epoch_bump(barrier_db, monkeypatch):
+    """Residual RA15-BO01-03 window: the loop's durable journal writes
+    (tool_invocation rows) must not land after a reconcile+epoch-bump.
+
+    Drives the real ``_stream_agent_loop`` detached (no decorator wrapper —
+    the zombie the barrier must tolerate), suspends it at the real
+    chip-yield boundary right after dispatch, performs the full
+    expire→reconcile→epoch-bump chain, resumes — and asserts zero audit
+    calls after the bump. Pre-fix the loop emitted ``tool_invocation``
+    rows past this point (they landed in the swapped-in journal).
+    """
+    import asyncio
+    from unittest.mock import patch
+
+    from openexecutive.orchestrator import executive as ex_mod
+
+    audit_calls: list[str] = []
+
+    def _spy(event_type, summary, **kw):
+        audit_calls.append(event_type)
+
+    class _Text:
+        type = "text"
+
+        def __init__(self, t):
+            self.text = t
+
+    class _ToolUse:
+        type = "tool_use"
+
+        def __init__(self):
+            self.id = "tu-1"
+            self.name = "lookup_person"
+            self.input = {"query": "x"}
+
+    class _Final:
+        usage = None
+
+        def __init__(self, content, stop):
+            self.content = content
+            self.stop_reason = stop
+
+    class _Stream:
+        def __init__(self, msg):
+            self._msg = msg
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return None
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+        async def get_final_message(self):
+            return self._msg
+
+    class _Provider:
+        def __init__(self):
+            self._msgs = [
+                _Final([_ToolUse()], "tool_use"),
+                _Final([_Text("done")], "end_turn"),
+            ]
+
+        def messages_stream(self, **kw):
+            return _Stream(self._msgs.pop(0))
+
+    async def _ok_skill(_input):
+        return "{}"
+
+    chip = {"type": "action_chip", "label": "x"}
+    lease = tb.admit_turn("executive", ref="a18", client_slug="A", wait_s=0)
+
+    async def _drive():
+        fence = tb.EffectFence(lease)
+        agen = ex_mod.Executive()._stream_agent_loop(
+            system_blocks=[],
+            messages=[{"role": "user", "content": "hi"}],
+            model="m",
+            turn_id=lease.turn_id,
+            _fence=fence,
+        )
+        bumped = False
+        try:
+            while True:
+                try:
+                    item = await agen.__anext__()
+                except (StopAsyncIteration, ex_mod._TurnFencedError):
+                    break
+                if item == chip and not bumped:
+                    _expire(barrier_db, lease)
+                    tb.reconcile_turn(
+                        lease.turn_id, resolution="verified", actor="op"
+                    )
+                    op = tb.begin_switch("activate")
+                    tb.end_switch(op)
+                    bumped = True
+                    audit_calls.clear()  # only count post-bump writes
+        finally:
+            await agen.aclose()
+
+    with (
+        patch.object(ex_mod, "get_provider", return_value=_Provider()),
+        patch.dict(ex_mod._ALL_SKILL_HANDLERS,
+                   {"lookup_person": _ok_skill}),
+        patch.object(ex_mod, "summarize_action", lambda **kw: dict(chip)),
+        patch.object(ex_mod, "audit_log", _spy),
+    ):
+        asyncio.run(_drive())
+
+    # Under a valid epoch the tool_invocation row is written (inside the
+    # dispatch hold); after the bump the zombie must emit nothing.
+    assert audit_calls == []

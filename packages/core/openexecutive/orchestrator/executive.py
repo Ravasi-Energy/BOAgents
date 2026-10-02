@@ -707,18 +707,21 @@ class Executive:
                 page_context_block=page_context_block,
             )
 
-            _emit_memory_snapshot(
-                session_id=session.session_id,
-                turn_id=turn_id,
-                user_message=user_message,
-                episodic_context=episodic_context,
-                retrieved_context=retrieved_context,
-                system_blocks=system_blocks,
-                history_len=len(session.get_recent_history()),
-                company_profile=session.company_profile,
-                model=effective_model,
-                committee=False,
-            )
+            # Durable journal write → fence it (RA15-BO01-03 residual).
+            async with _maybe_fence_hold(_fence) as _snap_ok:
+                if _snap_ok:
+                    _emit_memory_snapshot(
+                        session_id=session.session_id,
+                        turn_id=turn_id,
+                        user_message=user_message,
+                        episodic_context=episodic_context,
+                        retrieved_context=retrieved_context,
+                        system_blocks=system_blocks,
+                        history_len=len(session.get_recent_history()),
+                        company_profile=session.company_profile,
+                        model=effective_model,
+                        committee=False,
+                    )
             consulted: list[str] = []
             async for item in self._stream_agent_loop(
                 system_blocks,
@@ -946,17 +949,20 @@ class Executive:
         draft = ""
         consulted: list[str] = []
         specialist_outputs: dict[str, str] = {}
-        _emit_memory_snapshot(
-            session_id=session.session_id,
-            turn_id=turn_id,
-            user_message=user_message,
-            episodic_context=episodic_context,
-            retrieved_context=retrieved_context,
-            system_blocks=system_blocks,
-            history_len=len(session.get_recent_history()),
-            company_profile=session.company_profile,
-            model=effective_model,
-            committee=True,
+        # Durable journal write → fence it (RA15-BO01-03 residual).
+        async with _maybe_fence_hold(_fence) as _snap_ok:
+            if _snap_ok:
+                _emit_memory_snapshot(
+                    session_id=session.session_id,
+                    turn_id=turn_id,
+                    user_message=user_message,
+                    episodic_context=episodic_context,
+                    retrieved_context=retrieved_context,
+                    system_blocks=system_blocks,
+                    history_len=len(session.get_recent_history()),
+                    company_profile=session.company_profile,
+                    model=effective_model,
+                    committee=True,
         )
 
         async for item in self._stream_agent_loop(
@@ -1129,14 +1135,17 @@ class Executive:
                 revision_final_msg = None
         revision_ms = round((time.monotonic() - revision_t0) * 1000)
         if revision_final_msg is not None:
-            _emit_cache_event(
-                session_id=session.session_id,
-                turn_id=_committee_turn_id,
-                iteration=0,  # 0 = revision pass (post-draft, post-review)
-                final_msg=revision_final_msg,
-                model=effective_model,
-                actor="committee_revision",
-            )
+            # Durable journal write → fence it (RA15-BO01-03 residual).
+            async with _maybe_fence_hold(_fence) as _cache_ok:
+                if _cache_ok:
+                    _emit_cache_event(
+                        session_id=session.session_id,
+                        turn_id=_committee_turn_id,
+                        iteration=0,  # 0 = revision pass (post-draft, post-review)
+                        final_msg=revision_final_msg,
+                        model=effective_model,
+                        actor="committee_revision",
+                    )
 
         if debug_collector:
             evt = debug_collector.emit("synthesis_done", {
@@ -1330,13 +1339,18 @@ class Executive:
             # flow chart can show "this turn used N cache hits at iter K".
             # Always after the API call, never in the request path — does
             # not touch system_blocks / messages, so caching is unaffected.
-            _emit_cache_event(
-                session_id=getattr(current_session.get(), "session_id", None),
-                turn_id=turn_id or "",
-                iteration=iteration,
-                final_msg=final_msg,
-                model=stream_model,
-            )
+            # Durable journal write → fence it (RA15-BO01-03 residual).
+            async with _maybe_fence_hold(_fence) as _cache_ok:
+                if _cache_ok:
+                    _emit_cache_event(
+                        session_id=getattr(
+                            current_session.get(), "session_id", None
+                        ),
+                        turn_id=turn_id or "",
+                        iteration=iteration,
+                        final_msg=final_msg,
+                        model=stream_model,
+                    )
 
             web_search_queries: list[str] = []
             for block in final_msg.content:
@@ -1373,24 +1387,30 @@ class Executive:
                         "queries": web_search_queries,
                     })
                     yield debug_collector.to_sse_dict(evt)
-                for q in web_search_queries:
-                    audit_log(
-                        "tool_invocation",
-                        f"web_search: {q[:200]}",
-                        session_id=session_id,
-                        turn_id=turn_id,
-                        actor="executive",
-                        details={
-                            "tool": WEB_SEARCH_TOOL_NAME,
-                            "kind": "server_tool",
-                            "iteration": iteration,
-                            "query": q[:500],
-                        },
-                        full={
-                            "query": q,
-                            "active_prompt_blocks": _system_block_names(system_blocks),
-                        },
-                    )
+                # RA15-BO01-03 residual: the audit row is a durable journal
+                # write — hold the fence across it so a zombie resuming
+                # after reconcile+epoch-bump cannot stamp its evidence into
+                # the swapped-in client's journal.
+                async with _maybe_fence_hold(_fence) as _ws_ok:
+                    if _ws_ok:
+                        for q in web_search_queries:
+                            audit_log(
+                                "tool_invocation",
+                                f"web_search: {q[:200]}",
+                                session_id=session_id,
+                                turn_id=turn_id,
+                                actor="executive",
+                                details={
+                                    "tool": WEB_SEARCH_TOOL_NAME,
+                                    "kind": "server_tool",
+                                    "iteration": iteration,
+                                    "query": q[:500],
+                                },
+                                full={
+                                    "query": q,
+                                    "active_prompt_blocks": _system_block_names(system_blocks),
+                                },
+                            )
 
             if final_msg.stop_reason != "tool_use":
                 return
@@ -1479,7 +1499,32 @@ class Executive:
                         session_id=session_id,
                         debug_collector=debug_collector,
                     )
-                spec_ms = round((time.monotonic() - spec_t0) * 1000)
+                    spec_ms = round((time.monotonic() - spec_t0) * 1000)
+                    # The consult audit rows are durable journal writes —
+                    # keep them inside the same hold as the dispatch so a
+                    # stale worker cannot stamp them into a swapped-in
+                    # journal after an epoch bump (RA15-BO01-03 residual).
+                    for call, spec_result in zip(
+                        run_calls, specialist_results, strict=True
+                    ):
+                        audit_log(
+                            "specialist_consult",
+                            f"Consulted {call['specialist']}: {str(call['query'])[:160]}",
+                            session_id=session_id,
+                            turn_id=turn_id,
+                            actor=call["specialist"],
+                            details={
+                                "iteration": iteration,
+                                "duration_ms": spec_ms,
+                                "context_preview": str(call.get("context", ""))[:200],
+                            },
+                            full={
+                                "query": call["query"],
+                                "context": call.get("context", ""),
+                                "response": spec_result,
+                                "active_prompt_blocks": _system_block_names(system_blocks),
+                            },
+                        )
                 for tu, result in zip(
                     run_tool_uses, specialist_results, strict=True
                 ):
@@ -1505,28 +1550,6 @@ class Executive:
                         # in multiple iterations — committee only needs a
                         # representative excerpt per domain.
                         specialist_outputs_out[call["specialist"]] = result
-                for call, spec_result in zip(
-                    run_calls, specialist_results, strict=True
-                ):
-                    audit_log(
-                        "specialist_consult",
-                        f"Consulted {call['specialist']}: {str(call['query'])[:160]}",
-                        session_id=session_id,
-                        turn_id=turn_id,
-                        actor=call["specialist"],
-                        details={
-                            "iteration": iteration,
-                            "duration_ms": spec_ms,
-                            "context_preview": str(call.get("context", ""))[:200],
-                        },
-                        full={
-                            "query": call["query"],
-                            "context": call.get("context", ""),
-                            "response": spec_result,
-                            "active_prompt_blocks": _system_block_names(system_blocks),
-                        },
-                    )
-
             if skill_tool_uses:
                 for tu in skill_tool_uses:
                     logger.info("→ skill:%s  input=%s", tu["name"], _trunc(tu["input"]))
@@ -1536,6 +1559,14 @@ class Executive:
                 # commit between the lease validation and these effects.
                 # return_exceptions=True: one crashing handler must not abort
                 # the whole turn. See `_tool_error_result`.
+                # RA15-BO01-03 residual: the per-tool audit rows are durable
+                # journal writes — they run inside the same hold as the
+                # dispatch so a stale worker cannot stamp evidence into a
+                # swapped-in journal after an epoch bump. Chips/form_patch
+                # events are computed here but yielded after the hold
+                # releases (yields while holding the write lock would stall
+                # the wrapper's heartbeat renewal).
+                _skill_emits: list[Any] = []
                 async with _maybe_fence_hold(_fence) as _skill_ok:
                     if not _skill_ok:
                         raise _TurnFencedError
@@ -1543,24 +1574,77 @@ class Executive:
                         *(_ALL_SKILL_HANDLERS[tu["name"]](tu["input"]) for tu in skill_tool_uses),
                         return_exceptions=True,
                     )
-                # `raw` rather than `result` so the narrowed value keeps the
-                # plain `str` type the rest of this function's loops use.
-                for tu, raw in zip(skill_tool_uses, skill_results, strict=True):
-                    if isinstance(raw, BaseException):
-                        # Cancellation is not a tool failure — `gather` captures
-                        # it like any other exception, so re-raise it or the
-                        # turn-timeout / client-disconnect paths in
-                        # api/routes/chat.py silently stop working.
-                        if isinstance(raw, asyncio.CancelledError):
-                            raise raw
-                        logger.exception(
-                            "skill:%s raised — session=%s turn=%s iteration=%d",
-                            tu["name"], session_id, turn_id, iteration,
-                            exc_info=raw,
+                    # `raw` rather than `result` so the narrowed value keeps the
+                    # plain `str` type the rest of this function's loops use.
+                    for tu, raw in zip(skill_tool_uses, skill_results, strict=True):
+                        if isinstance(raw, BaseException):
+                            # Cancellation is not a tool failure — `gather` captures
+                            # it like any other exception, so re-raise it or the
+                            # turn-timeout / client-disconnect paths in
+                            # api/routes/chat.py silently stop working.
+                            if isinstance(raw, asyncio.CancelledError):
+                                raise raw
+                            logger.exception(
+                                "skill:%s raised — session=%s turn=%s iteration=%d",
+                                tu["name"], session_id, turn_id, iteration,
+                                exc_info=raw,
+                            )
+                            audit_log(
+                                "tool_invocation",
+                                f"skill:{tu['name']} FAILED: {type(raw).__name__}",
+                                session_id=session_id,
+                                turn_id=turn_id,
+                                actor="executive",
+                                details={
+                                    "tool": tu["name"],
+                                    "kind": "skill",
+                                    "iteration": iteration,
+                                    "ok": False,
+                                    "error": repr(raw)[:ERROR_DETAIL_LEN],
+                                },
+                            )
+                            # Hand the model an error tool_result and move on. No
+                            # chip: summarize_action must never see an exception.
+                            results_by_id[tu["id"]] = _tool_error_result(tu["name"], raw)
+                            continue
+                        result = raw
+                        logger.info("← skill:%s  result=%s", tu["name"], _trunc(result))
+                        results_by_id[tu["id"]] = result
+                        # Inline action chip for side-effecting tools. None
+                        # when the tool is read-only (search_skills, load_skill,
+                        # list_people, ask_about_person, lookup_person) or
+                        # when the handler reported an error.
+                        chip = summarize_action(
+                            tool_name=tu["name"],
+                            tool_input=tu["input"],
+                            tool_result=result,
+                            iteration=iteration,
                         )
+                        if chip is not None:
+                            _skill_emits.append(chip)
+                        # Form proposals reach the Ask OE panel as a dedicated
+                        # SSE event (not an action chip — nothing was mutated).
+                        # Only deliver what the handler accepted; a shape error
+                        # already went back to the model as the tool_result.
+                        if tu["name"] == PROPOSE_FORM_VALUES:
+                            try:
+                                handler_ok = "error" not in json.loads(result)
+                            except (json.JSONDecodeError, TypeError):
+                                # The handler always returns JSON today; if a
+                                # future change breaks that, drop the event
+                                # rather than killing the whole SSE stream.
+                                logger.warning(
+                                    "propose_form_values returned non-JSON; "
+                                    "suppressing form_patch event"
+                                )
+                                handler_ok = False
+                            if handler_ok:
+                                _skill_emits.append(
+                                    build_form_patch_event(tu["input"], iteration)
+                                )
                         audit_log(
                             "tool_invocation",
-                            f"skill:{tu['name']} FAILED: {type(raw).__name__}",
+                            f"skill:{tu['name']} input={audit_tool_input(tu['name'], tu['input'])}",
                             session_id=session_id,
                             turn_id=turn_id,
                             actor="executive",
@@ -1568,65 +1652,16 @@ class Executive:
                                 "tool": tu["name"],
                                 "kind": "skill",
                                 "iteration": iteration,
-                                "ok": False,
-                                "error": repr(raw)[:ERROR_DETAIL_LEN],
+                                "result_preview": audit_tool_result(tu["name"], result),
+                            },
+                            full={
+                                "input": audit_tool_input_full(tu["name"], tu["input"]),
+                                "result": audit_tool_result_full(tu["name"], result),
+                                "active_prompt_blocks": _system_block_names(system_blocks),
                             },
                         )
-                        # Hand the model an error tool_result and move on. No
-                        # chip: summarize_action must never see an exception.
-                        results_by_id[tu["id"]] = _tool_error_result(tu["name"], raw)
-                        continue
-                    result = raw
-                    logger.info("← skill:%s  result=%s", tu["name"], _trunc(result))
-                    results_by_id[tu["id"]] = result
-                    # Inline action chip for side-effecting tools. None
-                    # when the tool is read-only (search_skills, load_skill,
-                    # list_people, ask_about_person, lookup_person) or
-                    # when the handler reported an error.
-                    chip = summarize_action(
-                        tool_name=tu["name"],
-                        tool_input=tu["input"],
-                        tool_result=result,
-                        iteration=iteration,
-                    )
-                    if chip is not None:
-                        yield chip
-                    # Form proposals reach the Ask OE panel as a dedicated
-                    # SSE event (not an action chip — nothing was mutated).
-                    # Only deliver what the handler accepted; a shape error
-                    # already went back to the model as the tool_result.
-                    if tu["name"] == PROPOSE_FORM_VALUES:
-                        try:
-                            handler_ok = "error" not in json.loads(result)
-                        except (json.JSONDecodeError, TypeError):
-                            # The handler always returns JSON today; if a
-                            # future change breaks that, drop the event
-                            # rather than killing the whole SSE stream.
-                            logger.warning(
-                                "propose_form_values returned non-JSON; "
-                                "suppressing form_patch event"
-                            )
-                            handler_ok = False
-                        if handler_ok:
-                            yield build_form_patch_event(tu["input"], iteration)
-                    audit_log(
-                        "tool_invocation",
-                        f"skill:{tu['name']} input={audit_tool_input(tu['name'], tu['input'])}",
-                        session_id=session_id,
-                        turn_id=turn_id,
-                        actor="executive",
-                        details={
-                            "tool": tu["name"],
-                            "kind": "skill",
-                            "iteration": iteration,
-                            "result_preview": audit_tool_result(tu["name"], result),
-                        },
-                        full={
-                            "input": audit_tool_input_full(tu["name"], tu["input"]),
-                            "result": audit_tool_result_full(tu["name"], result),
-                            "active_prompt_blocks": _system_block_names(system_blocks),
-                        },
-                    )
+                for _emit in _skill_emits:
+                    yield _emit
 
             if mcp_tool_uses and self._mcp_gateway is not None:
                 _mcp_dispatch = {
@@ -1647,6 +1682,10 @@ class Executive:
                 # one tool must not take the turn down with it. MCP calls are
                 # the second real effect boundary — fenced the same way
                 # (RA15-BO01-03).
+                # Same as the skill block: audit rows are durable journal
+                # writes and stay inside the hold; chips are buffered and
+                # yielded after the lock releases (RA15-BO01-03 residual).
+                _mcp_emits: list[Any] = []
                 async with _maybe_fence_hold(_fence) as _mcp_ok:
                     if not _mcp_ok:
                         raise _TurnFencedError
@@ -1654,19 +1693,49 @@ class Executive:
                         *(_mcp_dispatch[tu["name"]](tu["input"]) for tu in mcp_tool_uses),
                         return_exceptions=True,
                     )
-                for tu, raw in zip(mcp_tool_uses, mcp_results, strict=True):
-                    tool_label = tu["input"].get("name", tu["name"]) if tu["name"] == "call_tool" else tu["name"]
-                    if isinstance(raw, BaseException):
-                        if isinstance(raw, asyncio.CancelledError):
-                            raise raw
-                        logger.exception(
-                            "mcp:%s raised — session=%s turn=%s iteration=%d",
-                            tool_label, session_id, turn_id, iteration,
-                            exc_info=raw,
+                    for tu, raw in zip(mcp_tool_uses, mcp_results, strict=True):
+                        tool_label = tu["input"].get("name", tu["name"]) if tu["name"] == "call_tool" else tu["name"]
+                        if isinstance(raw, BaseException):
+                            if isinstance(raw, asyncio.CancelledError):
+                                raise raw
+                            logger.exception(
+                                "mcp:%s raised — session=%s turn=%s iteration=%d",
+                                tool_label, session_id, turn_id, iteration,
+                                exc_info=raw,
+                            )
+                            audit_log(
+                                "tool_invocation",
+                                f"mcp:{tool_label} FAILED: {type(raw).__name__}",
+                                session_id=session_id,
+                                turn_id=turn_id,
+                                actor="executive",
+                                details={
+                                    "tool": tool_label,
+                                    "kind": "mcp",
+                                    "iteration": iteration,
+                                    "ok": False,
+                                    "error": repr(raw)[:ERROR_DETAIL_LEN],
+                                },
+                            )
+                            results_by_id[tu["id"]] = _tool_error_result(tool_label, raw)
+                            continue
+                        result = raw
+                        logger.info("← %s  result=%s", tool_label, _trunc(result))
+                        results_by_id[tu["id"]] = result
+                        # MCP chip emission. search_tools is read-only (gets
+                        # filtered out by summarize_action's allowlist);
+                        # call_tool and load_mcp_server both surface a chip.
+                        chip = summarize_action(
+                            tool_name=tu["name"],
+                            tool_input=tu["input"],
+                            tool_result=result,
+                            iteration=iteration,
                         )
+                        if chip is not None:
+                            _mcp_emits.append(chip)
                         audit_log(
                             "tool_invocation",
-                            f"mcp:{tool_label} FAILED: {type(raw).__name__}",
+                            f"mcp:{tool_label} input={audit_tool_input(tool_label, tu['input'])}",
                             session_id=session_id,
                             turn_id=turn_id,
                             actor="executive",
@@ -1674,44 +1743,16 @@ class Executive:
                                 "tool": tool_label,
                                 "kind": "mcp",
                                 "iteration": iteration,
-                                "ok": False,
-                                "error": repr(raw)[:ERROR_DETAIL_LEN],
+                                "result_preview": audit_tool_result(tool_label, result),
+                            },
+                            full={
+                                "input": audit_tool_input_full(tool_label, tu["input"]),
+                                "result": audit_tool_result_full(tool_label, result),
+                                "active_prompt_blocks": _system_block_names(system_blocks),
                             },
                         )
-                        results_by_id[tu["id"]] = _tool_error_result(tool_label, raw)
-                        continue
-                    result = raw
-                    logger.info("← %s  result=%s", tool_label, _trunc(result))
-                    results_by_id[tu["id"]] = result
-                    # MCP chip emission. search_tools is read-only (gets
-                    # filtered out by summarize_action's allowlist);
-                    # call_tool and load_mcp_server both surface a chip.
-                    chip = summarize_action(
-                        tool_name=tu["name"],
-                        tool_input=tu["input"],
-                        tool_result=result,
-                        iteration=iteration,
-                    )
-                    if chip is not None:
-                        yield chip
-                    audit_log(
-                        "tool_invocation",
-                        f"mcp:{tool_label} input={audit_tool_input(tool_label, tu['input'])}",
-                        session_id=session_id,
-                        turn_id=turn_id,
-                        actor="executive",
-                        details={
-                            "tool": tool_label,
-                            "kind": "mcp",
-                            "iteration": iteration,
-                            "result_preview": audit_tool_result(tool_label, result),
-                        },
-                        full={
-                            "input": audit_tool_input_full(tool_label, tu["input"]),
-                            "result": audit_tool_result_full(tool_label, result),
-                            "active_prompt_blocks": _system_block_names(system_blocks),
-                        },
-                    )
+                for _emit in _mcp_emits:
+                    yield _emit
 
             if debug_collector:
                 for evt in debug_collector._events[event_cursor:]:

@@ -4367,10 +4367,14 @@ bo:
     is demonstrably apt — a live task in this process (``_LIVE_TURNS``
     registry) or any live foreign pid (single-host limit: another
     process's tasks cannot be introspected, so liveness is assumed);
-    expiry is never proof of absence. Residual bound: in-loop audit rows
-    between a released hold and the next yield could straddle an epoch
-    bump only for an already-detached zombie — evidence loss, never a
-    user-visible effect. The durable trail is readable over the API
+    expiry is never proof of absence. The residual audit window is
+    closed too: every durable journal write inside the loop —
+    ``memory_snapshot``, ``cache_event``/usage rows, ``web_search``,
+    ``specialist_consult`` and per-tool ``tool_invocation`` — runs under
+    a fence hold, so a zombie resuming after reconcile+epoch-bump can
+    neither stamp evidence into the swapped-in journal nor emit a
+    visible item; buffered chips/form_patch events are yielded only
+    after the hold releases. The durable trail is readable over the API
     (F-2/F-3): ``GET /clients/turn-history`` lists non-active leases
     newest-first and ``GET /clients/control-audit`` the ``bo_control_audit``
     rows — both ``clients:read`` with ``owner``/``actor`` withheld from

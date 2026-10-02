@@ -376,7 +376,9 @@ async def _maybe_fence_hold(fence: Any) -> AsyncIterator[bool]:
 _CHILD_DRAIN_SECONDS = 5.0
 
 
-async def _run_children(fence: Any, coros: Any) -> list[Any]:
+async def _run_children(
+    fence: Any, coros: Any, labels: Any = None
+) -> list[Any]:
     """Dispatch child coroutines shielded from parent cancellation.
 
     RA15-BO01-06: ``asyncio.gather`` delivers cancellation to its
@@ -387,21 +389,44 @@ async def _run_children(fence: Any, coros: Any) -> list[Any]:
     produce an effect in the swapped-in client.
 
     Here each child runs as its own task, shielded so a parent cancel
-    never reaches it: ``task.done()`` then honestly means the coroutine —
-    including whatever it awaited — completed. Every task is registered
-    on the lease (``turn_barrier.register_child_task``) so
-    ``reconcile_turn`` refuses while any child is still runnable. On
-    parent cancellation we drain for a bounded window and propagate the
-    cancellation; children still pending stay registered and keep the
-    lease unreconcilable until they genuinely end (or die with the
-    process).
+    never reaches it. Two completion signals stay honest:
+
+    * ``task.done()`` means the coroutine — including whatever it
+      awaited — completed;
+    * executor work the child submitted (``to_thread`` inside a
+      ``wait_for`` timeout) stays tracked via
+      ``turn_barrier.ensure_thread_tracking`` + ``wrap_child_context``
+      — a ``concurrent.futures.Future`` is honest about the thread even
+      after its owning task is gone.
+
+    Every task is registered on the lease
+    (``turn_barrier.register_child_task``) so ``reconcile_turn``
+    refuses while any child task OR tracked executor work is still
+    runnable. On parent cancellation we drain for a bounded window,
+    then audit the outcome of every child whose result we abandon
+    (finished during drain → written now; still pending → done-callback
+    writes it later) into the unswapped ``bo_control_audit``
+    (RA15-BO01-09), and propagate the cancellation.
     """
-    tasks = [asyncio.ensure_future(c) for c in list(coros)]
-    if fence is not None:
+    coro_list = list(coros)
+    label_list = (
+        list(labels)
+        if labels is not None
+        else [getattr(c, "__qualname__", "child") for c in coro_list]
+    )
+    turn_id = fence.lease.turn_id if fence is not None else None
+    if turn_id is not None:
         from openexecutive.bo import turn_barrier as _tb
 
+        _tb.ensure_thread_tracking()
+        tasks = [
+            asyncio.ensure_future(_tb.wrap_child_context(turn_id, c))
+            for c in coro_list
+        ]
         for t in tasks:
-            _tb.register_child_task(fence.lease.turn_id, t)
+            _tb.register_child_task(turn_id, t)
+    else:
+        tasks = [asyncio.ensure_future(c) for c in coro_list]
     try:
         return list(
             await asyncio.shield(
@@ -410,13 +435,27 @@ async def _run_children(fence: Any, coros: Any) -> list[Any]:
         )
     except asyncio.CancelledError:
         await asyncio.wait(tasks, timeout=_CHILD_DRAIN_SECONDS)
+        if turn_id is not None:
+            from openexecutive.bo import turn_barrier as _tb
+
+            labels = (label_list + ["child"] * len(tasks))[: len(tasks)]
+            for label, t in zip(labels, tasks, strict=True):
+                if not _tb._mark_outcome_tracked(t):
+                    continue
+                if t.done():
+                    _tb.late_child_outcome(turn_id, label, t)
+                else:
+                    t.add_done_callback(
+                        lambda _t, tid=turn_id, lbl=label:
+                        _tb.late_child_outcome(tid, lbl, _t)
+                    )
         raise
 
 
-async def _run_child(fence: Any, coro: Any) -> Any:
+async def _run_child(fence: Any, coro: Any, label: str = "child") -> Any:
     """Single-child variant of ``_run_children`` — re-raises child
     failures like a plain ``await`` would."""
-    result = (await _run_children(fence, [coro]))[0]
+    result = (await _run_children(fence, [coro], [label]))[0]
     if isinstance(result, BaseException):
         raise result
     return result
@@ -1104,7 +1143,8 @@ class Executive:
         # (RA15-BO01-06).
         critiques = await _run_child(
             _fence,
-            committee.review(
+            label="committee.review",
+            coro=committee.review(
                 user_message=user_message,
                 draft=draft,
                 consulted=consulted,
@@ -1555,7 +1595,8 @@ class Executive:
                         raise _TurnFencedError
                     specialist_results = await _run_child(
                         _fence,
-                        route_parallel(
+                        label="route_parallel",
+                        coro=route_parallel(
                             run_calls,
                             episodic_context=episodic_context,
                             session_id=session_id,
@@ -1636,6 +1677,7 @@ class Executive:
                     skill_results = await _run_children(
                         _fence,
                         (_ALL_SKILL_HANDLERS[tu["name"]](tu["input"]) for tu in skill_tool_uses),
+                        [f"skill:{tu['name']}" for tu in skill_tool_uses],
                     )
                     # `raw` rather than `result` so the narrowed value keeps the
                     # plain `str` type the rest of this function's loops use.
@@ -1755,6 +1797,7 @@ class Executive:
                     mcp_results = await _run_children(
                         _fence,
                         (_mcp_dispatch[tu["name"]](tu["input"]) for tu in mcp_tool_uses),
+                        [f"mcp:{tu['name']}" for tu in mcp_tool_uses],
                     )
                     for tu, raw in zip(mcp_tool_uses, mcp_results, strict=True):
                         tool_label = tu["input"].get("name", tu["name"]) if tu["name"] == "call_tool" else tu["name"]

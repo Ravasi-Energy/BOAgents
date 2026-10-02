@@ -38,13 +38,17 @@ values (``bo.turns.lease_seconds``, ``bo.switch.max_wait_seconds``).
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextlib
+import contextvars
 import json
 import logging
 import os
 import sqlite3
+import threading
 import time
 import uuid
+import weakref
 from collections.abc import AsyncGenerator, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -478,11 +482,79 @@ def _finish(lease: TurnLease, status: str, *, resolution: str | None,
         return False
 
 
+# Tasks/futures that already have a late-outcome audit callback
+# attached — a child can surface at both the dispatcher's cancel path
+# and ``_audit_orphaned_work``; the audit row must be written once.
+_OUTCOME_TRACKED: weakref.WeakSet = weakref.WeakSet()
+
+
+def _mark_outcome_tracked(obj: Any) -> bool:
+    """True the first time an object is marked for outcome audit."""
+    with _TRACK_LOCK:
+        if obj in _OUTCOME_TRACKED:
+            return False
+        _OUTCOME_TRACKED.add(obj)
+        return True
+
+
+def _audit_orphaned_work(turn_id: str) -> None:
+    """Attach outcome audit to child work still capable of effects at
+    the moment its turn could not close — RA15-BO01-09. Tasks get the
+    ``late_child_outcome`` callback; executor futures get the same
+    durable row written when the worker thread itself reports done
+    (the callback fires in the completing thread, which is fine — the
+    write uses its own connection on the unswapped store)."""
+    for task in list(_LIVE_CHILDREN.get(turn_id, ())):
+        if task.done() or not _mark_outcome_tracked(task):
+            continue
+        coro = task.get_coro()
+        label = getattr(coro, "__qualname__", "child-task")
+        task.add_done_callback(
+            lambda t, tid=turn_id, lbl=label:
+            late_child_outcome(tid, lbl, t)
+        )
+    with _TRACK_LOCK:
+        pending = list(_PENDING_CHILD_WORK.get(turn_id, ()))
+    for fut in pending:
+        if fut.done() or not _mark_outcome_tracked(fut):
+            continue
+
+        def _rec(f: Any, tid: str = turn_id) -> None:
+            try:
+                if f.cancelled():
+                    outcome = "cancelled"
+                elif f.exception() is not None:
+                    outcome = f"error:{type(f.exception()).__name__}"
+                else:
+                    outcome = "completed"
+                record_child_outcome(tid, "executor-work", outcome)
+            except Exception:
+                logger.exception(
+                    "turn_barrier: orphaned-work audit failed for "
+                    "turn %s", tid)
+
+        fut.add_done_callback(_rec)
+
+
 def complete_turn(lease: TurnLease, *, outcome: str) -> bool:
     """Turn finished — effects accounted for. Safe to switch after.
 
     The CAS carries the admission epoch: a close racing a switch that
-    somehow ran must not land as 'completed' under a stale epoch."""
+    somehow ran must not land as 'completed' under a stale epoch.
+
+    A turn that ends while dispatched child work — or executor work a
+    child submitted — is still capable of producing effects cannot
+    honestly close (RA15-BO01-06 internal-timeout residual): the lease
+    degrades to ``uncertain`` instead, stays a switch blocker, and a
+    reconcile is refused until the work demonstrably ends (or dies
+    with the process). The orphaned work gets durable outcome audit.
+    """
+    if children_alive(lease.turn_id):
+        _audit_orphaned_work(lease.turn_id)
+        return _finish(
+            lease, "uncertain", resolution=None,
+            reason="child work unproven at turn end",
+            epoch=lease.epoch)
     return _finish(lease, "closed", resolution=outcome, reason=None,
                    epoch=lease.epoch)
 
@@ -514,6 +586,116 @@ _LIVE_TURNS: dict[str, Any] = {}
 # in-process by design: after a restart the children are dead with the
 # process, which IS proof they can no longer produce effects.
 _LIVE_CHILDREN: dict[str, set] = {}
+
+# Executor work bound to the owning lease — RA15-BO01-06 residual.
+# A dispatched child can await ``asyncio.to_thread`` /
+# ``run_in_executor`` inside ``asyncio.wait_for``: on timeout the
+# child's *task* ends honestly while the executor thread keeps
+# running — ``task.done()`` cannot see it. The loop's default executor
+# is instrumented once (``ensure_thread_tracking``); every Future
+# submitted from inside a tracked child coroutine (``_CURRENT_TURN``
+# context var) is registered here, and a
+# ``concurrent.futures.Future.done()`` is set by the worker thread
+# itself, so it stays honest about real thread termination. Reconcile
+# refuses while a tracked Future is still running, exactly like a live
+# task. Process death remains proof — executor threads die with it.
+_CURRENT_TURN: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "bo_turn", default=None
+)
+_PENDING_CHILD_WORK: dict[str, set[concurrent.futures.Future]] = {}
+# Future done-callbacks fire in the completing worker THREAD while
+# submit() runs on the loop thread — mutations of the registry must be
+# serialized, or a pop racing a setdefault could hide a fresh Future.
+_TRACK_LOCK = threading.Lock()
+
+_TRACK_EXECUTOR_FLAG = "_bo_turn_tracking"
+
+
+class _TrackingExecutor(concurrent.futures.ThreadPoolExecutor):
+    """ThreadPoolExecutor that attributes submitted work to the turn
+    whose tracked child coroutine submitted it (``_CURRENT_TURN``).
+    ``set_default_executor`` requires a real ThreadPoolExecutor, so the
+    wrapper subclasses it: when the loop already had a default executor
+    the submissions delegate to it (its pool sizing is preserved and
+    our own inherited pool never spawns a thread); otherwise this
+    instance IS the pool. Submissions outside a tracked child pass
+    through untouched."""
+
+    def __init__(
+        self, inner: concurrent.futures.ThreadPoolExecutor | None = None
+    ) -> None:
+        super().__init__()
+        self._inner = inner
+
+    def submit(self, fn: Any, /, *args: Any, **kwargs: Any) -> Any:
+        if self._inner is not None:
+            fut = self._inner.submit(fn, *args, **kwargs)
+        else:
+            fut = super().submit(fn, *args, **kwargs)
+        turn_id = _CURRENT_TURN.get()
+        if turn_id is not None:
+            with _TRACK_LOCK:
+                _PENDING_CHILD_WORK.setdefault(turn_id, set()).add(fut)
+
+            def _done(f: Any, tid: str = turn_id) -> None:
+                _child_work_done(tid, f)
+
+            fut.add_done_callback(_done)
+        return fut
+
+    def shutdown(self, wait: bool = True, *,
+                 cancel_futures: bool = False) -> None:
+        if self._inner is not None:
+            self._inner.shutdown(wait, cancel_futures=cancel_futures)
+        super().shutdown(wait, cancel_futures=cancel_futures)
+
+
+def _child_work_done(turn_id: str, fut: Any) -> None:
+    with _TRACK_LOCK:
+        pending = _PENDING_CHILD_WORK.get(turn_id)
+        if pending is not None:
+            pending.discard(fut)
+            if not pending:
+                _PENDING_CHILD_WORK.pop(turn_id, None)
+
+
+def ensure_thread_tracking() -> None:
+    """Install the turn-tracking default executor on the running loop
+    (idempotent, per loop). Without it, executor work spawned inside a
+    dispatched child is invisible to reconcile once the child's task
+    has ended — the internal-timeout hole of RA15-BO01-06."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    if getattr(loop, _TRACK_EXECUTOR_FLAG, False):
+        return
+    try:
+        inner = getattr(loop, "_default_executor", None)
+        loop.set_default_executor(_TrackingExecutor(inner))
+    except Exception:
+        logger.exception(
+            "turn_barrier: cannot install the tracking executor; "
+            "executor work inside dispatched children will not be "
+            "visible to reconcile")
+        return
+    setattr(loop, _TRACK_EXECUTOR_FLAG, True)
+
+
+def wrap_child_context(turn_id: str, coro: Any) -> Any:
+    """Return a coroutine that runs ``coro`` with this turn's context
+    var set, so executor submissions made anywhere inside the child —
+    including through ``asyncio.wait_for`` — are attributed to it."""
+
+    async def _wrapped() -> Any:
+        token = _CURRENT_TURN.set(turn_id)
+        try:
+            return await coro
+        finally:
+            _CURRENT_TURN.reset(token)
+
+    return _wrapped()
+
 
 # Acquiring the fence's BEGIN IMMEDIATE may legitimately wait behind
 # another turn's effect section (skill/MCP dispatch can run tens of
@@ -554,8 +736,87 @@ def _child_done(turn_id: str, task: Any) -> None:
 
 
 def children_alive(turn_id: str) -> bool:
-    """True while any registered child task of the turn is unfinished."""
-    return any(not t.done() for t in _LIVE_CHILDREN.get(turn_id, ()))
+    """True while any registered child task — or executor work it
+    submitted — is unfinished. A child coroutine that ends while an
+    executor thread it spawned is still running
+    (``wait_for(to_thread)`` timeout) must keep the lease blocked: the
+    thread can still produce effects."""
+    if any(not t.done() for t in _LIVE_CHILDREN.get(turn_id, ())):
+        return True
+    with _TRACK_LOCK:
+        pending = _PENDING_CHILD_WORK.get(turn_id)
+        if not pending:
+            return False
+        snapshot = list(pending)
+    return any(not f.done() for f in snapshot)
+
+
+def record_child_outcome(
+    turn_id: str,
+    label: str,
+    outcome: str,
+    detail: dict[str, Any] | None = None,
+) -> None:
+    """Durable audit for a dispatched child whose result arrived after
+    the parent turn unwound — RA15-BO01-09. The row lands in the
+    unswapped coordination store (``bo_control_audit``), correlated by
+    ``turn_id``, so a later journal swap cannot hide it and it cannot
+    be lost by a reconcile/switch the way a per-client journal row
+    could. ``outcome`` is the observed terminal state
+    (completed/error:<type>/cancelled/unknown), never a fabricated
+    success."""
+    payload: dict[str, Any] = {"child": label, "outcome": outcome}
+    if detail:
+        payload.update(detail)
+    with _conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute(
+                "INSERT INTO bo_control_audit (action, turn_id, actor, "
+                "resolution, reason, detail, created_at) "
+                "VALUES ('turn_child_outcome', ?, 'barrier', "
+                "NULL, NULL, ?, ?)",
+                (turn_id, json.dumps(payload), _iso(_now())),
+            )
+            conn.execute("COMMIT")
+        except sqlite3.Error:
+            with contextlib.suppress(sqlite3.Error):
+                conn.execute("ROLLBACK")
+            raise
+    # Best-effort forward into the episodic audit trail; the durable
+    # evidence is the bo_control_audit row above.
+    try:
+        from openexecutive.audit import log_event
+
+        log_event(
+            "bo_turn_child_outcome",
+            f"turn {turn_id} child {label} finished late ({outcome})",
+            details={"turn_id": turn_id, **payload},
+        )
+    except Exception:
+        logger.exception(
+            "turn_barrier: child-outcome audit forward failed "
+            "(durable row is in bo_control_audit)")
+
+
+def late_child_outcome(turn_id: str, label: str, task: Any) -> None:
+    """``Task.add_done_callback`` target: audit a still-pending child
+    once it truly ends. Never raises into the event loop."""
+    try:
+        if task.cancelled():
+            outcome = "cancelled"
+        elif task.exception() is not None:
+            outcome = f"error:{type(task.exception()).__name__}"
+        else:
+            outcome = "completed"
+    except Exception:
+        outcome = "unknown"
+    try:
+        record_child_outcome(turn_id, label, outcome)
+    except Exception:
+        logger.exception(
+            "turn_barrier: durable audit of late child outcome failed "
+            "for turn %s child %s", turn_id, label)
 
 
 def _owner_still_apt(owner: Any, turn_id: str) -> bool:

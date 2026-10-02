@@ -4376,6 +4376,18 @@ bo:
     refuses while one is runnable, with a bounded 5s drain on cancel —
     admin attestation cannot free authority while a child can still
     produce an effect, and a dead process's children are dead with it.
+    The internal-timeout residual is closed as well: the loop's default
+    executor is instrumented (``_TrackingExecutor`` +
+    ``_CURRENT_TURN`` context var) so ``concurrent.futures`` work a
+    tracked child submits — e.g. ``wait_for(to_thread(...))`` whose
+    timeout ends the task but not the thread — stays attributed to the
+    lease; ``Future.done()`` is an honest thread-completion signal that
+    ``children_alive`` reports to reconcile, and ``complete_turn``
+    degrades to ``uncertain`` rather than closing while any child work
+    can still produce an effect. A child that outlives its turn's
+    unwind also gets a durable ``turn_child_outcome`` row in the
+    unswapped ``bo_control_audit`` (RA15-BO01-09) — the reconcile audit
+    is not a substitute for the effect's audit.
     The residual audit window is
     closed too: every durable journal write inside the loop —
     ``memory_snapshot``, ``cache_event``/usage rows, ``web_search``,

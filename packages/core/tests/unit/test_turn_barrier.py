@@ -716,3 +716,140 @@ def test_shielded_dispatch_survives_parent_cancel(barrier_db, monkeypatch):
         assert out["status"] == "closed"
 
     asyncio.run(_drive())
+
+
+def test_executor_timeout_outlives_child_keeps_lease_blocking(barrier_db):
+    """RA15-BO01-06 residual: ``wait_for(to_thread)`` inside a dispatched
+    child — the child *task* ends on timeout while the executor *thread*
+    keeps running. task.done() cannot see the thread, so the turn must
+    degrade to 'uncertain' instead of closing, reconcile must refuse
+    while the thread lives, and the late outcome must land durably in
+    bo_control_audit (RA15-BO01-09)."""
+    import asyncio
+    import sqlite3
+    import threading
+
+    from openexecutive.orchestrator import executive as ex_mod
+
+    lease = tb.admit_turn("executive", ref="t-timeout", wait_s=0)
+    release = threading.Event()
+
+    def _thread_effect() -> None:
+        release.wait(timeout=15)
+
+    def _status() -> str:
+        conn = sqlite3.connect(str(barrier_db), isolation_level=None)
+        try:
+            return str(conn.execute(
+                "SELECT status FROM bo_turn_leases WHERE turn_id=?",
+                (lease.turn_id,)).fetchone()[0])
+        finally:
+            conn.close()
+
+    def _outcome_rows() -> list[tuple]:
+        conn = sqlite3.connect(str(barrier_db), isolation_level=None)
+        try:
+            return conn.execute(
+                "SELECT detail FROM bo_control_audit "
+                "WHERE turn_id=? AND action='turn_child_outcome'",
+                (lease.turn_id,)).fetchall()
+        finally:
+            conn.close()
+
+    async def _child() -> str:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_thread_effect), timeout=0.05
+        )
+
+    async def _run() -> None:
+        fence = tb.EffectFence(lease)
+        results = await ex_mod._run_children(fence, [_child()])
+        # The task ended with TimeoutError — the thread did not.
+        # (Checks stay inside the running loop: asyncio.run waits for
+        # the default executor on shutdown, which would end the thread
+        # before the assertions could observe it pending.)
+        assert isinstance(results[0], TimeoutError)
+        assert tb.children_alive(lease.turn_id)
+        # complete_turn must NOT close the lease while tracked executor
+        # work can still produce an effect.
+        tb.complete_turn(lease, outcome="completed")
+        assert _status() == "uncertain"
+
+        _expire(barrier_db, lease)
+        with pytest.raises(tb.ReconcileRefusedError, match="children"):
+            tb.reconcile_turn(
+                lease.turn_id, resolution="attested", actor="op"
+            )
+
+        # Release the thread; the orphaned work gets a durable outcome
+        # row and the lease becomes honestly reconcilable.
+        release.set()
+        t0 = asyncio.get_running_loop().time()
+        while tb.children_alive(lease.turn_id):
+            if asyncio.get_running_loop().time() - t0 > 15:
+                raise AssertionError("tracked executor work never finished")
+            await asyncio.sleep(0.05)
+        await asyncio.sleep(0.2)  # let the outcome callback write
+
+        rows = _outcome_rows()
+        assert rows, "no durable audit for the late executor work"
+        assert '"completed"' in rows[0][0]
+
+        _expire(barrier_db, lease)
+        out = tb.reconcile_turn(
+            lease.turn_id, resolution="attested", actor="op"
+        )
+        assert out["status"] == "closed"
+
+    asyncio.run(_run())
+
+
+def test_late_child_outcome_audit_after_parent_cancel(
+    barrier_db, monkeypatch
+):
+    """RA15-BO01-09: a shielded child still running past the drain
+    window gets a durable bo_control_audit row when it actually ends —
+    the reconcile audit is not a substitute for the effect's audit."""
+    import asyncio
+
+    from openexecutive.orchestrator import executive as ex_mod
+
+    monkeypatch.setattr(ex_mod, "_CHILD_DRAIN_SECONDS", 0.2)
+    lease = tb.admit_turn("executive", ref="c-late", wait_s=0)
+    effect_landed = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _worker() -> str:
+        await release.wait()
+        effect_landed.set()
+        return "done"
+
+    async def _drive() -> None:
+        fence = tb.EffectFence(lease)
+        parent = asyncio.ensure_future(
+            ex_mod._run_children(fence, [_worker()], ["skill:test_late"])
+        )
+        await asyncio.sleep(0.05)
+        parent.cancel()
+        try:
+            await parent
+        except asyncio.CancelledError:
+            pass
+        release.set()
+        await asyncio.sleep(0.3)
+
+    asyncio.run(_drive())
+
+    import sqlite3
+    conn = sqlite3.connect(str(barrier_db), isolation_level=None)
+    try:
+        rows = conn.execute(
+            "SELECT detail FROM bo_control_audit "
+            "WHERE turn_id=? AND action='turn_child_outcome'",
+            (lease.turn_id,)).fetchall()
+    finally:
+        conn.close()
+    assert rows, "no durable audit for the child that outlived its turn"
+    assert "skill:test_late" in rows[0][0]
+    assert '"completed"' in rows[0][0]
+    assert effect_landed.is_set()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -352,8 +353,25 @@ def _emit_cache_event(
     )
 
 
+class _TurnFencedError(Exception):
+    """The turn's lease was invalidated mid-flight (expired → reconciled →
+    switched). Raised inside the generator to abort before any further
+    observable or durable effect lands."""
+
+
+@contextlib.asynccontextmanager
+async def _maybe_fence_hold(fence: Any) -> AsyncIterator[bool]:
+    """Hold the turn fence across a durable section; True = proceed."""
+    if fence is None:
+        yield True
+    else:
+        async with fence.ahold() as ok:
+            yield ok
+
+
 def _barrier_turn(kind: str) -> Any:
-    """Admit a durable turn lease around an Executive entry point (RA13-A02-01).
+    """Admit a durable turn lease around an Executive entry point (RA13-A02-01)
+    and fence its effect boundaries (RA15-BO01-03).
 
     The lease lives in the unswapped coordination store (bo_agents.db), so a
     client switch/restore can never start while a turn is in flight and
@@ -361,7 +379,14 @@ def _barrier_turn(kind: str) -> Any:
     switch is in progress yields a maintenance message instead of running;
     interruption or exception mid-turn marks the lease ``uncertain`` — it
     blocks later switching until an operator reconciles it, because a lost
-    write can never prove the external effect didn't happen."""
+    write can never prove the external effect didn't happen.
+
+    Beyond admission, the wrapper revalidates the lease at every yielded
+    boundary (renewing its heartbeat, so a live turn never expires) and
+    hands the generator an ``EffectFence`` so its durable commits and
+    side-effecting tool dispatches run under the coordination write lock
+    — a switch's epoch bump cannot interleave between validation and the
+    effect commit."""
     import functools
 
     def deco(fn: Any) -> Any:
@@ -384,9 +409,34 @@ def _barrier_turn(kind: str) -> Any:
                     "is unavailable. Please try again in a moment."
                 )
                 return
+            _tb.register_turn_task(lease.turn_id)
+            fence = _tb.EffectFence(lease)
+            agen = fn(self, *args, _fence=fence, **kwargs)
             try:
-                async for item in fn(self, *args, **kwargs):
+                while True:
+                    try:
+                        item = await agen.__anext__()
+                    except StopAsyncIteration:
+                        break
+                    if not await asyncio.to_thread(fence.check):
+                        raise _TurnFencedError
                     yield item
+            except _TurnFencedError:
+                # Expired-and-reconciled or switched mid-flight: the
+                # remainder of this turn must not produce effects. The
+                # lease stays 'uncertain' so switching still requires an
+                # explicit reconcile — we never silently release.
+                await asyncio.to_thread(
+                    _tb.fail_turn_uncertain,
+                    lease,
+                    reason="fenced_post_invalidation",
+                )
+                yield (
+                    "This turn was interrupted by a workspace change — "
+                    "its remaining effects were fenced. An operator can "
+                    "reconcile it from the turn blockers before retrying."
+                )
+                return
             except BaseException:
                 # Abandoned/cancelled/failed mid-turn — effects may have
                 # partially landed. The lease becomes 'uncertain' and blocks
@@ -395,6 +445,14 @@ def _barrier_turn(kind: str) -> Any:
                     _tb.fail_turn_uncertain, lease, reason="turn_interrupted"
                 )
                 raise
+            finally:
+                # Close the inner generator so its try/finally blocks
+                # (session cleanup, clear_turn) run on every exit path —
+                # including when the wrapper itself raised before agen
+                # terminated.
+                with contextlib.suppress(Exception):
+                    await agen.aclose()
+                _tb.unregister_turn_task(lease.turn_id)
             await asyncio.to_thread(
                 _tb.complete_turn, lease, outcome="completed"
             )
@@ -542,8 +600,13 @@ class Executive:
         briefing_context: str = "",
         channel_context_block: str = "",
         page_context_block: str = "",
+        _fence: Any = None,
     ) -> AsyncIterator[str | dict[str, Any]]:
         """Stream a response from the Executive, routing to specialists as needed.
+
+        ``_fence`` is internal: the ``_barrier_turn`` decorator injects the
+        turn's EffectFence so durable commits and side-effecting tool
+        dispatches are fenced at their real boundary (RA15-BO01-03).
 
         ``person_id`` (when provided) keys the Honcho per-person memory
         prefetch + post-turn sync. The integration adapters (Slack,
@@ -666,6 +729,7 @@ class Executive:
                 debug_collector=debug_collector,
                 consulted_out=consulted,
                 turn_id=turn_id,
+                _fence=_fence,
             ):
                 if isinstance(item, str) and item != self._THINKING:
                     full_response += item
@@ -678,74 +742,83 @@ class Executive:
             })
             yield debug_collector.to_sse_dict(evt)
 
-        session.add_user_message(user_message)
-        session.add_assistant_message(full_response)
+        # RA15-BO01-03: the whole durable tail of the turn — session rows,
+        # the chat_turn audit record, episodic extraction, Honcho mirrors —
+        # commits under the fence's write lock, so a completed switch
+        # (epoch bump) can never interleave between validation and these
+        # writes landing in the swapped journal.
+        async with _maybe_fence_hold(_fence) as _tail_ok:
+            if not _tail_ok:
+                raise _TurnFencedError
 
-        # Audit the Executive's outbound response. Without this, the audit
-        # log only records the *inputs* to a turn (inbound message, memory
-        # snapshot, retrievals, specialist consults, tool calls) but never
-        # the response itself — making sessions hard to follow. Mirrors the
-        # web /api/chat route's pattern, but at the unified place that every
-        # entry point (web stream, .chat() wrapper used by Discord / Slack
-        # / Telegram / Email / Google Chat) flows through.
-        # Only emit on real text — an empty response means the agent loop
-        # produced only tool_use blocks or hit max_iterations without text,
-        # and an audit row for "" adds noise without signal.
-        if full_response.strip():
-            audit_log(
-                "chat_turn",
-                f"Executive: {full_response[:200]}",
-                session_id=session.session_id,
-                turn_id=turn_id,
-                actor="executive",
-                details={
-                    "direction": "out",
-                    "response_len": len(full_response),
-                    "duration_s": round(time.monotonic() - t0, 3),
-                    "model": effective_model,
-                    "committee": False,
-                },
-                full={"response": full_response},
-            )
+            session.add_user_message(user_message)
+            session.add_assistant_message(full_response)
 
-        from openexecutive.memory.episodic import (
-            MIN_TURN_CHARS_FOR_EXTRACTION,
-            schedule_extraction,
-        )
-        if len(full_response) + len(user_message) >= MIN_TURN_CHARS_FOR_EXTRACTION:
-            schedule_extraction(user_message, full_response, session_id=session.session_id)
+            # Audit the Executive's outbound response. Without this, the audit
+            # log only records the *inputs* to a turn (inbound message, memory
+            # snapshot, retrievals, specialist consults, tool calls) but never
+            # the response itself — making sessions hard to follow. Mirrors the
+            # web /api/chat route's pattern, but at the unified place that every
+            # entry point (web stream, .chat() wrapper used by Discord / Slack
+            # / Telegram / Email / Google Chat) flows through.
+            # Only emit on real text — an empty response means the agent loop
+            # produced only tool_use blocks or hit max_iterations without text,
+            # and an audit row for "" adds noise without signal.
+            if full_response.strip():
+                audit_log(
+                    "chat_turn",
+                    f"Executive: {full_response[:200]}",
+                    session_id=session.session_id,
+                    turn_id=turn_id,
+                    actor="executive",
+                    details={
+                        "direction": "out",
+                        "response_len": len(full_response),
+                        "duration_s": round(time.monotonic() - t0, 3),
+                        "model": effective_model,
+                        "committee": False,
+                    },
+                    full={"response": full_response},
+                )
 
-        # Mirror the completed exchange into Honcho so its server-side
-        # extraction can update the peer card. Fire-and-forget; the
-        # wrapper no-ops when person_id is None or Honcho is disabled.
-        #
-        # Re-bind the audit ContextVars for the duration of these calls so
-        # the fire-and-forget tasks they schedule can snapshot the right
-        # session_id/turn_id (the main `with set_turn(...)` block above
-        # exited at the end of the `async for` so the ContextVars are back
-        # to None by now). Without this wrapper, every sync_turn /
-        # sync_department_turn audit row would land with session_id=NULL
-        # and be invisible in the per-session audit view.
-        with set_turn(session_id=session.session_id, turn_id=turn_id):
-            from openexecutive.memory.honcho_client import sync_turn as _honcho_sync
-            _honcho_sync(
-                user_message,
-                full_response,
-                person_id=person_id,
-                session_id=session.session_id,
-                co_present_person_ids=co_present_person_ids,
+            from openexecutive.memory.episodic import (
+                MIN_TURN_CHARS_FOR_EXTRACTION,
+                schedule_extraction,
             )
-            # Per-dept mirror for every department whose specialist contributed
-            # this turn. Runs after the person-side sync so dept and person
-            # syncs are visible in the audit log as a related pair.
-            _sync_consulted_departments_to_honcho(
-                consulted,
-                user_message,
-                full_response,
-                person_id=person_id,
-                session_id=session.session_id,
-                co_present_person_ids=co_present_person_ids,
-            )
+            if len(full_response) + len(user_message) >= MIN_TURN_CHARS_FOR_EXTRACTION:
+                schedule_extraction(user_message, full_response, session_id=session.session_id)
+
+            # Mirror the completed exchange into Honcho so its server-side
+            # extraction can update the peer card. Fire-and-forget; the
+            # wrapper no-ops when person_id is None or Honcho is disabled.
+            #
+            # Re-bind the audit ContextVars for the duration of these calls so
+            # the fire-and-forget tasks they schedule can snapshot the right
+            # session_id/turn_id (the main `with set_turn(...)` block above
+            # exited at the end of the `async for` so the ContextVars are back
+            # to None by now). Without this wrapper, every sync_turn /
+            # sync_department_turn audit row would land with session_id=NULL
+            # and be invisible in the per-session audit view.
+            with set_turn(session_id=session.session_id, turn_id=turn_id):
+                from openexecutive.memory.honcho_client import sync_turn as _honcho_sync
+                _honcho_sync(
+                    user_message,
+                    full_response,
+                    person_id=person_id,
+                    session_id=session.session_id,
+                    co_present_person_ids=co_present_person_ids,
+                )
+                # Per-dept mirror for every department whose specialist contributed
+                # this turn. Runs after the person-side sync so dept and person
+                # syncs are visible in the audit log as a related pair.
+                _sync_consulted_departments_to_honcho(
+                    consulted,
+                    user_message,
+                    full_response,
+                    person_id=person_id,
+                    session_id=session.session_id,
+                    co_present_person_ids=co_present_person_ids,
+                )
 
     @_barrier_turn("executive")
     async def stream_chat_with_committee(
@@ -764,6 +837,7 @@ class Executive:
         briefing_context: str = "",
         channel_context_block: str = "",
         page_context_block: str = "",
+        _fence: Any = None,
     ) -> AsyncIterator[str | dict[str, Any]]:
         """Committee-reviewed variant of stream_chat.
 
@@ -895,6 +969,7 @@ class Executive:
             consulted_out=consulted,
             specialist_outputs_out=specialist_outputs,
             turn_id=turn_id,
+            _fence=_fence,
         ):
             # Swallow draft text and the THINKING sentinel — the user sees
             # only the revised stream. Pass debug-event dicts through so the
@@ -930,8 +1005,11 @@ class Executive:
             }
             fallback = "I was unable to complete the analysis. Please try again."
             yield fallback
-            session.add_user_message(user_message)
-            session.add_assistant_message(fallback)
+            async with _maybe_fence_hold(_fence) as _fb_ok:
+                if not _fb_ok:
+                    raise _TurnFencedError
+                session.add_user_message(user_message)
+                session.add_assistant_message(fallback)
             # Reset audit ContextVars so this task doesn't leak the turn_id
             # to a follow-up turn that runs on the same task.
             clear_turn()
@@ -1071,85 +1149,92 @@ class Executive:
             })
             yield debug_collector.to_sse_dict(evt)
 
-        session.add_user_message(user_message)
-        # Guard against a revision pass that produced no text (only tool_use
-        # blocks, model_stop, etc.). Persisting an empty assistant turn
-        # corrupts the in-memory history with a phantom turn that future
-        # cache hits will key off of.
-        if final_response.strip():
-            session.add_assistant_message(final_response)
+        # RA15-BO01-03: same fenced tail as stream_chat — session rows, the
+        # chat_turn/committee_review audit records, extraction scheduling
+        # and the Honcho mirrors commit under the fence's write lock.
+        async with _maybe_fence_hold(_fence) as _tail_ok:
+            if not _tail_ok:
+                raise _TurnFencedError
 
-            # Audit the committee's final response. Same rationale as the
-            # non-committee path in stream_chat: callers should always be
-            # able to see the Executive's outbound text in the audit log,
-            # not just the inputs. committee=True so the UI can distinguish
-            # a committee-revised response from a normal one.
+            session.add_user_message(user_message)
+            # Guard against a revision pass that produced no text (only tool_use
+            # blocks, model_stop, etc.). Persisting an empty assistant turn
+            # corrupts the in-memory history with a phantom turn that future
+            # cache hits will key off of.
+            if final_response.strip():
+                session.add_assistant_message(final_response)
+
+                # Audit the committee's final response. Same rationale as the
+                # non-committee path in stream_chat: callers should always be
+                # able to see the Executive's outbound text in the audit log,
+                # not just the inputs. committee=True so the UI can distinguish
+                # a committee-revised response from a normal one.
+                audit_log(
+                    "chat_turn",
+                    f"Executive: {final_response[:200]}",
+                    session_id=session.session_id,
+                    turn_id=_committee_turn_id,
+                    actor="executive",
+                    details={
+                        "direction": "out",
+                        "response_len": len(final_response),
+                        "duration_s": round(time.monotonic() - t0, 3),
+                        "model": effective_model,
+                        "committee": True,
+                        "draft_length": len(draft),
+                    },
+                    full={"response": final_response, "draft": draft},
+                )
+
             audit_log(
-                "chat_turn",
-                f"Executive: {final_response[:200]}",
+                "committee_review",
+                f"Committee revised draft (consulted={consulted})",
                 session_id=session.session_id,
                 turn_id=_committee_turn_id,
-                actor="executive",
+                actor="committee",
                 details={
-                    "direction": "out",
-                    "response_len": len(final_response),
-                    "duration_s": round(time.monotonic() - t0, 3),
-                    "model": effective_model,
-                    "committee": True,
                     "draft_length": len(draft),
+                    "final_length": len(final_response),
+                    "consulted": consulted,
+                    "review_ms": review_ms,
+                    "revision_ms": revision_ms,
+                    "critiques": [
+                        {
+                            "reviewer": c.reviewer_name,
+                            "severity": c.severity,
+                            "critique": c.critique[:500],
+                            "suggested_edits": c.suggested_edits[:500],
+                        }
+                        for c in critiques
+                    ],
                 },
-                full={"response": final_response, "draft": draft},
             )
 
-        audit_log(
-            "committee_review",
-            f"Committee revised draft (consulted={consulted})",
-            session_id=session.session_id,
-            turn_id=_committee_turn_id,
-            actor="committee",
-            details={
-                "draft_length": len(draft),
-                "final_length": len(final_response),
-                "consulted": consulted,
-                "review_ms": review_ms,
-                "revision_ms": revision_ms,
-                "critiques": [
-                    {
-                        "reviewer": c.reviewer_name,
-                        "severity": c.severity,
-                        "critique": c.critique[:500],
-                        "suggested_edits": c.suggested_edits[:500],
-                    }
-                    for c in critiques
-                ],
-            },
-        )
+            from openexecutive.memory.episodic import (
+                MIN_TURN_CHARS_FOR_EXTRACTION,
+                schedule_extraction,
+            )
+            if len(final_response) + len(user_message) >= MIN_TURN_CHARS_FOR_EXTRACTION:
+                schedule_extraction(user_message, final_response, session_id=session.session_id)
 
-        from openexecutive.memory.episodic import (
-            MIN_TURN_CHARS_FOR_EXTRACTION,
-            schedule_extraction,
-        )
-        if len(final_response) + len(user_message) >= MIN_TURN_CHARS_FOR_EXTRACTION:
-            schedule_extraction(user_message, final_response, session_id=session.session_id)
-
-        # Mirror the completed exchange into Honcho (see stream_chat for
-        # rationale). Fire-and-forget; no-ops when person_id is None.
-        from openexecutive.memory.honcho_client import sync_turn as _honcho_sync
-        _honcho_sync(
-            user_message,
-            final_response,
-            person_id=person_id,
-            session_id=session.session_id,
-            co_present_person_ids=co_present_person_ids,
-        )
-        _sync_consulted_departments_to_honcho(
-            consulted,
-            user_message,
-            final_response,
-            person_id=person_id,
-            session_id=session.session_id,
-            co_present_person_ids=co_present_person_ids,
-        )
+            # Mirror the completed exchange into Honcho (see stream_chat for
+            # rationale). Fire-and-forget; no-ops when person_id is None.
+            from openexecutive.memory.honcho_client import sync_turn as _honcho_sync
+            _honcho_sync(
+                user_message,
+                final_response,
+                person_id=person_id,
+                session_id=session.session_id,
+                co_present_person_ids=co_present_person_ids,
+            )
+            _sync_consulted_departments_to_honcho(
+                consulted,
+                user_message,
+                final_response,
+                person_id=person_id,
+                session_id=session.session_id,
+                co_present_person_ids=co_present_person_ids,
+            )
 
         # Reset audit ContextVars at normal completion. The abandoned-stream
         # case (SSE client drop mid-yield) doesn't reach here — accept that
@@ -1168,6 +1253,7 @@ class Executive:
         consulted_out: list[str] | None = None,
         specialist_outputs_out: dict[str, str] | None = None,
         turn_id: str | None = None,
+        _fence: Any = None,
     ) -> AsyncIterator[str | dict[str, Any]]:
         """Tool-use loop that yields text deltas as they arrive.
 
@@ -1184,6 +1270,13 @@ class Executive:
                 "iter %d/%d", iteration, max_iterations,
                 extra={"iter_marker": True},
             )
+            # RA15-BO01-03: re-validate the lease before each LLM/tool
+            # round — a turn invalidated since the last boundary must not
+            # run another iteration.
+            if _fence is not None and not await asyncio.to_thread(
+                _fence.check
+            ):
+                raise _TurnFencedError
             full_text = ""
             tool_uses: list[dict[str, Any]] = []
             response_content: list[dict[str, Any]] = []
@@ -1373,12 +1466,19 @@ class Executive:
             session_id = getattr(current_session.get(), "session_id", None)
             if specialist_calls:
                 spec_t0 = time.monotonic()
-                specialist_results = await route_parallel(
-                    run_calls,
-                    episodic_context=episodic_context,
-                    session_id=session_id,
-                    debug_collector=debug_collector,
-                )
+                # RA15-BO01-03: specialist dispatch is a delegation boundary
+                # — consults emit specialist_consult audit rows and run
+                # retrievals; run under the fence hold so a committed
+                # switch cannot interleave between validation and dispatch.
+                async with _maybe_fence_hold(_fence) as _spec_ok:
+                    if not _spec_ok:
+                        raise _TurnFencedError
+                    specialist_results = await route_parallel(
+                        run_calls,
+                        episodic_context=episodic_context,
+                        session_id=session_id,
+                        debug_collector=debug_collector,
+                    )
                 spec_ms = round((time.monotonic() - spec_t0) * 1000)
                 for tu, result in zip(
                     run_tool_uses, specialist_results, strict=True
@@ -1430,12 +1530,19 @@ class Executive:
             if skill_tool_uses:
                 for tu in skill_tool_uses:
                     logger.info("→ skill:%s  input=%s", tu["name"], _trunc(tu["input"]))
+                # RA15-BO01-03: skill handlers are the turn's real effect
+                # boundary (calendar, broadcast, forms, workflow runs…). The
+                # batch runs under the fence's write lock so a switch cannot
+                # commit between the lease validation and these effects.
                 # return_exceptions=True: one crashing handler must not abort
                 # the whole turn. See `_tool_error_result`.
-                skill_results = await asyncio.gather(
-                    *(_ALL_SKILL_HANDLERS[tu["name"]](tu["input"]) for tu in skill_tool_uses),
-                    return_exceptions=True,
-                )
+                async with _maybe_fence_hold(_fence) as _skill_ok:
+                    if not _skill_ok:
+                        raise _TurnFencedError
+                    skill_results = await asyncio.gather(
+                        *(_ALL_SKILL_HANDLERS[tu["name"]](tu["input"]) for tu in skill_tool_uses),
+                        return_exceptions=True,
+                    )
                 # `raw` rather than `result` so the narrowed value keeps the
                 # plain `str` type the rest of this function's loops use.
                 for tu, raw in zip(skill_tool_uses, skill_results, strict=True):
@@ -1537,11 +1644,16 @@ class Executive:
                     else:
                         logger.info("→ %s  input=%s", tu["name"], _trunc(tu["input"]))
                 # Same isolation as the skill gather above: a gateway crash on
-                # one tool must not take the turn down with it.
-                mcp_results = await asyncio.gather(
-                    *(_mcp_dispatch[tu["name"]](tu["input"]) for tu in mcp_tool_uses),
-                    return_exceptions=True,
-                )
+                # one tool must not take the turn down with it. MCP calls are
+                # the second real effect boundary — fenced the same way
+                # (RA15-BO01-03).
+                async with _maybe_fence_hold(_fence) as _mcp_ok:
+                    if not _mcp_ok:
+                        raise _TurnFencedError
+                    mcp_results = await asyncio.gather(
+                        *(_mcp_dispatch[tu["name"]](tu["input"]) for tu in mcp_tool_uses),
+                        return_exceptions=True,
+                    )
                 for tu, raw in zip(mcp_tool_uses, mcp_results, strict=True):
                     tool_label = tu["input"].get("name", tu["name"]) if tu["name"] == "call_tool" else tu["name"]
                     if isinstance(raw, BaseException):

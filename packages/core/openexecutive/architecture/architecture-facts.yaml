@@ -4337,6 +4337,33 @@ bo:
     No transaction is held across the LLM call — durable claims plus
     short BEGIN IMMEDIATE transactions. The barrier cannot be disabled;
     its two settings are bounded knobs, not an off switch.
+
+    RA15-BO01-03 (REM-AUDIT-18) hardened the post-admission half. Each
+    admitted turn carries an ``EffectFence``: ``check()`` validates with a
+    pure read (never blocked by another turn's hold — lock contention
+    alone can never fence a healthy turn) and renews the lease, so expiry
+    only ever means "the owner stopped checking in"; ``run_atomic`` /
+    ``ahold`` hold BEGIN IMMEDIATE across validate+effect so a switch's
+    epoch bump cannot interleave — the effect lands under the epoch it
+    was validated in or not at all (acquire bounded by a 30s busy
+    timeout). The ``_barrier_turn`` wrapper checks the fence at every
+    yielded boundary and closes the inner generator on every exit path;
+    ``_stream_agent_loop`` re-checks each iteration and runs specialist
+    fan-out (``route_parallel``), skill and MCP dispatch inside holds;
+    both ``stream_chat`` tails (normal + committee, incl. fallback) commit
+    session rows, ``chat_turn``/``committee_review`` audit, extraction
+    scheduling and Honcho mirrors under one hold. The email poller
+    registers its task, heartbeats the lease during the Executive turn,
+    and runs the scope check + terminal dedup marker (``run_atomic``) and
+    mark-read (``ahold``) inside the fence. ``complete_turn`` CAS-es on
+    the admission epoch. Reconcile additionally refuses while the owner
+    is demonstrably apt — a live task in this process (``_LIVE_TURNS``
+    registry) or any live foreign pid (single-host limit: another
+    process's tasks cannot be introspected, so liveness is assumed);
+    expiry is never proof of absence. Residual bound: in-loop audit rows
+    between a released hold and the next yield could straddle an epoch
+    bump only for an already-detached zombie — evidence loss, never a
+    user-visible effect.
   routing_observe: |
     bo/routing (VAL3-01) is the observe-mode model router: an administered
     catalog (provider/model/version, capabilities, regions, cost and quality

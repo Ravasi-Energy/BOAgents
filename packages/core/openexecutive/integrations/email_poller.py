@@ -15,6 +15,7 @@ Executive's responsibility via its tool access.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 import uuid
@@ -1509,6 +1510,20 @@ async def _handle_email(
         )
         return "failed"
 
+    # RA15-BO01-03: this task is the lease owner — register it so reconcile
+    # can tell "owner alive" from "owner gone", and keep the lease renewed
+    # while the (potentially long) Executive turn runs inside. The fence
+    # wraps the terminal effect boundary atomically below.
+    _barrier.register_turn_task(turn_lease.turn_id)
+    fence = _barrier.EffectFence(turn_lease)
+
+    async def _heartbeat() -> None:
+        while True:
+            await asyncio.sleep(_barrier.heartbeat_seconds())
+            await asyncio.to_thread(fence.check)
+
+    heartbeat = asyncio.create_task(_heartbeat())
+
     try:
         owner = uuid.uuid4().hex
         claim = _claim_attempt(
@@ -1628,16 +1643,48 @@ async def _handle_email(
         # between) leaves the message unread but provably processed — the
         # next cycle replays only the mark-read, never the Executive. The
         # marker write itself is verified: a swallowed log() must not
-        # become "nothing happened". Scope re-validated: the turn may
-        # have run while the context changed under us — the terminal
-        # evidence/mark-read must not land in the new context (the open
-        # attempt in the original journal reads as uncertain, which is
-        # the honest state).
-        if not _scope_still_current(
-            audit_logger, scope
-        ) or not await asyncio.to_thread(
-            _barrier.turn_still_valid, turn_lease
-        ):
+        # become "nothing happened".
+        #
+        # RA15-BO01-03: scope re-validation + marker write + durability
+        # check now run inside the fence's BEGIN IMMEDIATE hold, so a
+        # switch's epoch bump can never interleave between validation and
+        # the terminal evidence commit — the marker either lands under the
+        # epoch this turn ran in, or not at all.
+        def _commit_terminal_marker() -> str:
+            if not _scope_still_current(audit_logger, scope):
+                return "scope_changed"
+            audit_logger.log(
+                "integration_inbound",
+                f"Processed email from {from_addr}: {subject}" if subject
+                else f"Processed email from {from_addr}",
+                actor="email",
+                session_id=session_id,
+                details={
+                    "channel": "email",
+                    "message_id": message_id,
+                    "thread_id": thread_id,
+                    "from": from_addr,
+                    "subject": subject,
+                    "outcome": "processed",
+                    "attempt": attempt_no,
+                    "scope": scope.token,
+                    "mailbox": scope.mailbox,
+                },
+                dedup_key=dedup_key,
+            )
+            try:
+                marker = audit_logger.dedup_lookup(dedup_key)
+                committed = bool(
+                    marker is not None and marker.get("journal_row_present")
+                )
+            except Exception:
+                committed = False
+            return "committed" if committed else "not_durable"
+
+        executed, marker_state = await asyncio.to_thread(
+            fence.run_atomic, _commit_terminal_marker
+        )
+        if not executed or marker_state == "scope_changed":
             # The lease/scope check at the effect boundary: a completed
             # switch bumps the epoch, so a stale turn refuses its
             # terminal evidence — and crucially the lease row itself (in
@@ -1650,33 +1697,7 @@ async def _handle_email(
             return _journal_scope_refusal(
                 audit_logger, message_id, scope, "scope_changed_post_effect"
             )
-        audit_logger.log(
-            "integration_inbound",
-            f"Processed email from {from_addr}: {subject}" if subject
-            else f"Processed email from {from_addr}",
-            actor="email",
-            session_id=session_id,
-            details={
-                "channel": "email",
-                "message_id": message_id,
-                "thread_id": thread_id,
-                "from": from_addr,
-                "subject": subject,
-                "outcome": "processed",
-                "attempt": attempt_no,
-                "scope": scope.token,
-                "mailbox": scope.mailbox,
-            },
-            dedup_key=dedup_key,
-        )
-        try:
-            marker = audit_logger.dedup_lookup(dedup_key)
-            marker_committed = bool(
-                marker is not None and marker.get("journal_row_present")
-            )
-        except Exception:
-            marker_committed = False
-        if not marker_committed:
+        if marker_state != "committed":
             logger.warning(
                 "processed marker for message=%s not durable — the "
                 "executed close row will read as uncertain next cycle; "
@@ -1688,9 +1709,22 @@ async def _handle_email(
                 turn_lease, reason="marker_not_durable",
             )
             return "uncertain"
-        if await _mark_read(
-            gateway, message_id, user_email, scope, audit_logger
-        ):
+        # The provider-side label change is the last effect of the turn —
+        # same fence hold: an epoch bump mid-call cannot straddle it.
+        async with fence.ahold() as ok:
+            if not ok:
+                await asyncio.to_thread(
+                    _barrier.fail_turn_uncertain,
+                    turn_lease, reason="context_changed_post_effect",
+                )
+                return _journal_scope_refusal(
+                    audit_logger, message_id, scope,
+                    "scope_changed_post_effect",
+                )
+            marked = await _mark_read(
+                gateway, message_id, user_email, scope, audit_logger
+            )
+        if marked:
             await asyncio.to_thread(
                 _barrier.complete_turn, turn_lease, outcome="processed"
             )
@@ -1708,6 +1742,11 @@ async def _handle_email(
             _barrier.fail_turn_uncertain, turn_lease, reason="interrupted"
         )
         raise
+    finally:
+        heartbeat.cancel()
+        with contextlib.suppress(BaseException):
+            await heartbeat
+        _barrier.unregister_turn_task(turn_lease.turn_id)
 
 
 async def _run_executive(

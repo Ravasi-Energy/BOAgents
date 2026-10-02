@@ -37,13 +37,15 @@ values (``bo.turns.lease_seconds``, ``bo.switch.max_wait_seconds``).
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import logging
 import os
 import sqlite3
 import time
 import uuid
-from collections.abc import Generator
+from collections.abc import AsyncGenerator, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -261,6 +263,11 @@ def _lease_seconds() -> int:
     return _setting("bo.turns.lease_seconds", 900)
 
 
+def heartbeat_seconds() -> float:
+    """Cadence for owner check-ins: well inside the lease TTL."""
+    return max(5.0, _lease_seconds() / 3.0)
+
+
 def _switch_wait_seconds() -> int:
     return _setting("bo.switch.max_wait_seconds", 20)
 
@@ -446,9 +453,13 @@ def turn_still_valid(lease: TurnLease) -> bool:
 
 
 def _finish(lease: TurnLease, status: str, *, resolution: str | None,
-            reason: str | None) -> bool:
+            reason: str | None, epoch: int | None = None) -> bool:
     """CAS the lease out of 'active'. Returns False when the row no
-    longer matches (stolen/expired-and-swept) — caller reports honestly."""
+    longer matches (stolen/expired-and-swept) — caller reports honestly.
+    ``epoch`` additionally pins the admission epoch when given."""
+    predicate = "AND epoch=?" if epoch is not None else ""
+    args = (status, resolution, reason, _iso(_now()),
+            lease.turn_id, lease.owner, *(() if epoch is None else (epoch,)))
     try:
         with _conn() as conn:
             _ensure_schema(conn)
@@ -456,9 +467,9 @@ def _finish(lease: TurnLease, status: str, *, resolution: str | None,
             cur = conn.execute(
                 "UPDATE bo_turn_leases SET status=?, resolution=?, "
                 "reason=?, updated_at=? "
-                "WHERE turn_id=? AND owner=? AND status='active'",
-                (status, resolution, reason, _iso(_now()),
-                 lease.turn_id, lease.owner),
+                "WHERE turn_id=? AND owner=? AND status='active' "
+                + predicate,
+                args,
             )
             conn.execute("COMMIT")
             return cur.rowcount == 1
@@ -468,14 +479,265 @@ def _finish(lease: TurnLease, status: str, *, resolution: str | None,
 
 
 def complete_turn(lease: TurnLease, *, outcome: str) -> bool:
-    """Turn finished — effects accounted for. Safe to switch after."""
-    return _finish(lease, "closed", resolution=outcome, reason=None)
+    """Turn finished — effects accounted for. Safe to switch after.
+
+    The CAS carries the admission epoch: a close racing a switch that
+    somehow ran must not land as 'completed' under a stale epoch."""
+    return _finish(lease, "closed", resolution=outcome, reason=None,
+                   epoch=lease.epoch)
 
 
 def fail_turn_uncertain(lease: TurnLease, *, reason: str) -> bool:
     """Effect presence unprovable — the lease stays blocking until an
     operator reconciles it. Never auto-released."""
     return _finish(lease, "uncertain", resolution=None, reason=reason)
+
+
+# ---------------------------------------------------------------------------
+# RA15-BO01-03 — effect-boundary fencing + owner liveness
+# ---------------------------------------------------------------------------
+
+# In-process registry of the asyncio tasks that own admitted leases.
+# `os.kill(pid, 0)` alone cannot distinguish "turn task still running"
+# from "same long-lived process, task finished" — a reconcile gated on
+# pid liveness alone would deadlock on daemon owners (poller, API).
+_LIVE_TURNS: dict[str, Any] = {}
+
+# Acquiring the fence's BEGIN IMMEDIATE may legitimately wait behind
+# another turn's effect section (skill/MCP dispatch can run tens of
+# seconds). Failing after the default 5s would fence healthy concurrent
+# turns on pure contention, so holds use a wider budget; a wedged holder
+# still yields an honest refusal, never a hang.
+_HOLD_BUSY_TIMEOUT_MS = 30_000
+
+
+def register_turn_task(turn_id: str, task: Any | None = None) -> None:
+    """Bind the lease's owner task (called from the owning coroutine)."""
+    if task is None:
+        try:
+            task = asyncio.current_task()
+        except RuntimeError:
+            task = None
+    if task is not None:
+        _LIVE_TURNS[turn_id] = task
+
+
+def unregister_turn_task(turn_id: str) -> None:
+    _LIVE_TURNS.pop(turn_id, None)
+
+
+def _owner_still_apt(owner: Any, turn_id: str) -> bool:
+    """True when the lease owner may still be able to produce effects.
+
+    - no owner / unparseable → seeds and legacy rows carry no live owner;
+    - dead pid → cannot produce anything;
+    - foreign live pid → may still run → treat as apt (single-host limit:
+      we cannot introspect another process's tasks);
+    - our own pid → consult the task registry: a live task is apt, a
+      finished/unknown one is not.
+    """
+    if not isinstance(owner, str) or ":" not in owner:
+        return False
+    try:
+        pid = int(owner.split(":", 1)[0])
+    except ValueError:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    if pid != os.getpid():
+        return True
+    task = _LIVE_TURNS.get(turn_id)
+    return task is not None and not task.done()
+
+
+def renew_lease(lease: TurnLease) -> bool:
+    """Heartbeat: extend the expiry while the turn is demonstrably alive.
+
+    A turn that keeps checking in can never be swept to 'uncertain' — so
+    expiry reliably means "the owner stopped producing check-ins" (crash,
+    wedge, cancel), which is the honest precondition for reconcile."""
+    try:
+        with _conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            cur = conn.execute(
+                "UPDATE bo_turn_leases SET lease_expires_at=?, updated_at=? "
+                "WHERE turn_id=? AND owner=? AND status='active' AND epoch=?",
+                (
+                    _iso(_now() + timedelta(seconds=_lease_seconds())),
+                    _iso(_now()),
+                    lease.turn_id,
+                    lease.owner,
+                    lease.epoch,
+                ),
+            )
+            conn.execute("COMMIT")
+            return cur.rowcount == 1
+    except sqlite3.Error:
+        return False
+
+
+def _lease_valid_in_tx(conn: sqlite3.Connection, lease: TurnLease) -> bool:
+    """The fence predicate, evaluated inside the caller's transaction:
+    lease still ours, active, unexpired, admission epoch, no switch."""
+    row = conn.execute(
+        "SELECT status, epoch, owner, lease_expires_at "
+        "FROM bo_turn_leases WHERE turn_id=?",
+        (lease.turn_id,),
+    ).fetchone()
+    state = conn.execute(
+        "SELECT epoch, in_progress FROM bo_switch_state WHERE id=1"
+    ).fetchone()
+    if row is None or state is None:
+        return False
+    return (
+        row["status"] == "active"
+        and row["owner"] == lease.owner
+        and row["epoch"] == lease.epoch
+        and state["epoch"] == lease.epoch
+        and not state["in_progress"]
+        and row["lease_expires_at"] > _iso(_now())
+    )
+
+
+class EffectFence:
+    """Lease-scoped fence for real effect boundaries (RA15-BO01-03).
+
+    ``check()`` — cheap read + heartbeat; used per observable boundary
+    (each yielded item). ``run_atomic(fn)`` — holds BEGIN IMMEDIATE on
+    the coordination store across validate+effect, so a switch's epoch
+    bump can never interleave between the check and the commit: the
+    effect either lands under the epoch it was validated in, or not at
+    all. ``ahold()`` is the async variant for effect sections that await.
+    """
+
+    def __init__(self, lease: TurnLease):
+        self.lease = lease
+
+    def check(self) -> bool:
+        """Validate the lease and renew it.
+
+        Validation is a pure read (autocommit SELECTs): readers are never
+        blocked by another turn's BEGIN IMMEDIATE hold, so a concurrent
+        long effect section cannot fence this turn by lock contention —
+        only by real invalidation. Renewal is a separate best-effort write:
+        a momentarily busy writer just defers the heartbeat to the next
+        check (the TTL has slack)."""
+        if not _db_path().exists():
+            return False
+        try:
+            with _conn() as conn:
+                ok = _lease_valid_in_tx(conn, self.lease)
+            if ok:
+                renew_lease(self.lease)
+            return ok
+        except sqlite3.Error:
+            return False
+
+    def run_atomic(self, fn: Any, *args: Any, **kwargs: Any) -> tuple[bool, Any]:
+        """Validate inside BEGIN IMMEDIATE, then run ``fn`` while the
+        write lock is still held, then COMMIT — the epoch cannot move
+        between validation and the effect commit. Returns
+        ``(executed, result)``; ``(False, None)`` when fenced."""
+        try:
+            with _conn() as conn:
+                conn.execute(
+                    f"PRAGMA busy_timeout={_HOLD_BUSY_TIMEOUT_MS}"
+                )
+                conn.execute("BEGIN IMMEDIATE")
+                _sweep_dead_flag(conn)
+                if not _lease_valid_in_tx(conn, self.lease):
+                    conn.execute("ROLLBACK")
+                    return False, None
+                # Renew inside the same write txn: a live owner working at
+                # its boundary keeps the lease; expiry then only ever means
+                # "owner stopped checking in".
+                conn.execute(
+                    "UPDATE bo_turn_leases SET lease_expires_at=?, "
+                    "updated_at=? WHERE turn_id=? AND owner=? "
+                    "AND status='active'",
+                    (
+                        _iso(_now() + timedelta(seconds=_lease_seconds())),
+                        _iso(_now()),
+                        self.lease.turn_id,
+                        self.lease.owner,
+                    ),
+                )
+                try:
+                    result = fn(*args, **kwargs)
+                except BaseException:
+                    conn.execute("ROLLBACK")
+                    raise
+                conn.execute("COMMIT")
+                return True, result
+        except sqlite3.Error:
+            # Store unreadable at the boundary — the effect did not run
+            # (fn only runs after validation). Honest failure: fenced.
+            return False, None
+
+    @contextlib.asynccontextmanager
+    async def ahold(self) -> AsyncGenerator[bool, None]:
+        """Hold BEGIN IMMEDIATE across an ``await`` section.
+
+        A dedicated single-thread executor keeps the sqlite connection
+        thread-affine while the event loop runs the effect body. Yields
+        False when the lease is already invalid — the body must then be
+        skipped."""
+        import concurrent.futures
+
+        loop = asyncio.get_running_loop()
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        conn: sqlite3.Connection | None = None
+        ok = False
+        try:
+
+            def _begin() -> bool:
+                nonlocal conn
+                conn = sqlite3.connect(
+                    str(_db_path()), isolation_level=None
+                )
+                conn.row_factory = sqlite3.Row
+                conn.execute(
+                    f"PRAGMA busy_timeout={_HOLD_BUSY_TIMEOUT_MS}"
+                )
+                conn.execute("BEGIN IMMEDIATE")
+                _sweep_dead_flag(conn)
+                ok = _lease_valid_in_tx(conn, self.lease)
+                if ok:
+                    conn.execute(
+                        "UPDATE bo_turn_leases SET lease_expires_at=?, "
+                        "updated_at=? WHERE turn_id=? AND owner=? "
+                        "AND status='active'",
+                        (
+                            _iso(
+                                _now() + timedelta(seconds=_lease_seconds())
+                            ),
+                            _iso(_now()),
+                            self.lease.turn_id,
+                            self.lease.owner,
+                        ),
+                    )
+                return ok
+
+            try:
+                ok = await loop.run_in_executor(pool, _begin)
+            except sqlite3.Error:
+                # Store unreadable at the boundary — same fail-closed
+                # convention as check()/run_atomic: body skipped.
+                ok = False
+            yield ok
+        finally:
+            if conn is not None:
+                await loop.run_in_executor(
+                    pool, lambda: conn.execute("COMMIT" if ok else "ROLLBACK")
+                )
+                await loop.run_in_executor(pool, conn.close)
+            pool.shutdown(wait=False)
 
 
 def switch_in_progress() -> bool:
@@ -874,7 +1136,8 @@ def reconcile_turn(
         conn.execute("BEGIN IMMEDIATE")
         _sweep_expired(conn)
         row = conn.execute(
-            "SELECT status, reason FROM bo_turn_leases WHERE turn_id=?",
+            "SELECT status, reason, owner FROM bo_turn_leases "
+            "WHERE turn_id=?",
             (turn_id,),
         ).fetchone()
         if row is None:
@@ -890,6 +1153,20 @@ def reconcile_turn(
         if row["status"] != "uncertain":
             conn.execute("ROLLBACK")
             return {"turn_id": turn_id, "status": row["status"]}
+        # RA15-BO01-03: an uncertain lease whose owner can still produce
+        # effects must not be released — the reconcile would unblock the
+        # switch while the tardy worker is still runnable. Expiry, a dead
+        # PID or a human declaration are not proof of absence; only a
+        # demonstrably inert owner (dead process or finished task) lets
+        # the operator close it here.
+        if _owner_still_apt(row["owner"], turn_id):
+            conn.execute("ROLLBACK")
+            raise ReconcileRefusedError(
+                f"turn {turn_id} is uncertain but its owner "
+                f"({row['owner']}) is still running — stop the owner "
+                "process/task first, then reconcile. While it lives, "
+                "closing the lease cannot be shown safe."
+            )
         prior = row["reason"]
         reconciled_reason = (
             f"{prior}|reconciled_by:{actor}" if prior

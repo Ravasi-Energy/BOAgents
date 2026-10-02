@@ -315,3 +315,203 @@ def test_store_unavailable_refuses_admission(barrier_db, monkeypatch):
     )
     with pytest.raises(tb.TurnAdmissionError):
         tb.admit_turn("email", ref="m12", wait_s=0)
+
+
+# ---------------------------------------------------------------------------
+# RA15-BO01-03 — effect fencing + owner liveness
+# ---------------------------------------------------------------------------
+
+
+class _FakeTask:
+    """Stand-in for an asyncio.Task in the liveness registry."""
+
+    def __init__(self, done: bool = False):
+        self._done = done
+
+    def done(self) -> bool:
+        return self._done
+
+
+def test_reconcile_refuses_while_owner_task_alive(barrier_db):
+    """The BO01 window: a suspended-but-runnable owner must not be released
+    by reconcile — the close would unblock the switch while the worker can
+    still complete. Only a demonstrably inert owner reconciles."""
+    lease = tb.admit_turn("email", ref="m30", wait_s=0)
+    _expire(barrier_db, lease)
+    tb.register_turn_task(lease.turn_id, _FakeTask(done=False))
+    with pytest.raises(tb.ReconcileRefusedError, match="still running"):
+        tb.reconcile_turn(
+            lease.turn_id, resolution="verified", actor="op"
+        )
+    # Once the owner task is demonstrably finished, reconcile proceeds.
+    tb._LIVE_TURNS[lease.turn_id] = _FakeTask(done=True)
+    out = tb.reconcile_turn(
+        lease.turn_id, resolution="verified", actor="op"
+    )
+    assert out["status"] == "closed"
+    tb.unregister_turn_task(lease.turn_id)
+
+
+def test_reconcile_refuses_live_foreign_owner(barrier_db):
+    """A live owner pid in ANOTHER process cannot be introspected —
+    treated as apt; the operator must stop that process first."""
+    import os
+
+    lease = tb.admit_turn(
+        "email", ref="m31", owner="1:foreign", wait_s=0
+    )
+    _expire(barrier_db, lease)
+    with pytest.raises(tb.ReconcileRefusedError):
+        tb.reconcile_turn(
+            lease.turn_id, resolution="attested", actor="op"
+        )
+    # Dead pid → inert → reconcile allowed.
+    lease2 = tb.admit_turn(
+        "email", ref="m31b", owner="999999999:gone", wait_s=0
+    )
+    _expire(barrier_db, lease2)
+    out = tb.reconcile_turn(
+        lease2.turn_id, resolution="attested", actor="op"
+    )
+    assert out["status"] == "closed"
+    assert os.getpid() != 1  # sanity: our pid really is ours
+
+
+def test_fence_check_renews_lease(barrier_db):
+    """A live owner checking in keeps its lease — expiry then only ever
+    means 'stopped producing check-ins'. An already-expired lease is
+    fenced, never resurrected."""
+    import time as _t
+
+    from openexecutive.bo import db as bo_db
+
+    lease = tb.admit_turn("email", ref="m32", wait_s=0)
+    with bo_db.get_conn() as conn:
+        admission_exp = conn.execute(
+            "SELECT lease_expires_at FROM bo_turn_leases "
+            "WHERE turn_id=?", (lease.turn_id,),
+        ).fetchone()[0]
+    fence = tb.EffectFence(lease)
+    _t.sleep(0.02)  # ensure the renewed timestamp strictly advances
+    assert fence.check()
+    with bo_db.get_conn() as conn:
+        exp = conn.execute(
+            "SELECT lease_expires_at, status FROM bo_turn_leases "
+            "WHERE turn_id=?", (lease.turn_id,),
+        ).fetchone()
+    assert exp[1] == "active"
+    assert exp[0] > admission_exp
+    # Expired → fenced (no resurrection).
+    _expire(barrier_db, lease)
+    assert not fence.check()
+
+
+def test_fence_refuses_after_invalidation(barrier_db):
+    """The residual path the liveness gate cannot cover alone: a lease
+    closed+epoch bumped while a detached worker object still exists."""
+    lease = tb.admit_turn("email", ref="m33", wait_s=0)
+    fence = tb.EffectFence(lease)
+    assert fence.check()
+    _expire(barrier_db, lease)
+    tb.reconcile_turn(lease.turn_id, resolution="verified", actor="op")
+    op = tb.begin_switch("activate:x")
+    tb.end_switch(op)
+    assert not fence.check()
+    # complete_turn's epoch-pinned CAS refuses to close a stale lease.
+    assert not tb.complete_turn(lease, outcome="completed")
+
+
+def test_run_atomic_holds_validation_across_effect(barrier_db):
+    lease = tb.admit_turn("email", ref="m34", wait_s=0)
+    fence = tb.EffectFence(lease)
+    calls: list[str] = []
+    executed, result = fence.run_atomic(lambda: calls.append("fx") or "ok")
+    assert executed and result == "ok" and calls == ["fx"]
+    # After invalidate+reconcile+switch the effect body never runs.
+    _expire(barrier_db, lease)
+    tb.reconcile_turn(lease.turn_id, resolution="verified", actor="op")
+    op = tb.begin_switch("activate:x")
+    tb.end_switch(op)
+    executed, result = fence.run_atomic(
+        lambda: calls.append("late") or "bad"
+    )
+    assert not executed and result is None and calls == ["fx"]
+
+
+def test_ahold_fences_stale_turn(barrier_db):
+    import asyncio
+
+    async def _drive() -> tuple[list[bool], bool]:
+        lease = tb.admit_turn("email", ref="m35", wait_s=0)
+        fence = tb.EffectFence(lease)
+        seen: list[bool] = []
+        async with fence.ahold() as ok:
+            seen.append(ok)
+        _expire(barrier_db, lease)
+        tb.reconcile_turn(
+            lease.turn_id, resolution="verified", actor="op"
+        )
+        op = tb.begin_switch("activate:x")
+        tb.end_switch(op)
+        async with fence.ahold() as ok2:
+            seen.append(ok2)
+        return seen, True
+
+    seen, _ = asyncio.run(_drive())
+    assert seen == [True, False]
+
+
+def test_decorated_generator_fenced_mid_stream(barrier_db):
+    """BO01's exact chain at the real boundary: a live Executive generator
+    whose lease is invalidated and whose epoch moved cannot emit further
+    items — and its durable tail never runs."""
+    import asyncio
+
+    from openexecutive.orchestrator.executive import _barrier_turn
+
+    tail_writes: list[str] = []
+
+    class _FakeExec:
+        @_barrier_turn("executive")
+        async def stream(self, _fence=None):
+            yield "chunk-1"
+            # Where the durable tail would run — guarded by the fence.
+            async with _fence.ahold() as ok:
+                if ok:
+                    tail_writes.append("committed")
+            yield "chunk-2"
+
+    async def _drive() -> list[str]:
+        agen = _FakeExec().stream()
+        out = [await agen.__anext__()]
+        # Suspend with a live owner; expire the lease; detach the task
+        # binding (generator object survives — the BO01 window); an
+        # operator then legitimately reconciles the inert owner.
+        lease_id = tb.blockers()[0]["turn_id"]
+        from openexecutive.bo import db as bo_db
+
+        with bo_db.get_conn() as conn:
+            conn.execute(
+                "UPDATE bo_turn_leases SET lease_expires_at='2000-01-01' "
+                "WHERE turn_id=?", (lease_id,),
+            )
+        tb.unregister_turn_task(lease_id)
+        tb.reconcile_turn(
+            lease_id, resolution="verified", actor="op"
+        )
+        op = tb.begin_switch("activate:x")
+        tb.end_switch(op)
+        # Now the zombie resumes: every further boundary is fenced.
+        try:
+            while True:
+                out.append(await agen.__anext__())
+        except StopAsyncIteration:
+            pass
+        return out
+
+    out = asyncio.run(_drive())
+    assert out[0] == "chunk-1"
+    # chunk-2 never streamed; the fence notice is the only late output.
+    assert "chunk-2" not in out
+    assert any("workspace change" in str(i) for i in out[1:])
+    assert tail_writes == []

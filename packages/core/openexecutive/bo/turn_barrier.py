@@ -1113,6 +1113,32 @@ def blockers() -> list[dict[str, Any]]:
                  "reason": "coordination_store_unavailable"}]
 
 
+def recent_turns(limit: int = 50) -> list[dict[str, Any]]:
+    """Closed/reconciled leases, newest first (F-2, REM-AUDIT-18).
+
+    The durable trail the operator inspects after a refusal: because the
+    table lives in the unswapped coordination store it survives client
+    switches, fixture resets and process restarts. ``resolution``
+    distinguishes provider-verified evidence from human attestation.
+    """
+    if not _db_path().exists():
+        return []
+    try:
+        with _conn() as conn:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                "SELECT turn_id, kind, ref, client_slug, mailbox, owner, "
+                "epoch, status, resolution, reason, lease_expires_at, "
+                "created_at, updated_at FROM bo_turn_leases "
+                "WHERE status != 'active' ORDER BY updated_at DESC "
+                "LIMIT ?",
+                (max(1, min(int(limit), 500)),),
+            ).fetchall()
+            return [dict(r) for r in rows]
+    except sqlite3.Error:
+        return []
+
+
 def reconcile_turn(
     turn_id: str, *, resolution: str, actor: str
 ) -> dict[str, Any]:

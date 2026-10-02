@@ -62,6 +62,12 @@ _CAP_MIN_ROLE: dict[str, Role] = {
     # serves or destroys a slot outright.
     "clients:read": "viewer",
     "clients:write": "admin",
+    # Fixture ops are the same blast radius as client slots: load/unload/
+    # reset/snapshot swap or wipe the live company context, generate calls
+    # the LLM, create/delete mutate the catalog. Reads stay viewer-safe;
+    # every mutation is admin-only (F-1, REM-AUDIT-18).
+    "fixtures:read": "viewer",
+    "fixtures:write": "admin",
 }
 
 

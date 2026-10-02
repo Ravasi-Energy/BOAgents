@@ -129,6 +129,65 @@ async def list_turn_blockers(request: Request) -> dict:
     }
 
 
+@router.get("/clients/turn-history")
+async def list_turn_history(
+    request: Request, limit: int = 50
+) -> dict:
+    """Closed/reconciled turn leases, newest first (F-2, REM-AUDIT-18).
+
+    The durable trail that survives switches and restarts — what the
+    operator reviews after a refusal, or to confirm a reconcile landed.
+    ``owner`` is withheld from non-admin viewers, same as turn-blockers.
+    """
+    from openexecutive.bo import identity as bo_identity
+    from openexecutive.bo import turn_barrier
+
+    ident = bo_identity.resolve_identity(request)
+    bo_identity.require(ident, "clients:read")
+    try:
+        bo_identity.require(ident, "clients:write")
+        can_write = True
+    except bo_identity.ForbiddenError:
+        can_write = False
+    rows = turn_barrier.recent_turns(limit)
+    if not can_write:
+        rows = [
+            {k: v for k, v in r.items() if k != "owner"} for r in rows
+        ]
+    return {"turns": rows}
+
+
+@router.get("/clients/control-audit")
+async def list_control_audit(
+    request: Request, turn_id: str | None = None
+) -> dict:
+    """Durable control-plane audit rows (F-2, REM-AUDIT-18).
+
+    ``bo_control_audit`` is written in the same transaction as the state
+    change it records (e.g. ``turn_reconcile``), so this is the
+    authoritative operator-action trail — it cannot be lost by a journal
+    swap or an I/O error on the episodic audit log. ``resolution``
+    distinguishes provider-verified evidence (``verified``) from human
+    attestation (``attested``). ``actor`` is withheld from non-admins.
+    """
+    from openexecutive.bo import identity as bo_identity
+    from openexecutive.bo import turn_barrier
+
+    ident = bo_identity.resolve_identity(request)
+    bo_identity.require(ident, "clients:read")
+    try:
+        bo_identity.require(ident, "clients:write")
+        can_write = True
+    except bo_identity.ForbiddenError:
+        can_write = False
+    rows = turn_barrier.control_audit(turn_id)
+    if not can_write:
+        rows = [
+            {k: v for k, v in r.items() if k != "actor"} for r in rows
+        ]
+    return {"audit": rows}
+
+
 class ReconcileTurnRequest(BaseModel):
     resolution: Literal["verified", "attested"]
 

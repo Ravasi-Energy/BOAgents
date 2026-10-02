@@ -3785,6 +3785,13 @@ fixtures:
     back to the snapshot. Lets the system be demoed end-to-end without
     polluting any real installation.
   api: /fixtures — list, status, snapshot, reset, unload, load, generate, create, delete.
+  authorization: |
+    REM-AUDIT-18 (F-1): every mutating route requires the `fixtures:write`
+    capability (admin), checked first inside the handler — before any write,
+    generation or external call. `GET /fixtures` and `GET /fixtures/status`
+    require `fixtures:read` (viewer). Same contract as the /clients routes:
+    the shared-secret transport gate alone is not sufficient because these
+    routes swap or destroy the live company context.
   storage: |
     HYBRID. The four curated fixtures stay as git-tracked YAML under repo-root
     fixtures/companies/<name>/. User-generated fixtures live in the
@@ -4363,7 +4370,12 @@ bo:
     expiry is never proof of absence. Residual bound: in-loop audit rows
     between a released hold and the next yield could straddle an epoch
     bump only for an already-detached zombie — evidence loss, never a
-    user-visible effect.
+    user-visible effect. The durable trail is readable over the API
+    (F-2/F-3): ``GET /clients/turn-history`` lists non-active leases
+    newest-first and ``GET /clients/control-audit`` the ``bo_control_audit``
+    rows — both ``clients:read`` with ``owner``/``actor`` withheld from
+    non-admin viewers; the /clients page renders blockers + reconcile
+    controls (admin) + the collapsible trail.
   routing_observe: |
     bo/routing (VAL3-01) is the observe-mode model router: an administered
     catalog (provider/model/version, capabilities, regions, cost and quality

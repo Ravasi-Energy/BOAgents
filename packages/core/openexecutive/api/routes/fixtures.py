@@ -10,6 +10,19 @@ router = APIRouter()
 _SAFE_NAME = re.compile(r"^[a-z0-9_-]+$")
 
 
+def _capability(request: Request, capability: str) -> None:
+    """Resolve the caller's BO identity and require ``capability``.
+
+    Same contract as ``api.routes.clients._capability``: these routes swap
+    or destroy the live company context, so the shared-secret transport
+    gate alone is not enough — the check runs BEFORE any write, LLM call
+    or external effect (F-1, REM-AUDIT-18).
+    """
+    from openexecutive.bo import identity as bo_identity
+
+    bo_identity.require(bo_identity.resolve_identity(request), capability)
+
+
 class GenerateFixtureRequest(BaseModel):
     description: str
 
@@ -32,14 +45,16 @@ def _fixture_name_taken(slug: str) -> bool:
 
 
 @router.get("/fixtures")
-async def list_fixtures() -> dict:
+async def list_fixtures(request: Request) -> dict:
+    _capability(request, "fixtures:read")
     from openexecutive.cli.fixture_loader import list_all_fixtures
 
     return {"fixtures": list_all_fixtures()}
 
 
 @router.get("/fixtures/status")
-async def fixtures_status() -> dict:
+async def fixtures_status(request: Request) -> dict:
+    _capability(request, "fixtures:read")
     from openexecutive.cli.fixture_loader import get_fixture_status
     from openexecutive.config import get_settings
 
@@ -54,6 +69,7 @@ async def fixtures_snapshot(request: Request) -> dict:
     fixture data, not the user's company, and overwriting the only backup
     with fixture data would be irreversible data loss.
     """
+    _capability(request, "fixtures:write")
     from openexecutive.cli.fixture_loader import (
         FixtureActiveError,
         snapshot_user_state_async,
@@ -78,6 +94,7 @@ async def fixtures_reset(request: Request) -> dict:
     hit the deleted-then-recreated collection through the previous
     store instance.
     """
+    _capability(request, "fixtures:write")
     from openexecutive.cli.fixture_loader import (
         FixtureActiveError,
         reset_all_state,
@@ -94,6 +111,7 @@ async def fixtures_reset(request: Request) -> dict:
 @router.post("/fixtures/unload")
 async def fixtures_unload(request: Request) -> dict:
     """Restore the user's original state from the backup directory."""
+    _capability(request, "fixtures:write")
     from openexecutive.cli.fixture_loader import (
         FixtureActiveError,
         FixtureNotFoundError,
@@ -123,6 +141,7 @@ async def fixtures_unload(request: Request) -> dict:
 
 @router.post("/fixtures/{name}/load")
 async def load_fixture(name: str, request: Request) -> dict:
+    _capability(request, "fixtures:write")
     from openexecutive.cli.fixture_loader import (
         FixtureActiveError,
         FixtureNotFoundError,
@@ -156,13 +175,14 @@ async def load_fixture(name: str, request: Request) -> dict:
 
 
 @router.post("/fixtures/generate")
-async def generate_fixture(req: GenerateFixtureRequest) -> dict:
+async def generate_fixture(req: GenerateFixtureRequest, request: Request) -> dict:
     """Generate a DRAFT fixture bundle from a scenario description.
 
     The bundle is validated but NOT persisted — the UI shows it for review and
     posts it back to ``POST /fixtures`` to save. Returns the bundle plus a
     suggested unique slug.
     """
+    _capability(request, "fixtures:write")
     from openexecutive.config import get_settings
     from openexecutive.fixtures.generator import (
         GenerationError,
@@ -189,8 +209,9 @@ async def generate_fixture(req: GenerateFixtureRequest) -> dict:
 
 
 @router.post("/fixtures")
-async def create_fixture(req: CreateFixtureRequest) -> dict:
+async def create_fixture(req: CreateFixtureRequest, request: Request) -> dict:
     """Validate a (reviewed) bundle and persist it as a generated fixture."""
+    _capability(request, "fixtures:write")
     from openexecutive.fixtures import store as fixtures_store
     from openexecutive.fixtures.generator import (
         FixtureBundle,
@@ -229,8 +250,9 @@ async def create_fixture(req: CreateFixtureRequest) -> dict:
 
 
 @router.delete("/fixtures/{name}")
-async def delete_fixture(name: str) -> dict:
+async def delete_fixture(name: str, request: Request) -> dict:
     """Soft-delete a GENERATED fixture. Refuses curated and active fixtures."""
+    _capability(request, "fixtures:write")
     from openexecutive.cli.fixture_loader import FIXTURES_ROOT, get_fixture_status
     from openexecutive.config import get_settings
     from openexecutive.fixtures import store as fixtures_store

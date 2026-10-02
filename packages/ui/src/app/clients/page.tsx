@@ -11,15 +11,23 @@ import {
   type ClientDraftResult,
   type ClientMetaPatch,
   type ClientsStatus,
+  type ControlAuditRow,
   createClient,
   createClientFromDraft,
   deleteClient,
   generateClientDraft,
   getClientsCockpit,
+  getControlAudit,
+  getTurnBlockers,
+  getTurnHistory,
   listClients,
+  reconcileTurn,
   saveActiveClient,
+  type TurnBlocker,
+  type TurnHistoryRow,
   updateClientMeta,
 } from "@/lib/api";
+import { getBoSettings } from "@/lib/bo";
 import { clientCountsSummary, renewalBadge } from "@/lib/practice";
 
 // Client-company switcher for fractional / multi-client use. One client is
@@ -64,6 +72,18 @@ export default function ClientsPage() {
   const [metaForm, setMetaForm] = useState<ClientMetaPatch>({});
   const [savingMeta, setSavingMeta] = useState(false);
 
+  // Turn barrier (REM-AUDIT-18, F-2/F-3): open/uncertain leases blocking a
+  // switch, the durable closed-turn trail, and the control-plane audit. The
+  // reconcile action is admin-only (`clients:write`); the backend also
+  // withholds `owner`/`actor` from non-admin viewers.
+  const [blockers, setBlockers] = useState<TurnBlocker[]>([]);
+  const [switchBusy, setSwitchBusy] = useState(false);
+  const [turnHistory, setTurnHistory] = useState<TurnHistoryRow[]>([]);
+  const [controlAudit, setControlAudit] = useState<ControlAuditRow[]>([]);
+  const [role, setRole] = useState<string | null>(null);
+  const [reconciling, setReconciling] = useState<string | null>(null);
+  const [showTrail, setShowTrail] = useState(false);
+
   const refresh = useCallback(async () => {
     try {
       const next = await listClients();
@@ -81,6 +101,30 @@ export default function ClientsPage() {
       setToast({ message: "Failed to load clients", kind: "error" });
     } finally {
       setLoading(false);
+    }
+    // Barrier surfaces are best-effort: a 401/403 (e.g. missing capability)
+    // must not break the clients page itself.
+    try {
+      const b = await getTurnBlockers();
+      setBlockers(b.blockers);
+      setSwitchBusy(b.switch_in_progress);
+    } catch {
+      setBlockers([]);
+    }
+    try {
+      setRole((await getBoSettings()).role);
+    } catch {
+      setRole(null);
+    }
+    try {
+      setTurnHistory((await getTurnHistory()).turns);
+    } catch {
+      setTurnHistory([]);
+    }
+    try {
+      setControlAudit((await getControlAudit()).audit);
+    } catch {
+      setControlAudit([]);
     }
   }, []);
 
@@ -189,6 +233,31 @@ export default function ClientsPage() {
     }
   }
 
+  async function handleReconcile(
+    turnId: string,
+    resolution: "verified" | "attested",
+  ) {
+    setReconciling(turnId);
+    try {
+      await reconcileTurn(turnId, resolution);
+      setToast({
+        message:
+          resolution === "verified"
+            ? `Turn ${turnId} closed — provider/journal evidence recorded.`
+            : `Turn ${turnId} closed on operator attestation.`,
+        kind: "success",
+      });
+      await refresh();
+    } catch (e: unknown) {
+      // 409 carries the real refusal (owner still alive, lease active) —
+      // surface it verbatim rather than hiding it behind a generic error.
+      setToast({ message: e instanceof Error ? e.message : "Reconcile failed", kind: "error" });
+      await refresh();
+    } finally {
+      setReconciling(null);
+    }
+  }
+
   async function handleActivate(slug: string) {
     setBusySlug(slug);
     try {
@@ -268,6 +337,195 @@ export default function ClientsPage() {
           <div className="mt-4 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-400">
             Demo fixture <strong>{status.fixture_active}</strong> is active —
             unload it on the Company Simulator page before working with clients.
+          </div>
+        )}
+
+        {/* Turn barrier (F-2/F-3): open/uncertain leases blocking a switch,
+            the durable closed-turn trail, and the control-plane audit. Only
+            rendered when there is something to report — quiet by default. */}
+        {(switchBusy ||
+          blockers.length > 0 ||
+          turnHistory.length > 0 ||
+          controlAudit.length > 0) && (
+          <div className="mt-4 rounded-xl border border-line bg-surface-elevated p-4">
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-sm font-medium text-fg">Turn barrier</h2>
+              {switchBusy && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-amber-500/40 bg-amber-500/10 text-amber-400">
+                  switch in progress
+                </span>
+              )}
+            </div>
+            <p className="mt-1 text-xs text-fg-muted">
+              Turns still running (or uncertain) keep the switch locked so a
+              stale worker cannot act in the new client. Uncertain turns close
+              only after an admin reconciles them — the decision is recorded in
+              the durable control audit below.
+            </p>
+
+            {blockers.length > 0 && (
+              <ul className="mt-3 space-y-2">
+                {blockers.map((b, i) => (
+                  <li
+                    key={b.turn_id ?? `sentinel-${i}`}
+                    className="rounded-lg border border-line bg-surface px-3 py-2"
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-xs font-medium text-fg">
+                        {b.turn_id ?? "coordination store"}
+                      </span>
+                      <span
+                        className={`text-[10px] px-1.5 py-0.5 rounded-full border ${
+                          b.status === "uncertain" || b.status === "unknown"
+                            ? "border-amber-500/40 bg-amber-500/10 text-amber-400"
+                            : "border-line text-fg-muted"
+                        }`}
+                      >
+                        {b.status}
+                      </span>
+                      {b.client_slug && (
+                        <span className="text-[10px] text-fg-muted">
+                          client: {b.client_slug}
+                        </span>
+                      )}
+                      {b.kind && (
+                        <span className="text-[10px] text-fg-muted">
+                          {b.kind}
+                        </span>
+                      )}
+                    </div>
+                    {b.reason && (
+                      <div className="mt-1 text-[11px] text-fg-muted">
+                        {b.reason}
+                      </div>
+                    )}
+                    {b.turn_id && b.status === "uncertain" && (
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        {role === "admin" ? (
+                          <>
+                            <button
+                              onClick={() =>
+                                void handleReconcile(b.turn_id as string, "verified")
+                              }
+                              disabled={reconciling !== null}
+                              className="rounded-lg border border-line bg-surface-overlay px-3 py-1.5 text-xs font-medium text-fg hover:border-line-strong disabled:opacity-50"
+                            >
+                              {reconciling === b.turn_id
+                                ? "Reconciling…"
+                                : "Close — evidence verified"}
+                            </button>
+                            <button
+                              onClick={() =>
+                                void handleReconcile(b.turn_id as string, "attested")
+                              }
+                              disabled={reconciling !== null}
+                              className="rounded-lg border border-line px-3 py-1.5 text-xs text-fg-muted hover:border-line-strong disabled:opacity-50"
+                            >
+                              Close — attested (no provider check)
+                            </button>
+                          </>
+                        ) : (
+                          <span className="text-[11px] text-fg-muted">
+                            An admin must reconcile this turn before the
+                            switch can proceed.
+                          </span>
+                        )}
+                      </div>
+                    )}
+                    {b.turn_id && b.status === "active" && (
+                      <div className="mt-1 text-[11px] text-fg-muted">
+                        Still running — wait for the lease to expire (it then
+                        reads &quot;uncertain&quot;) before reconciling.
+                      </div>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            {(turnHistory.length > 0 || controlAudit.length > 0) && (
+              <div className="mt-3">
+                <button
+                  onClick={() => setShowTrail((v) => !v)}
+                  className="text-[11px] text-indigo-400 hover:text-indigo-300"
+                >
+                  {showTrail
+                    ? "Hide turn history & control audit"
+                    : "Show turn history & control audit"}
+                </button>
+                {showTrail && (
+                  <div className="mt-2 space-y-3">
+                    {turnHistory.length > 0 && (
+                      <div>
+                        <div className="text-[11px] font-medium text-fg-muted uppercase tracking-wide">
+                          Closed turns
+                        </div>
+                        <ul className="mt-1 space-y-1">
+                          {turnHistory.map((t) => (
+                            <li
+                              key={t.turn_id}
+                              className="flex flex-wrap items-baseline gap-x-2 text-[11px] text-fg-muted"
+                            >
+                              <span className="text-fg">{t.turn_id}</span>
+                              <span>{t.kind}</span>
+                              {t.client_slug && <span>{t.client_slug}</span>}
+                              <span className="px-1 rounded border border-line">
+                                {t.status}
+                              </span>
+                              {t.resolution && (
+                                <span
+                                  className={`px-1 rounded border ${
+                                    t.resolution === "verified"
+                                      ? "border-emerald-500/40 text-emerald-400"
+                                      : "border-amber-500/40 text-amber-400"
+                                  }`}
+                                >
+                                  {t.resolution}
+                                </span>
+                              )}
+                              {t.reason && <span>{t.reason}</span>}
+                              {t.updated_at && <span>{t.updated_at}</span>}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    {controlAudit.length > 0 && (
+                      <div>
+                        <div className="text-[11px] font-medium text-fg-muted uppercase tracking-wide">
+                          Control audit
+                        </div>
+                        <ul className="mt-1 space-y-1">
+                          {controlAudit.map((a) => (
+                            <li
+                              key={a.id}
+                              className="flex flex-wrap items-baseline gap-x-2 text-[11px] text-fg-muted"
+                            >
+                              <span className="text-fg">{a.action}</span>
+                              {a.turn_id && <span>{a.turn_id}</span>}
+                              {a.resolution && (
+                                <span
+                                  className={`px-1 rounded border ${
+                                    a.resolution === "verified"
+                                      ? "border-emerald-500/40 text-emerald-400"
+                                      : "border-amber-500/40 text-amber-400"
+                                  }`}
+                                >
+                                  {a.resolution}
+                                </span>
+                              )}
+                              {a.actor && <span>by {a.actor}</span>}
+                              {a.reason && <span>{a.reason}</span>}
+                              <span>{a.created_at}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 

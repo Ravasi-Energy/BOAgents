@@ -4367,7 +4367,16 @@ bo:
     is demonstrably apt — a live task in this process (``_LIVE_TURNS``
     registry) or any live foreign pid (single-host limit: another
     process's tasks cannot be introspected, so liveness is assumed);
-    expiry is never proof of absence. The residual audit window is
+    expiry is never proof of absence. RA15-BO01-06 closes the cancel
+    half: dispatched children (skill/MCP gather, route_parallel fan-out,
+    committee.review) run shielded through ``_run_children`` — a parent
+    cancel never reaches them, so ``task.done()`` stays an honest "the
+    coroutine (and any executor thread it awaited) really finished"
+    signal; every child registers on the lease and ``reconcile_turn``
+    refuses while one is runnable, with a bounded 5s drain on cancel —
+    admin attestation cannot free authority while a child can still
+    produce an effect, and a dead process's children are dead with it.
+    The residual audit window is
     closed too: every durable journal write inside the loop —
     ``memory_snapshot``, ``cache_event``/usage rows, ``web_search``,
     ``specialist_consult`` and per-tool ``tool_invocation`` — runs under

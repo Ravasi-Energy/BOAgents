@@ -369,6 +369,59 @@ async def _maybe_fence_hold(fence: Any) -> AsyncIterator[bool]:
             yield ok
 
 
+# Bounded window for draining still-running children after the parent
+# task was cancelled (RA15-BO01-06). Children that outlive it stay
+# registered on the lease — reconcile keeps refusing until they actually
+# finish; the window only bounds how long THIS turn's unwinding waits.
+_CHILD_DRAIN_SECONDS = 5.0
+
+
+async def _run_children(fence: Any, coros: Any) -> list[Any]:
+    """Dispatch child coroutines shielded from parent cancellation.
+
+    RA15-BO01-06: ``asyncio.gather`` delivers cancellation to its
+    children on parent cancel but does NOT wait for them — a child that
+    swallows cancellation, or still awaits an executor thread, keeps
+    running after the parent task is done. Reconcile then saw only the
+    finished parent and freed the turn while a live worker could still
+    produce an effect in the swapped-in client.
+
+    Here each child runs as its own task, shielded so a parent cancel
+    never reaches it: ``task.done()`` then honestly means the coroutine —
+    including whatever it awaited — completed. Every task is registered
+    on the lease (``turn_barrier.register_child_task``) so
+    ``reconcile_turn`` refuses while any child is still runnable. On
+    parent cancellation we drain for a bounded window and propagate the
+    cancellation; children still pending stay registered and keep the
+    lease unreconcilable until they genuinely end (or die with the
+    process).
+    """
+    tasks = [asyncio.ensure_future(c) for c in list(coros)]
+    if fence is not None:
+        from openexecutive.bo import turn_barrier as _tb
+
+        for t in tasks:
+            _tb.register_child_task(fence.lease.turn_id, t)
+    try:
+        return list(
+            await asyncio.shield(
+                asyncio.gather(*tasks, return_exceptions=True)
+            )
+        )
+    except asyncio.CancelledError:
+        await asyncio.wait(tasks, timeout=_CHILD_DRAIN_SECONDS)
+        raise
+
+
+async def _run_child(fence: Any, coro: Any) -> Any:
+    """Single-child variant of ``_run_children`` — re-raises child
+    failures like a plain ``await`` would."""
+    result = (await _run_children(fence, [coro]))[0]
+    if isinstance(result, BaseException):
+        raise result
+    return result
+
+
 def _barrier_turn(kind: str) -> Any:
     """Admit a durable turn lease around an Executive entry point (RA13-A02-01)
     and fence its effect boundaries (RA15-BO01-03).
@@ -1045,11 +1098,18 @@ class Executive:
             yield debug_collector.to_sse_dict(evt)
 
         review_t0 = time.monotonic()
-        critiques = await committee.review(
-            user_message=user_message,
-            draft=draft,
-            consulted=consulted,
-            specialist_outputs=specialist_outputs,
+        # Committee reviewers fan out inside committee.review — shield
+        # and register it like every other dispatched child so a
+        # cancelled parent cannot free the turn mid-review
+        # (RA15-BO01-06).
+        critiques = await _run_child(
+            _fence,
+            committee.review(
+                user_message=user_message,
+                draft=draft,
+                consulted=consulted,
+                specialist_outputs=specialist_outputs,
+            ),
         )
         review_ms = round((time.monotonic() - review_t0) * 1000)
         logger.info(
@@ -1493,11 +1553,14 @@ class Executive:
                 async with _maybe_fence_hold(_fence) as _spec_ok:
                     if not _spec_ok:
                         raise _TurnFencedError
-                    specialist_results = await route_parallel(
-                        run_calls,
-                        episodic_context=episodic_context,
-                        session_id=session_id,
-                        debug_collector=debug_collector,
+                    specialist_results = await _run_child(
+                        _fence,
+                        route_parallel(
+                            run_calls,
+                            episodic_context=episodic_context,
+                            session_id=session_id,
+                            debug_collector=debug_collector,
+                        ),
                     )
                     spec_ms = round((time.monotonic() - spec_t0) * 1000)
                     # The consult audit rows are durable journal writes —
@@ -1570,9 +1633,9 @@ class Executive:
                 async with _maybe_fence_hold(_fence) as _skill_ok:
                     if not _skill_ok:
                         raise _TurnFencedError
-                    skill_results = await asyncio.gather(
-                        *(_ALL_SKILL_HANDLERS[tu["name"]](tu["input"]) for tu in skill_tool_uses),
-                        return_exceptions=True,
+                    skill_results = await _run_children(
+                        _fence,
+                        (_ALL_SKILL_HANDLERS[tu["name"]](tu["input"]) for tu in skill_tool_uses),
                     )
                     # `raw` rather than `result` so the narrowed value keeps the
                     # plain `str` type the rest of this function's loops use.
@@ -1689,9 +1752,9 @@ class Executive:
                 async with _maybe_fence_hold(_fence) as _mcp_ok:
                     if not _mcp_ok:
                         raise _TurnFencedError
-                    mcp_results = await asyncio.gather(
-                        *(_mcp_dispatch[tu["name"]](tu["input"]) for tu in mcp_tool_uses),
-                        return_exceptions=True,
+                    mcp_results = await _run_children(
+                        _fence,
+                        (_mcp_dispatch[tu["name"]](tu["input"]) for tu in mcp_tool_uses),
                     )
                     for tu, raw in zip(mcp_tool_uses, mcp_results, strict=True):
                         tool_label = tu["input"].get("name", tu["name"]) if tu["name"] == "call_tool" else tu["name"]

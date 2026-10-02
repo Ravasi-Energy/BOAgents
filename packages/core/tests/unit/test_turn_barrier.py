@@ -634,3 +634,85 @@ def test_zombie_audit_writes_never_cross_epoch_bump(barrier_db, monkeypatch):
     # Under a valid epoch the tool_invocation row is written (inside the
     # dispatch hold); after the bump the zombie must emit nothing.
     assert audit_calls == []
+
+
+def test_reconcile_refuses_while_child_task_alive(barrier_db):
+    """RA15-BO01-06: a cancelled parent task must not free the turn while
+    dispatched child work (skill/MCP/specialist) is still runnable."""
+    import asyncio
+
+    lease = tb.admit_turn("executive", ref="c1", wait_s=0)
+    _expire(barrier_db, lease)
+    # Parent task finished — dead owner — but a child is still running.
+    gate = asyncio.Event()
+
+    async def _child():
+        await asyncio.wait_for(gate.wait(), timeout=30)
+
+    async def _run():
+        task = asyncio.ensure_future(_child())
+        tb.register_child_task(lease.turn_id, task)
+        with pytest.raises(tb.ReconcileRefusedError, match="children"):
+            tb.reconcile_turn(
+                lease.turn_id, resolution="attested", actor="op"
+            )
+        gate.set()
+        await asyncio.sleep(0.05)  # let the child actually finish
+        out = tb.reconcile_turn(
+            lease.turn_id, resolution="attested", actor="op"
+        )
+        assert out["status"] == "closed"
+
+    asyncio.run(_run())
+
+
+def test_shielded_dispatch_survives_parent_cancel(barrier_db, monkeypatch):
+    """RA15-BO01-06 end-to-end at the dispatch boundary: cancelling the
+    parent task mid-dispatch leaves the child shielded and running; the
+    lease stays unreconcilable while the child can still produce its
+    effect, and becomes reconcilable once the child really ends."""
+    import asyncio
+    from unittest.mock import patch
+
+    from openexecutive.orchestrator import executive as ex_mod
+
+    monkeypatch.setattr(ex_mod, "_CHILD_DRAIN_SECONDS", 0.2)
+    lease = tb.admit_turn("executive", ref="c2", wait_s=0)
+    effect_landed = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _worker():
+        await release.wait()
+        effect_landed.set()
+        return "done"
+
+    async def _drive():
+        fence = tb.EffectFence(lease)
+        parent = asyncio.ensure_future(
+            ex_mod._run_children(fence, [_worker()])
+        )
+        await asyncio.sleep(0.05)
+        parent.cancel()
+        try:
+            await parent
+        except asyncio.CancelledError:
+            pass
+        # Parent done; child still alive → reconcile must refuse.
+        assert parent.done()
+        with pytest.raises(tb.ReconcileRefusedError, match="children"):
+            _expire(barrier_db, lease)
+            tb.reconcile_turn(
+                lease.turn_id, resolution="attested", actor="op"
+            )
+        # Releasing the child lets its effect land BEFORE any switch —
+        # only then may the operator close the lease.
+        release.set()
+        await asyncio.sleep(0.05)
+        assert effect_landed.is_set()
+        _expire(barrier_db, lease)
+        out = tb.reconcile_turn(
+            lease.turn_id, resolution="attested", actor="op"
+        )
+        assert out["status"] == "closed"
+
+    asyncio.run(_drive())

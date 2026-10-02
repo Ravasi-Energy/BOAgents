@@ -258,3 +258,60 @@ def test_unauthenticated_refused_on_public_deployment(
         ).status_code
         == 401
     )
+
+
+# --------------------------------------------------------------------------- #
+# RA15-BO01-08 — actor identity must not leak through derived fields
+# --------------------------------------------------------------------------- #
+
+def _reconciled_lease(client: TestClient, ref: str = "priv") -> str:
+    turn_id = _uncertain_lease(ref)
+    resp = client.post(
+        f"/clients/turn-blockers/{turn_id}/reconcile",
+        headers=ADMIN,
+        json={"resolution": "verified"},
+    )
+    assert resp.status_code == 200, resp.text
+    return turn_id
+
+
+def test_history_hides_actor_in_reason_for_viewer_and_operator(
+    client: TestClient,
+) -> None:
+    _reconciled_lease(client)
+    for hdrs in (VIEWER, OPERATOR):
+        resp = client.get("/clients/turn-history", headers=hdrs)
+        assert resp.status_code == 200
+        # The admin email must appear NOWHERE in the body — not in a
+        # dropped-key field, not embedded in reason.
+        assert "admin@test" not in resp.text
+        row = resp.json()["turns"][0]
+        assert "owner" not in row
+        assert "reconciled_by:[redacted]" in row["reason"]
+        # Non-identity parts of the reason survive.
+        assert "lease_expired" in row["reason"] or "uncertain" in row["reason"]
+
+
+def test_control_audit_hides_actor_in_detail_for_viewer_and_operator(
+    client: TestClient,
+) -> None:
+    _reconciled_lease(client)
+    for hdrs in (VIEWER, OPERATOR):
+        resp = client.get("/clients/control-audit", headers=hdrs)
+        assert resp.status_code == 200
+        assert "admin@test" not in resp.text
+        row = resp.json()["audit"][0]
+        assert "actor" not in row
+        # The nested JSON detail carried the reconciled_by marker — the
+        # marker is redacted, the prior reason stays readable.
+        assert "admin@test" not in row["detail"]
+        assert "reconciled_by:[redacted]" in row["detail"]
+
+
+def test_admin_keeps_full_evidence(client: TestClient) -> None:
+    _reconciled_lease(client)
+    hist = client.get("/clients/turn-history", headers=ADMIN)
+    audit = client.get("/clients/control-audit", headers=ADMIN)
+    assert "admin@test" in hist.text
+    assert "admin@test" in audit.text
+    assert audit.json()["audit"][0]["actor"] == "admin@test"

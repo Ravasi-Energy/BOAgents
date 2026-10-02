@@ -503,6 +503,18 @@ def fail_turn_uncertain(lease: TurnLease, *, reason: str) -> bool:
 # pid liveness alone would deadlock on daemon owners (poller, API).
 _LIVE_TURNS: dict[str, Any] = {}
 
+# Dispatched child work (skill/MCP/specialist tasks) bound to the owning
+# lease — RA15-BO01-06. A cancelled parent task does not prove the
+# children stopped: ``asyncio.gather`` delivers cancellation but does not
+# wait for children that swallow it or still await an executor thread.
+# Children are registered here at dispatch and the dispatcher shields
+# them, so ``task.done()`` is a real completion signal (the coroutine —
+# and any thread it was awaiting — actually finished). Reconcile refuses
+# while any registered child is still running. The registry is
+# in-process by design: after a restart the children are dead with the
+# process, which IS proof they can no longer produce effects.
+_LIVE_CHILDREN: dict[str, set] = {}
+
 # Acquiring the fence's BEGIN IMMEDIATE may legitimately wait behind
 # another turn's effect section (skill/MCP dispatch can run tens of
 # seconds). Failing after the default 5s would fence healthy concurrent
@@ -524,6 +536,26 @@ def register_turn_task(turn_id: str, task: Any | None = None) -> None:
 
 def unregister_turn_task(turn_id: str) -> None:
     _LIVE_TURNS.pop(turn_id, None)
+
+
+def register_child_task(turn_id: str, task: Any) -> None:
+    """Bind a dispatched child task to the lease so reconcile can see it."""
+    bucket = _LIVE_CHILDREN.setdefault(turn_id, set())
+    bucket.add(task)
+    task.add_done_callback(lambda t, tid=turn_id: _child_done(tid, t))
+
+
+def _child_done(turn_id: str, task: Any) -> None:
+    bucket = _LIVE_CHILDREN.get(turn_id)
+    if bucket is not None:
+        bucket.discard(task)
+        if not bucket:
+            _LIVE_CHILDREN.pop(turn_id, None)
+
+
+def children_alive(turn_id: str) -> bool:
+    """True while any registered child task of the turn is unfinished."""
+    return any(not t.done() for t in _LIVE_CHILDREN.get(turn_id, ()))
 
 
 def _owner_still_apt(owner: Any, turn_id: str) -> bool:
@@ -1192,6 +1224,21 @@ def reconcile_turn(
                 f"({row['owner']}) is still running — stop the owner "
                 "process/task first, then reconcile. While it lives, "
                 "closing the lease cannot be shown safe."
+            )
+        # RA15-BO01-06: a finished/cancelled parent task does not prove
+        # its dispatched children stopped — shielded skill/MCP/specialist
+        # work outlives the parent. Closing while a child is runnable
+        # would release the turn's authority while an effect can still
+        # land. Admin attestation is not a substitute for demonstrated
+        # child termination.
+        if children_alive(turn_id):
+            conn.execute("ROLLBACK")
+            raise ReconcileRefusedError(
+                f"turn {turn_id} is uncertain and still has live "
+                "dispatched children (skill/MCP/specialist work) — "
+                "closing the lease while a child can still produce "
+                "effects is not safe. Wait for the children to finish "
+                "or stop the process, then reconcile."
             )
         prior = row["reason"]
         reconciled_reason = (

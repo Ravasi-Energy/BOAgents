@@ -8,6 +8,7 @@ until a slot is explicitly created.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Literal
 
@@ -98,6 +99,35 @@ async def list_clients(request: Request) -> dict:
     }
 
 
+_RECONCILED_BY_RE = re.compile(r"reconciled_by:[^\"'|\s)}\]]+")
+
+
+def _redact_for_viewer(row: dict) -> dict:
+    """Strip operator/owner identity from a barrier row for non-admins
+    (RA15-BO01-08).
+
+    Dropping the ``owner``/``actor`` keys alone leaked the reconciler's
+    identity anyway: ``reconcile_turn`` embeds ``reconciled_by:<actor>``
+    into the lease ``reason``, and ``bo_control_audit.detail`` is a JSON
+    blob whose nested strings repeat it. For non-admin viewers the
+    marker is masked in every string field — including the raw JSON of
+    ``detail`` — and the actor's exact value is scrubbed wherever else
+    it appears. The stored rows keep full evidence; this is view-only
+    redaction. Admins still see everything.
+    """
+    actor = row.get("actor")
+    row = {k: v for k, v in row.items() if k not in ("owner", "actor")}
+    for key, value in row.items():
+        if isinstance(value, str):
+            value = _RECONCILED_BY_RE.sub(
+                "reconciled_by:[redacted]", value
+            )
+            if isinstance(actor, str) and actor:
+                value = value.replace(actor, "[redacted]")
+            row[key] = value
+    return row
+
+
 @router.get("/clients/turn-blockers")
 async def list_turn_blockers(request: Request) -> dict:
     """Open/uncertain turn leases blocking client switches (RA13-A02-01).
@@ -120,9 +150,7 @@ async def list_turn_blockers(request: Request) -> dict:
         can_write = False
     blockers = turn_barrier.blockers()
     if not can_write:
-        blockers = [
-            {k: v for k, v in b.items() if k != "owner"} for b in blockers
-        ]
+        blockers = [_redact_for_viewer(b) for b in blockers]
     return {
         "switch_in_progress": turn_barrier.switch_in_progress(),
         "blockers": blockers,
@@ -137,7 +165,9 @@ async def list_turn_history(
 
     The durable trail that survives switches and restarts — what the
     operator reviews after a refusal, or to confirm a reconcile landed.
-    ``owner`` is withheld from non-admin viewers, same as turn-blockers.
+    ``owner`` and any embedded ``reconciled_by:<actor>`` marker in
+    ``reason`` are withheld from non-admin viewers, same as
+    turn-blockers.
     """
     from openexecutive.bo import identity as bo_identity
     from openexecutive.bo import turn_barrier
@@ -151,9 +181,7 @@ async def list_turn_history(
         can_write = False
     rows = turn_barrier.recent_turns(limit)
     if not can_write:
-        rows = [
-            {k: v for k, v in r.items() if k != "owner"} for r in rows
-        ]
+        rows = [_redact_for_viewer(r) for r in rows]
     return {"turns": rows}
 
 
@@ -168,7 +196,9 @@ async def list_control_audit(
     authoritative operator-action trail — it cannot be lost by a journal
     swap or an I/O error on the episodic audit log. ``resolution``
     distinguishes provider-verified evidence (``verified``) from human
-    attestation (``attested``). ``actor`` is withheld from non-admins.
+    attestation (``attested``). ``actor`` — including its copies inside
+    ``detail`` JSON and ``reconciled_by:`` markers — is withheld from
+    non-admins.
     """
     from openexecutive.bo import identity as bo_identity
     from openexecutive.bo import turn_barrier
@@ -182,9 +212,7 @@ async def list_control_audit(
         can_write = False
     rows = turn_barrier.control_audit(turn_id)
     if not can_write:
-        rows = [
-            {k: v for k, v in r.items() if k != "actor"} for r in rows
-        ]
+        rows = [_redact_for_viewer(r) for r in rows]
     return {"audit": rows}
 
 

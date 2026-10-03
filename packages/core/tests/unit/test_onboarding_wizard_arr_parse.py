@@ -180,9 +180,6 @@ def test_arr_currency_from_explicit_markers(text: str, expected_ccy) -> None:
         # Markers on the same expression that disagree → conflict, unknown.
         ("ARR $20M EUR", None),
         ("ARR 20M USD or EUR", None),
-        # The old whole-answer scan treated a second amount's currency as a
-        # conflict; per-expression attribution binds $ to the captured sum.
-        ("$5M but also 4M EUR", "USD"),
     ],
 )
 def test_arr_currency_binds_to_the_amount_expression(
@@ -192,3 +189,28 @@ def test_arr_currency_binds_to_the_amount_expression(
 
     assert "annual_revenue_arr" in profile
     assert profile["annual_revenue_arr_currency"] == expected_ccy
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_arr"),
+    [
+        # Field binding: the ARR keyword picks its own amount, not another
+        # field's ("costs $5M, ARR 20M" must not yield 5M).
+        ("costs $5M, ARR 20M", 20_000_000.0),
+        ("costs $5M, ARR20M", 20_000_000.0),
+        ("ARR 20M, costs $5M", 20_000_000.0),
+        ("revenue 50M, ARR 20M", 20_000_000.0),
+        ("We do $2M in ARR", 2_000_000.0),
+        ("costs $5M, ARR 0.5M", 500_000.0),
+        ("ARR 0M EUR", 0.0),
+        # Ambiguous magnitudes — the field stays unset, never a guess.
+        ("ARR 20M, ARR 30M", None),
+        ("20M, 30M", None),
+        ("$5M but also 4M EUR", None),
+        ("We did 12M this year, 8M last year", None),
+    ],
+)
+def test_arr_amount_binds_to_the_field(text: str, expected_arr) -> None:
+    profile = build_profile_from_answers({"business_model": text})
+
+    assert profile.get("annual_revenue_arr") == expected_arr

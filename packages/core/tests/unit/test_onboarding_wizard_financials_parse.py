@@ -86,3 +86,24 @@ def test_burn_currency_binds_to_the_amount_expression(
 
     assert fin["burn_rate_monthly"] == expected_burn
     assert fin["burn_rate_currency"] == expected_ccy
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_burn"),
+    [
+        # Field binding: "burn" outranks generic monthly figures, and
+        # costs-bound amounts only win when nothing names burn.
+        ("revenue 50k monthly, burn 30k monthly", 30_000.0),
+        ("burn 30k monthly, revenue 50k monthly", 30_000.0),
+        ("burn 50k monthly, costs 30k monthly", 50_000.0),
+        ("costs 30k monthly, burn 50k monthly", 50_000.0),
+        # Ambiguous: equally-bound figures stay unset.
+        ("costs 30k monthly, spend 20k monthly", None),
+        ("burn 50k monthly, burn 30k monthly", None),
+        ("burn 50k monthly, burn 30k monthly", None),
+    ],
+)
+def test_burn_amount_binds_to_the_field(text: str, expected_burn) -> None:
+    profile = build_profile_from_answers({"financials": text})
+
+    assert profile["financials"].get("burn_rate_monthly") == expected_burn

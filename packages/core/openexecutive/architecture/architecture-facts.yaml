@@ -3742,17 +3742,25 @@ company_onboarding:
     clearing it.
   wizard_money: |
     The form fallback (build_profile_from_answers in onboarding/wizard.py)
-    parses ARR and monthly burn from free text with bounded regexes; each
-    captured amount then gets a currency ONLY from markers bound to its own
-    expression — _amount_currency(text, match) accepts a symbol/code inside
-    the match ($20M), chained immediately before (USD 20M), or right after
-    (20M USD, 20M in USD, 20M, in RON). A currency stated for a DIFFERENT
-    sum in the same answer ("ARR 20M, costs in USD") does NOT attach
-    (RA16-BO01-MONEY-01), and conflicting markers on one expression also
-    yield None. Bare numbers stay currency-unknown: no assumed USD, no
-    backfill. The LLM paths (interview emit schema, fixture generator)
-    carry the same rule in the property description — the currency must be
-    stated for the revenue amount itself.
+    parses ARR and monthly burn from free text with bounded regexes.
+    AMOUNT SELECTION (_select_amount): a single magnitude always wins
+    (historical behaviour); with several, each is scored by the keyword its
+    clause carries — strong (arr, incl. "ARR20M"; burn) outranks weak
+    (revenue/turnover; costs/spend/expenses) — and only a unique top scorer
+    is taken. Ties or all-unbound candidates leave the field UNSET rather
+    than grabbing another field's figure ("costs $5M, ARR 20M" → 20M;
+    "revenue 50k monthly, burn 30k monthly" → 30k; "20M, 30M" → unset).
+    Decimals are part of the amount (20.5M → 20_500_000, 0.5M → 500_000).
+    CURRENCY (_amount_currency) then binds to the selected match's own
+    expression only — marker inside the match ($20M), chained immediately
+    before (USD 20M), or right after (20M USD, 20M in USD, 20M, in RON). A
+    currency stated for a DIFFERENT sum in the same answer ("ARR 20M,
+    costs in USD") does NOT attach (RA16-BO01-MONEY-01), and conflicting
+    markers on one expression also yield None. Bare numbers stay
+    currency-unknown: no assumed USD, no backfill. The LLM paths (interview
+    emit schema, fixture generator) carry the same rule in the property
+    description — the currency must be stated for the revenue amount
+    itself.
   people_and_contacts: |
     Exactly one person is is_principal (the user) and gets AuthorityScope.WILDCARD;
     nobody else gets a scope. PersonDraft uses extra="ignore" so an email or

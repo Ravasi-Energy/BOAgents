@@ -37,6 +37,62 @@ _CCY_SUFFIX = re.compile(
 )
 
 
+# Clause separators for field binding: a keyword binds an amount only when
+# both sit in the same clause. The amount's own commas ("1,500M") are inside
+# the match span, so they never split its clause.
+_CLAUSE_SEPS = re.compile(r"[,.;:\n!?]")
+
+# Field keywords, ranked: the field's own name outranks loose synonyms, so
+# "burn 50k monthly, costs 30k monthly" picks the burn figure (as before),
+# while "revenue 50k monthly, burn 30k monthly" no longer picks revenue's.
+_ARR_STRONG = re.compile(r"\barr\b|\barr(?=\d)", re.IGNORECASE)
+_ARR_WEAK = re.compile(r"\brevenues?\b|\bturnover\b", re.IGNORECASE)
+_BURN_STRONG = re.compile(r"\bburn\w*", re.IGNORECASE)
+_BURN_WEAK = re.compile(r"\bcosts?\b|\bspends?\b|\bexpenses?\b", re.IGNORECASE)
+
+
+def _clause_bounds(text: str, match: re.Match[str]) -> tuple[int, int]:
+    left = 0
+    for m in _CLAUSE_SEPS.finditer(text[: match.start()]):
+        left = m.end()
+    after = _CLAUSE_SEPS.search(text, match.end())
+    right = after.start() if after else len(text)
+    return left, right
+
+
+def _select_amount(
+    text: str,
+    pattern: re.Pattern[str],
+    strong: re.Pattern[str],
+    weak: re.Pattern[str],
+) -> re.Match[str] | None:
+    """Pick the magnitude bound to the target field, not another field's.
+
+    A single magnitude keeps historical behaviour (the only candidate
+    wins regardless of keywords). With several magnitudes, each is scored
+    by the keyword its clause carries (strong=2, weak=1, none=0); the
+    unique top scorer wins. A tie or no bound candidate at all is
+    ambiguous — the field stays unset rather than grabbing another
+    field's number ("costs $5M, ARR 20M" must yield 20M, not 5M).
+    """
+    matches = list(pattern.finditer(text))
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return matches[0]
+    best_score = 0
+    best: list[re.Match[str]] = []
+    for m in matches:
+        left, right = _clause_bounds(text, m)
+        clause = text[left:right]
+        score = 2 if strong.search(clause) else 1 if weak.search(clause) else 0
+        if score > best_score:
+            best_score, best = score, [m]
+        elif score == best_score:
+            best.append(m)
+    return best[0] if best_score > 0 and len(best) == 1 else None
+
+
 def _amount_currency(text: str, match: re.Match[str]) -> str | None:
     """Currency bound to the matched amount's own expression — never a
     currency mentioned elsewhere in the answer.
@@ -267,8 +323,15 @@ def build_profile_from_answers(answers: dict[str, Any]) -> dict[str, Any]:
         # "roughly 50 million" and "$50MM". The lookbehind keeps the scan
         # linear: without it every digit inside a long "1,1,1,…" run is a
         # candidate start and the search goes quadratic on hostile input.
-        arr_match = re.search(
-            r"\$?(?<![\d,])(\d[\d,]*)\s*(?:[Mm]{1,2}|[Mm]illion)\b", text
+        # Decimals are part of the amount ("20.5M"); several magnitudes in
+        # one answer go through field binding instead of first-match-wins.
+        arr_match = _select_amount(
+            text,
+            re.compile(
+                r"\$?(?<![\d,])(\d[\d,]*(?:\.\d+)?)\s*(?:[Mm]{1,2}|[Mm]illion)\b"
+            ),
+            _ARR_STRONG,
+            _ARR_WEAK,
         )
         if arr_match:
             val = arr_match.group(1).replace(",", "")
@@ -343,10 +406,15 @@ def build_profile_from_answers(answers: dict[str, Any]) -> dict[str, Any]:
         # An explicit currency may sit between the amount and the keyword
         # ("50k EUR monthly"); it becomes part of the matched expression,
         # so _amount_currency sees it inside the match body.
-        burn_match = re.search(
-            r"\$?(?<![\d,])(\d[\d,]*)\s*(?:[Kk]\s*)?"
-            r"(?:(?:" + _CCY_ATOM + r")[ \t]*)?"
-            r"(?:monthly|/month|per month|burn)", text
+        burn_match = _select_amount(
+            text,
+            re.compile(
+                r"\$?(?<![\d,])(\d[\d,]*(?:\.\d+)?)\s*(?:[Kk]\s*)?"
+                r"(?:(?:" + _CCY_ATOM + r")[ \t]*)?"
+                r"(?:monthly|/month|per month|burn)"
+            ),
+            _BURN_STRONG,
+            _BURN_WEAK,
         )
         # Same lookbehind as the other two: without it every digit of a
         # long run is a candidate start and the search is quadratic.

@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import shutil
 import sqlite3
 from datetime import UTC, datetime
@@ -74,6 +75,9 @@ ENGAGEMENT_META_FIELDS: frozenset[str] = frozenset(
         "engagement_start",  # ISO date
         "renewal_date",      # ISO date — next renewal/review checkpoint
         "retainer",          # free text, display only (billing stays external)
+        "retainer_amount",   # optional structured amount — decimal string,
+        # paired with retainer_currency; the free text above is never parsed
+        "retainer_currency",  # ISO-4217 code for retainer_amount
         "hours_per_week",    # number, display only
         "primary_contact",   # name of the client-side contact
         "notes",             # free-form engagement notes
@@ -460,6 +464,31 @@ def _write_meta(slot: Path, **updates: Any) -> None:
     (slot / "meta.json").write_text(json.dumps(meta, indent=2, default=str), encoding="utf-8")
 
 
+_RETAINER_AMOUNT_RE = re.compile(r"^\d+(\.\d{1,6})?$")
+_RETAINER_CCY_RE = re.compile(r"^[A-Z]{3}$")
+
+
+def _validate_retainer_pair(merged: dict[str, Any]) -> None:
+    """Structured retainer stays a pair — an amount without a currency (or a
+    currency without an amount) would re-create exactly the ambiguity this
+    field exists to remove. Validated on the merged meta so updating one
+    side of an already-complete pair is allowed."""
+    amount = merged.get("retainer_amount")
+    currency = merged.get("retainer_currency")
+    if (amount is None) != (currency is None):
+        raise ClientSlotError(
+            "retainer_amount and retainer_currency must be set together"
+        )
+    if amount is not None and not _RETAINER_AMOUNT_RE.match(str(amount)):
+        raise ClientSlotError(
+            'retainer_amount must be a decimal string (e.g. "15000" or "2500.50")'
+        )
+    if currency is not None and not _RETAINER_CCY_RE.match(str(currency)):
+        raise ClientSlotError(
+            "retainer_currency must be an ISO-4217 code (e.g. USD, EUR, RON)"
+        )
+
+
 async def update_client_meta(
     settings: Any, slug: str, patch: dict[str, Any]
 ) -> dict[str, Any]:
@@ -486,6 +515,10 @@ async def update_client_meta(
 
     async with _FIXTURE_OP_LOCK:
         slot = _require_slot(settings, slug)
+        # Only patches touching the pair must leave it consistent — a
+        # malformed hand-edited meta must not wedge unrelated updates.
+        if "retainer_amount" in patch or "retainer_currency" in patch:
+            _validate_retainer_pair(_read_meta(slot) | patch)
         _write_meta(slot, **patch)
         meta = _read_meta(slot)
         return {

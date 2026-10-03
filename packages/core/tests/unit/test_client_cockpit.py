@@ -229,3 +229,63 @@ async def test_patch_and_cockpit_routes(env: SimpleNamespace, client: TestClient
     assert acme["role"] == "Fractional COO"
     assert acme["overdue_actions"] == 1
     assert board["generated_at"]
+
+
+async def test_retainer_structured_pair(env: SimpleNamespace) -> None:
+    """Structured retainer: amount+currency must arrive as a pair, ISO-valid;
+    the free-text retainer field is untouched and never parsed."""
+    await create_client_slot(env.settings, display_name="Acme", source="current")
+
+    out = await update_client_meta(
+        env.settings,
+        "acme",
+        {
+            "retainer": "15000 EUR/luna, negotiable",
+            "retainer_amount": "15000.00",
+            "retainer_currency": "EUR",
+        },
+    )
+    assert out["retainer"] == "15000 EUR/luna, negotiable"
+    assert out["retainer_amount"] == "15000.00"
+    assert out["retainer_currency"] == "EUR"
+
+    # Free text alone is still legal (old contract).
+    out = await update_client_meta(env.settings, "acme", {"retainer": "monthly"})
+    assert out["retainer"] == "monthly"
+    assert out["retainer_amount"] == "15000.00"  # pair preserved untouched
+
+
+async def test_retainer_pair_rejects_half_pairs(env: SimpleNamespace) -> None:
+    await create_client_slot(env.settings, display_name="Acme", source="current")
+
+    for patch in (
+        {"retainer_amount": "100"},
+        {"retainer_currency": "USD"},
+        {"retainer_amount": "abc", "retainer_currency": "USD"},
+        {"retainer_amount": "100", "retainer_currency": "usd"},
+        {"retainer_amount": "100", "retainer_currency": "USDD"},
+    ):
+        with pytest.raises(ClientSlotError):
+            await update_client_meta(env.settings, "acme", patch)
+    # Nothing was persisted by the rejected patches.
+    meta = (env.company / "_client_slots" / "acme" / "meta.json").read_text(
+        encoding="utf-8"
+    )
+    assert "retainer_amount" not in meta
+    assert "retainer_currency" not in meta
+
+
+async def test_retainer_pair_merged_state_allows_one_sided_update(
+    env: SimpleNamespace,
+) -> None:
+    """Once the pair exists, updating only one side is legal — the merged
+    meta still holds the pair."""
+    await create_client_slot(env.settings, display_name="Acme", source="current")
+    await update_client_meta(
+        env.settings,
+        "acme",
+        {"retainer_amount": "6000", "retainer_currency": "RON"},
+    )
+    out = await update_client_meta(env.settings, "acme", {"retainer_amount": "7500"})
+    assert out["retainer_amount"] == "7500"
+    assert out["retainer_currency"] == "RON"

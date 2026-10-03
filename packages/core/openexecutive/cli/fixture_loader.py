@@ -152,6 +152,7 @@ def list_fixtures() -> list[dict[str, Any]]:
                 "industry": profile.industry,
                 "stage": profile.stage,
                 "arr": profile.annual_revenue_arr,
+                "arr_currency": profile.annual_revenue_arr_currency,
                 "headcount": profile.headcount,
                 "founding_year": profile.founding_year,
                 "mission": profile.mission,

@@ -51,3 +51,13 @@ def test_burn_rate_still_parses(text: str, expected: float) -> None:
     profile = build_profile_from_answers({"financials": text})
 
     assert profile["financials"]["burn_rate_monthly"] == expected
+
+
+def test_burn_rate_currency_from_explicit_markers() -> None:
+    usd = build_profile_from_answers({"financials": "burning $40k monthly"})
+    ron = build_profile_from_answers({"financials": "burn is 90k monthly, in RON"})
+    bare = build_profile_from_answers({"financials": "about 50k monthly burn"})
+
+    assert usd["financials"]["burn_rate_currency"] == "USD"
+    assert ron["financials"]["burn_rate_currency"] == "RON"
+    assert bare["financials"]["burn_rate_currency"] is None

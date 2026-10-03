@@ -6,6 +6,28 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+
+def _stated_currency(text: str) -> str | None:
+    """Currency the answer explicitly stated — never an inferred one.
+
+    Returns the single ISO-4217 code the text unambiguously mentions, or
+    None when the amount is currency-less (or ambiguously tagged). Bare
+    numbers stay unknown: we do not assume USD for old or vague data.
+    """
+    import re
+
+    found: set[str] = set()
+    if "$" in text or re.search(r"\bUSD\b|\bUS\s+dollars?\b|\bdollars?\b", text, re.IGNORECASE):
+        found.add("USD")
+    if "€" in text or re.search(r"\bEUR\b|\beuros?\b", text, re.IGNORECASE):
+        found.add("EUR")
+    if re.search(r"\bRON\b|\blei\b|\bleu\b", text, re.IGNORECASE):
+        found.add("RON")
+    if "£" in text or re.search(r"\bGBP\b|\bpounds?\b", text, re.IGNORECASE):
+        found.add("GBP")
+    return next(iter(found)) if len(found) == 1 else None
+
+
 WIZARD_STEPS = [
     {
         "step": 0,
@@ -220,6 +242,10 @@ def build_profile_from_answers(answers: dict[str, Any]) -> dict[str, Any]:
             # The answer text itself stays out of the log line.
             try:
                 profile["annual_revenue_arr"] = float(val) * 1_000_000
+                # Currency only when the answer itself states one — a bare
+                # "$20M" keeps USD (the regex required the $); "20 million"
+                # stays unknown rather than being assumed USD.
+                profile["annual_revenue_arr_currency"] = _stated_currency(text)
             except ValueError:
                 logger.warning("onboarding: could not parse ARR from the business-model answer")
 
@@ -289,6 +315,7 @@ def build_profile_from_answers(answers: dict[str, Any]) -> dict[str, Any]:
             multiplier = 1000 if "k" in text[burn_match.start():burn_match.end()].lower() else 1
             try:
                 fin["burn_rate_monthly"] = float(val) * multiplier
+                fin["burn_rate_currency"] = _stated_currency(text)
             except ValueError:
                 # Financials are promised "stored locally only" — keep the
                 # answer text out of the log stream.

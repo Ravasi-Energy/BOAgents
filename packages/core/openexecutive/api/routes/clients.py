@@ -63,6 +63,8 @@ class ClientMetaPatch(BaseModel):
     engagement_start: str | None = Field(default=None, max_length=32)
     renewal_date: str | None = Field(default=None, max_length=32)
     retainer: str | None = Field(default=None, max_length=200)
+    retainer_amount: str | None = Field(default=None, max_length=32)
+    retainer_currency: str | None = Field(default=None, max_length=8)
     hours_per_week: float | None = None
     primary_contact: str | None = Field(default=None, max_length=200)
     notes: str | None = Field(default=None, max_length=5000)

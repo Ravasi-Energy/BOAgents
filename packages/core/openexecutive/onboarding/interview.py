@@ -223,7 +223,11 @@ _EMIT_TOOL: dict[str, Any] = {
                     "headcount": {"type": "integer"},
                     "annual_revenue_arr": {
                         "type": "number",
-                        "description": "Annual revenue / ARR in USD (a number, not a string). Omit if not stated.",
+                        "description": "Annual revenue / ARR as a number, in the currency the user stated. Omit if not stated.",
+                    },
+                    "annual_revenue_arr_currency": {
+                        "type": "string",
+                        "description": "ISO-4217 code (USD, EUR, RON…) only when the user explicitly named a currency. Omit when unstated — never guess.",
                     },
                     "mission": {"type": "string"},
                     "vision": {"type": "string"},

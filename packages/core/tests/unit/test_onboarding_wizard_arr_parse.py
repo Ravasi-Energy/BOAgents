@@ -136,3 +136,26 @@ def test_long_digit_run_without_commas_is_linear_time() -> None:
     assert "annual_revenue_arr" not in profile
     assert profile["financials"] == {}
     assert profile["headcount"] == 999_999_999
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_ccy"),
+    [
+        ("We do $2M in ARR", "USD"),
+        ("about 20 million EUR", "EUR"),
+        ("revenue of 5M euro this year", "EUR"),
+        ("around 3M RON annually", "RON"),
+        ("roughly 8M lei", "RON"),
+        ("near 10M pounds", "GBP"),
+        # No currency marker at all → unknown, never an assumed USD.
+        ("Roughly 12M annually", None),
+        ("About 3 Million ARR", None),
+        # Conflicting markers → ambiguous, stays unknown.
+        ("$5M but also 4M EUR", None),
+    ],
+)
+def test_arr_currency_from_explicit_markers(text: str, expected_ccy) -> None:
+    profile = build_profile_from_answers({"business_model": text})
+
+    assert "annual_revenue_arr" in profile
+    assert profile["annual_revenue_arr_currency"] == expected_ccy

@@ -3797,7 +3797,8 @@ fixtures:
     fixtures/companies/<name>/. User-generated fixtures live in the
     generated_fixtures SQLite table (module openexecutive.fixtures.store) in the
     same episodic_memory.db on the persistent data volume, so they survive
-    redeploys (container disk is ephemeral). GET /fixtures merges both sources; every list
+    redeploys (container disk is ephemeral). Money: arr + arr_currency
+    (additive TEXT column, idempotent PRAGMA-driven ALTER; NULL = unknown). GET /fixtures merges both sources; every list
     item carries source: "curated" | "generated".
   generation: |
     POST /fixtures/generate {description} runs the Council-configurable
@@ -3901,7 +3902,8 @@ clients:
     — chat history, scheduled actions, departments, people, watchlist,
     audit/runs), profile.yaml, docs/ (all file
     types), skills/, mcp_servers.json (per-client external MCP tools, e.g.
-    one client's Crayon credentials), meta.json (display name + timestamps).
+    one client's Crayon credentials), meta.json (display name + timestamps +
+    engagement metadata).
   restore_mechanics: |
     DB restore goes through sqlite3's online backup API into the live
     connection's file (inode never changes, so handles held elsewhere stay
@@ -4060,8 +4062,10 @@ clients:
     Practice-level fields on meta.json (PATCH /clients/{slug}, allowlist
     ENGAGEMENT_META_FIELDS in clients/slots.py): role, status
     (active|paused|winding_down|completed), engagement_start, renewal_date,
-    retainer (display only — billing stays external), hours_per_week,
-    primary_contact, notes. Editable for active AND parked slots because
+    retainer (free text, display only — billing stays external; never
+    auto-parsed), retainer_amount + retainer_currency (optional structured
+    pair: decimal string + ISO-4217, both-or-neither on the merged meta),
+    hours_per_week, primary_contact, notes. Editable for active AND parked slots because
     meta.json is deliberately OUTSIDE the swapped client state. Invariant:
     renewal awareness lives here, never as scheduled_actions — those swap
     with the client and would vanish when parked.
@@ -4408,7 +4412,11 @@ bo:
     deterministic engine (eligibility filters in fixed order provider →
     region → capabilities → budget → availability → eval freshness, then
     score desc → cost asc → identity asc tie-break), and durable
-    observations. observe.py hooks audit.usage.log_model_usage post-call:
+    observations. Candidates serialize estimated_cost plus
+    estimated_cost_currency (source Cost.currency; NULL stays unknown) and
+    estimated_cost_unit=per_call (per-1M-token prices scaled by measured
+    usage — estimate, not billed amount). observe.py hooks
+    audit.usage.log_model_usage post-call:
     computes the recommendation vs the model actually used, persists both
     separately, then hands off — the hook performs ZERO network I/O
     (REM-01). The complete bo.model-observation.v1 envelope (stable eventId

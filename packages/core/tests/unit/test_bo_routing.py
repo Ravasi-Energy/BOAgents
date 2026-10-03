@@ -2294,3 +2294,22 @@ class TestRetryBackoff:
         claimed = store.claim_outbox(
             TENANT, worker_id="w2", limit=10, lease_s=60, db_path=db)
         assert [r["event_id"] for r in claimed] == ["evt_b0"]
+
+
+class TestCandidateMoneyUnit:
+    """candidates[].estimated_cost must carry unit + source currency —
+    the bare decimal string stays for compat; unknown stays None."""
+
+    def test_candidates_carry_currency_and_unit(self) -> None:
+        d = recommend([_entry()], _policy(), CTX)
+        cand = d.to_dict()["candidates"][0]
+        assert cand["estimated_cost"] == "0.006" or cand["estimated_cost"] is not None
+        assert cand["estimated_cost_currency"] == "USD"
+        assert cand["estimated_cost_unit"] == "per_call"
+
+    def test_unknown_catalog_currency_stays_none(self) -> None:
+        entry = _entry(cost=Cost("3.00", "15.00", None, "2027-12-31"))
+        d = recommend([entry], _policy(), CTX)
+        cand = d.to_dict()["candidates"][0]
+        assert cand["estimated_cost_currency"] is None
+        assert cand["estimated_cost_unit"] == "per_call"

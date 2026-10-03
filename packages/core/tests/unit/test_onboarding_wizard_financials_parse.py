@@ -61,3 +61,28 @@ def test_burn_rate_currency_from_explicit_markers() -> None:
     assert usd["financials"]["burn_rate_currency"] == "USD"
     assert ron["financials"]["burn_rate_currency"] == "RON"
     assert bare["financials"]["burn_rate_currency"] is None
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_burn", "expected_ccy"),
+    [
+        # Currency belonging to another figure must not attach to burn.
+        ("burn 50k monthly, revenue in USD", 50_000.0, None),
+        ("burn 50k monthly. ARR is EUR 20M.", 50_000.0, None),
+        # Code or symbol adjacent to the burn amount, either side.
+        ("burn EUR 50k monthly", 50_000.0, "EUR"),
+        ("burn 50k EUR monthly", 50_000.0, "EUR"),
+        ("burn 50k USD monthly", 50_000.0, "USD"),
+        ("50k RON per month", 50_000.0, "RON"),
+        # Same-expression conflict stays unknown.
+        ("burn $50k EUR monthly", 50_000.0, None),
+    ],
+)
+def test_burn_currency_binds_to_the_amount_expression(
+    text: str, expected_burn, expected_ccy
+) -> None:
+    profile = build_profile_from_answers({"financials": text})
+    fin = profile["financials"]
+
+    assert fin["burn_rate_monthly"] == expected_burn
+    assert fin["burn_rate_currency"] == expected_ccy

@@ -1,30 +1,66 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
+_CCY_FORMS = {
+    "$": "USD", "usd": "USD", "us dollar": "USD", "us dollars": "USD",
+    "dollar": "USD", "dollars": "USD",
+    "€": "EUR", "eur": "EUR", "euro": "EUR", "euros": "EUR",
+    "ron": "RON", "lei": "RON", "leu": "RON",
+    "£": "GBP", "gbp": "GBP", "pound": "GBP", "pounds": "GBP",
+}
+_CCY_ATOM = (
+    r"[$€£]"
+    r"|\bUSD\b|\bUS[ \t]+dollars?\b|\bdollars?\b"
+    r"|\bEUR\b|\beuros?\b"
+    r"|\bRON\b|\blei\b|\bleu\b"
+    r"|\bGBP\b|\bpounds?\b"
+)
+# A "chain" is currency markers joined only by separators — "USD or EUR"
+# reads as a conflict on the same amount, while ", costs in EUR" does not
+# extend the chain because "costs" is not a currency form.
+_CCY_CHAIN = rf"(?:{_CCY_ATOM})(?:[ \t]*(?:in|or|and|/|,)[ \t]*(?:{_CCY_ATOM}))*"
+_CCY_RE = re.compile(_CCY_ATOM, re.IGNORECASE)
+_CCY_PREFIX = re.compile(rf"({_CCY_CHAIN})[ \t]*$", re.IGNORECASE)
+# After the amount the marker may sit directly ("20M USD"), after "in"
+# ("20M in USD"), or after a comma leading "in" ("20M, in RON" — the comma
+# sub-clause still refers to the amount it follows). A comma followed by
+# anything else ("20M, costs in USD") starts a new clause for a different
+# sum and must not attach.
+_CCY_SUFFIX = re.compile(
+    rf"^[ \t]*(?:,[ \t]*)?(?:in[ \t]+)?({_CCY_CHAIN})", re.IGNORECASE
+)
 
-def _stated_currency(text: str) -> str | None:
-    """Currency the answer explicitly stated — never an inferred one.
 
-    Returns the single ISO-4217 code the text unambiguously mentions, or
-    None when the amount is currency-less (or ambiguously tagged). Bare
-    numbers stay unknown: we do not assume USD for old or vague data.
+def _amount_currency(text: str, match: re.Match[str]) -> str | None:
+    """Currency bound to the matched amount's own expression — never a
+    currency mentioned elsewhere in the answer.
+
+    Only markers adjacent to the amount count: inside the match ("$20M"),
+    chained immediately before it ("USD 20M"), or right after it
+    ("20M USD", "20M in USD", "90k monthly, in RON"). A currency attached
+    to a different sum ("ARR 20M, costs in USD") is not evidence for this
+    amount, so the amount stays unknown. Two markers on the same
+    expression conflict and also stay unknown — we do not guess.
     """
-    import re
-
     found: set[str] = set()
-    if "$" in text or re.search(r"\bUSD\b|\bUS\s+dollars?\b|\bdollars?\b", text, re.IGNORECASE):
-        found.add("USD")
-    if "€" in text or re.search(r"\bEUR\b|\beuros?\b", text, re.IGNORECASE):
-        found.add("EUR")
-    if re.search(r"\bRON\b|\blei\b|\bleu\b", text, re.IGNORECASE):
-        found.add("RON")
-    if "£" in text or re.search(r"\bGBP\b|\bpounds?\b", text, re.IGNORECASE):
-        found.add("GBP")
+    spans = [match.group(0)]
+    pre = _CCY_PREFIX.search(text[: match.start()])
+    if pre:
+        spans.append(pre.group(1))
+    post = _CCY_SUFFIX.match(text[match.end() :])
+    if post:
+        spans.append(post.group(1))
+    for span in spans:
+        for tok in _CCY_RE.finditer(span):
+            code = _CCY_FORMS.get(" ".join(tok.group(0).lower().split()))
+            if code:
+                found.add(code)
     return next(iter(found)) if len(found) == 1 else None
 
 
@@ -245,7 +281,9 @@ def build_profile_from_answers(answers: dict[str, Any]) -> dict[str, Any]:
                 # Currency only when the answer itself states one — a bare
                 # "$20M" keeps USD (the regex required the $); "20 million"
                 # stays unknown rather than being assumed USD.
-                profile["annual_revenue_arr_currency"] = _stated_currency(text)
+                profile["annual_revenue_arr_currency"] = _amount_currency(
+                    text, arr_match
+                )
             except ValueError:
                 logger.warning("onboarding: could not parse ARR from the business-model answer")
 
@@ -302,8 +340,13 @@ def build_profile_from_answers(answers: dict[str, Any]) -> dict[str, Any]:
         # `(?:[Kk]\s*)?` rather than `[Kk]?\s*` after the first `\s*`: two
         # adjacent `\s*` with an optional token between them let a long
         # whitespace run be split quadratically many ways.
+        # An explicit currency may sit between the amount and the keyword
+        # ("50k EUR monthly"); it becomes part of the matched expression,
+        # so _amount_currency sees it inside the match body.
         burn_match = re.search(
-            r"\$?(?<![\d,])(\d[\d,]*)\s*(?:[Kk]\s*)?(?:monthly|/month|per month|burn)", text
+            r"\$?(?<![\d,])(\d[\d,]*)\s*(?:[Kk]\s*)?"
+            r"(?:(?:" + _CCY_ATOM + r")[ \t]*)?"
+            r"(?:monthly|/month|per month|burn)", text
         )
         # Same lookbehind as the other two: without it every digit of a
         # long run is a candidate start and the search is quadratic.
@@ -315,7 +358,9 @@ def build_profile_from_answers(answers: dict[str, Any]) -> dict[str, Any]:
             multiplier = 1000 if "k" in text[burn_match.start():burn_match.end()].lower() else 1
             try:
                 fin["burn_rate_monthly"] = float(val) * multiplier
-                fin["burn_rate_currency"] = _stated_currency(text)
+                fin["burn_rate_currency"] = _amount_currency(
+                    text, burn_match
+                )
             except ValueError:
                 # Financials are promised "stored locally only" — keep the
                 # answer text out of the log stream.

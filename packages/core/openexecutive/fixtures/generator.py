@@ -194,7 +194,7 @@ _EMIT_TOOL: dict[str, Any] = {
                     },
                     "annual_revenue_arr_currency": {
                         "type": "string",
-                        "description": "ISO-4217 code (USD, EUR, RON…) only when a currency was explicitly stated. Omit when unstated.",
+                        "description": "ISO-4217 code (USD, EUR, RON…) only when a currency was explicitly stated for the revenue amount itself — a currency named for another figure (costs, burn, deals) does not apply. Omit when unstated.",
                     },
                     "mission": {"type": "string"},
                     "vision": {"type": "string"},

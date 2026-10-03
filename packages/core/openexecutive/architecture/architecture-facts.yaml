@@ -3740,6 +3740,19 @@ company_onboarding:
     and specialist_key), CREATEs only what is unmatched, and never deletes. An
     empty drafted mission or head leaves the existing value alone rather than
     clearing it.
+  wizard_money: |
+    The form fallback (build_profile_from_answers in onboarding/wizard.py)
+    parses ARR and monthly burn from free text with bounded regexes; each
+    captured amount then gets a currency ONLY from markers bound to its own
+    expression — _amount_currency(text, match) accepts a symbol/code inside
+    the match ($20M), chained immediately before (USD 20M), or right after
+    (20M USD, 20M in USD, 20M, in RON). A currency stated for a DIFFERENT
+    sum in the same answer ("ARR 20M, costs in USD") does NOT attach
+    (RA16-BO01-MONEY-01), and conflicting markers on one expression also
+    yield None. Bare numbers stay currency-unknown: no assumed USD, no
+    backfill. The LLM paths (interview emit schema, fixture generator)
+    carry the same rule in the property description — the currency must be
+    stated for the revenue amount itself.
   people_and_contacts: |
     Exactly one person is is_principal (the user) and gets AuthorityScope.WILDCARD;
     nobody else gets a scope. PersonDraft uses extra="ignore" so an email or

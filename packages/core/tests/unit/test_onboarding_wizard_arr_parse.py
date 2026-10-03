@@ -150,11 +150,44 @@ def test_long_digit_run_without_commas_is_linear_time() -> None:
         # No currency marker at all → unknown, never an assumed USD.
         ("Roughly 12M annually", None),
         ("About 3 Million ARR", None),
-        # Conflicting markers → ambiguous, stays unknown.
-        ("$5M but also 4M EUR", None),
     ],
 )
 def test_arr_currency_from_explicit_markers(text: str, expected_ccy) -> None:
+    profile = build_profile_from_answers({"business_model": text})
+
+    assert "annual_revenue_arr" in profile
+    assert profile["annual_revenue_arr_currency"] == expected_ccy
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_ccy"),
+    [
+        # The defect from RA16-BO01-MONEY-01: a currency stated for a
+        # *different* amount must not bleed into the ARR attribution.
+        ("ARR 20M, costs in USD", None),
+        ("ARR 20M, costs in EUR", None),
+        ("ARR 20M. Our costs are in USD.", None),
+        ("ARR 20M, monthly burn $80k", None),
+        # Currency adjacent to the ARR amount still attaches, on either side.
+        ("ARR $20M, costs in EUR", "USD"),
+        ("ARR 20M USD, costs in EUR", "USD"),
+        ("ARR EUR 20M", "EUR"),
+        ("ARR in USD 20M", "USD"),
+        ("ARR 20M in RON", "RON"),
+        ("ARR 20M, in USD", "USD"),
+        # Two amounts with their own markers — each keeps its own.
+        ("ARR 20M RON, costs $5M", "RON"),
+        # Markers on the same expression that disagree → conflict, unknown.
+        ("ARR $20M EUR", None),
+        ("ARR 20M USD or EUR", None),
+        # The old whole-answer scan treated a second amount's currency as a
+        # conflict; per-expression attribution binds $ to the captured sum.
+        ("$5M but also 4M EUR", "USD"),
+    ],
+)
+def test_arr_currency_binds_to_the_amount_expression(
+    text: str, expected_ccy
+) -> None:
     profile = build_profile_from_answers({"business_model": text})
 
     assert "annual_revenue_arr" in profile

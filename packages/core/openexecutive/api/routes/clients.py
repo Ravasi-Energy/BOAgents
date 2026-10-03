@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 from openexecutive.api.intake_uploads import (
     _INTAKE_GEN_CHARS_PER_FILE,
@@ -65,6 +65,10 @@ class ClientMetaPatch(BaseModel):
     retainer: str | None = Field(default=None, max_length=200)
     retainer_amount: str | None = Field(default=None, max_length=32)
     retainer_currency: str | None = Field(default=None, max_length=8)
+    # Action flag, not a stored field: null is dropped from a patch, so a
+    # set retainer pair could never be cleared via API (F19-4). Strict
+    # bool — "true"/1 are refused with 422, not coerced.
+    clear_retainer_money: StrictBool | None = None
     hours_per_week: float | None = None
     primary_contact: str | None = Field(default=None, max_length=200)
     notes: str | None = Field(default=None, max_length=5000)

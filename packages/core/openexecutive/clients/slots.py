@@ -499,6 +499,19 @@ async def update_client_meta(
     the shared lock only to serialize the read-modify-write against a
     concurrent save-back touching the same meta.json.
     """
+    patch = dict(patch)  # the flag pop below must not mutate the caller's dict
+    # Action flag, not an engagement field — popped before the allowlist
+    # check so it is never persisted into meta.json. Strict bool at the
+    # API boundary (StrictBool → 422 on "true"/1); the isinstance gate
+    # here keeps direct callers honest too.
+    clear_retainer = patch.pop("clear_retainer_money", None)
+    if clear_retainer is not None and not isinstance(clear_retainer, bool):
+        raise ClientSlotError("clear_retainer_money must be a boolean")
+    if clear_retainer and ("retainer_amount" in patch or "retainer_currency" in patch):
+        raise ClientSlotError(
+            "clear_retainer_money cannot be combined with "
+            "retainer_amount/retainer_currency values"
+        )
     unknown = set(patch) - ENGAGEMENT_META_FIELDS
     if unknown:
         raise ClientSlotError(
@@ -515,15 +528,21 @@ async def update_client_meta(
 
     async with _FIXTURE_OP_LOCK:
         slot = _require_slot(settings, slug)
+        merged = _read_meta(slot) | patch
+        if clear_retainer:
+            # Both keys or none — the pair cannot be left half-cleared.
+            merged.pop("retainer_amount", None)
+            merged.pop("retainer_currency", None)
         # Only patches touching the pair must leave it consistent — a
         # malformed hand-edited meta must not wedge unrelated updates.
-        if "retainer_amount" in patch or "retainer_currency" in patch:
-            _validate_retainer_pair(_read_meta(slot) | patch)
-        _write_meta(slot, **patch)
-        meta = _read_meta(slot)
+        if clear_retainer or "retainer_amount" in patch or "retainer_currency" in patch:
+            _validate_retainer_pair(merged)
+        (slot / "meta.json").write_text(
+            json.dumps(merged, indent=2, default=str), encoding="utf-8"
+        )
         return {
             "slug": slug,
-            **{field: meta.get(field) for field in ENGAGEMENT_META_FIELDS},
+            **{field: merged.get(field) for field in ENGAGEMENT_META_FIELDS},
         }
 
 

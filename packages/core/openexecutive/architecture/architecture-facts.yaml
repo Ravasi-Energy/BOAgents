@@ -4093,7 +4093,11 @@ clients:
     (active|paused|winding_down|completed), engagement_start, renewal_date,
     retainer (free text, display only — billing stays external; never
     auto-parsed), retainer_amount + retainer_currency (optional structured
-    pair: decimal string + ISO-4217, both-or-neither on the merged meta),
+    pair: decimal string + ISO-4217, both-or-neither on the merged meta;
+    because PATCH drops null, the pair is emptied only via the explicit
+    action flag clear_retainer_money — StrictBool, refused when combined
+    with new pair values, removes both keys atomically under the same
+    meta write; the free-text retainer is never touched by it),
     hours_per_week, primary_contact, notes. Editable for active AND parked slots because
     meta.json is deliberately OUTSIDE the swapped client state. Invariant:
     renewal awareness lives here, never as scheduled_actions — those swap

@@ -2998,6 +2998,92 @@ integrations:
     ``_mark_read`` leaves the mail unread and retriable, unlike the
     socket-mode adapters (whose resolver replies once and consumes) or
     the webhook channels (which get a 503 and rely on sender retry).
+    Pagination + outcome bookkeeping (REM-AUDIT-01 B1/B2, hardened by
+    REM-AUDIT-03): each cycle collects ALL unread refs before
+    processing, following the workspace-mcp ``page_token`` hint in the
+    ``📄 PAGINATION`` line — bounded by
+    ``bo.mail.poll.max_pages_per_cycle`` (registry, 1–50, default 10).
+    RA11-B01 processing scope (``integrations.mail_scope``): every
+    durable marker family is keyed ``<family>@{scope}:{mid}`` where
+    ``{scope}`` is a versioned hash of (tenant, client/slot or a
+    per-install generated identity when unslotted, declared mailbox),
+    bound into the journal itself via ``mail_scope_binding:v{n}``
+    rows — the journal declares which processing context its evidence
+    belongs to instead of trusting live configuration, so a second
+    mailbox sharing the journal or a client switch can never consume
+    another context's markers, cache entries, or OE-Terminal label id.
+    An unbound journal carrying ANY prior evidence — legacy
+    (unscoped, pre-scope) markers, scoped markers whose binding rows
+    were lost, or an orphaned ``mail_scope_binding:`` marker —
+    refuses until the operator attests the mailbox via the
+    ``bo.mail.scope.bound_mailbox`` setting; legacy rows are never
+    backfilled and keep their message unread for human
+    reconciliation. The attestation is single-shot: the poller clears
+    the setting (audited ``bo_setting_change``) before it may
+    authorize a bind, so a forgotten value cannot adopt a future
+    journal. The NEWEST well-formed binding row is authoritative and
+    must verify — marker back-reference, field types, re-derived
+    token — a forged or torn ``mail_scope_bound`` row refuses the
+    journal rather than falling back to an older verified binding
+    (``binding_malformed``). ``mail_scope_bound`` is absent from the
+    public audit ``EVENT_TYPES``, so ``POST /audit/log`` cannot mint
+    a binding. ``reset_all_state`` wipes ``audit_dedup`` together
+    with ``audit_log`` — orphan markers would otherwise wedge the
+    mail channel as a permanent legacy refusal. Every mutating step (claim, close, mark-read,
+    fence, skip evidence) re-validates the captured scope against the
+    live tenant/slot/mailbox — mid-operation drift refuses the effect
+    in the new context. An unresolvable scope refuses the whole cycle
+    before enumeration; per-message refusals report ``scope_blocked``
+    and stay unread.
+    Policy skips (self-sent, automated senders) are CONSUMED via
+    mark-read with an ``email_processed@{scope}:{id}`` dedup marker —
+    an unread
+    skip otherwise re-occupies every page of every cycle (the
+    starvation the single-page fetch had). ``_handle_email`` returns an
+    explicit outcome: ``processed`` / ``skipped`` /
+    ``mark_read_failed`` / ``failed`` / ``uncertain`` /
+    ``failed_final`` / ``claimed`` / ``scope_blocked``. Each attempt is a durable pair of
+    journal rows — an open ``email_process_attempt`` bracket written
+    AND verified before the Executive runs, then an
+    ``email_attempt_result`` close row (``executed`` /
+    ``executive_failed``, committed-verified). The attempt counter is
+    an exact COUNT over the dedup table (``count_dedup_prefix``), never
+    a truncated query page, so buried history can neither reset the
+    budget nor hide evidence. REM-AUDIT-07 removed the shared-session
+    window scan entirely: once any Executive attempt row exists the
+    message is ``uncertain`` — open-without-close (interrupted turn),
+    orphaned/malformed evidence, ``executive_failed`` (a missing
+    ``tool_invocation`` row can never prove zero effects; the write is
+    post-dispatch and best-effort), or ``executed`` without its
+    processed marker. Auto-retry after an Executive turn is gone by
+    design — fenced for a human, with a machine-readable ``reason`` in
+    the outcome row. Claim identity is message-scoped and purely
+    durable: ``email_attempt@{scope}:{mid}:{n}`` with ``n`` from the journal
+    count only (no volatile in-process counters), so two processes
+    with divergent histories cannot fork the key space — BEGIN
+    IMMEDIATE serializes them and the loser reports ``claimed``
+    without consuming an attempt. Failed content fetches are counted
+    durably in a separate dedup family (``email_fetch_fail@{scope}:{mid}:{n}``
+    → ``email_fetch_failed`` rows), bounded by
+    ``bo.mail.processing.max_attempts``. Inside the attempt,
+    ``audit.context.attempt_scope`` stamps every emitted row —
+    including ``session_id=NULL`` broadcast rows — with the explicit
+    ``attempt_ref`` (``{scope}:{mid}:{n}:{owner}``) for operator attribution.
+    An ``email_processed@{scope}:`` marker whose
+    journal row was lost is likewise uncertain, not success; a policy
+    skip whose marker cannot be proven committed defers instead of
+    marking read. The claim
+    itself is atomic: the bracket row carries a per-owner nonce so two
+    racing owners on one ``email_attempt@{scope}:{mid}:{n}`` dedup key cannot
+    both commit — the loser gets a fingerprint conflict and reports
+    ``claimed``. Terminal outcomes (``uncertain`` / ``failed_final``)
+    are fenced provider-side with the ``OE-Terminal`` Gmail label —
+    the message stays UNREAD (never a false success) but the unread
+    query excludes ``-label:OE-Terminal``, so terminally-blocked mail
+    cannot starve legitimate mail queued behind it; a human reconciles
+    by removing the label. The processed-row dedup marker lands BEFORE
+    mark_read, so a mark-read failure replays only the label change on
+    the next cycle — the Executive never runs twice for one message.
   slack: |
     openexecutive.integrations.slack_bot — async Bolt socket-mode
     adapter (``AsyncApp`` + ``AsyncSocketModeHandler``) embedded in the
@@ -3654,6 +3740,35 @@ company_onboarding:
     and specialist_key), CREATEs only what is unmatched, and never deletes. An
     empty drafted mission or head leaves the existing value alone rather than
     clearing it.
+  wizard_money: |
+    The form fallback (build_profile_from_answers in onboarding/wizard.py)
+    parses ARR and monthly burn from free text with bounded regexes.
+    AMOUNT SELECTION (_select_amount + _binding_score): every magnitude is
+    bound to the NEAREST field keyword — an immediate label prefix
+    ("ARR: 20M", "costs - $5M") wins outright, otherwise the closest
+    keyword in its clause, left-side preferred on ties. Scores: strong
+    (arr, incl. "ARR20M"; burn) = 2, weak (revenue/turnover;
+    costs/spend/expenses) = 1, the OTHER field's vocabulary = -1
+    (foreign), none = 0. Foreign-bound candidates are excluded entirely,
+    and an answer that declares the target missing ("ARR unavailable",
+    "no burn", "revenue: n/a") yields NO value even when magnitudes
+    remain (RA17-BO01-MONEY-02) — so a lone "costs $5M" never becomes
+    ARR. A single surviving candidate keeps the historical univocal
+    behaviour; with several, only a unique positive top scorer is taken.
+    Ties or all-unbound candidates leave the field UNSET rather
+    than grabbing another field's figure ("costs $5M, ARR 20M" → 20M;
+    "revenue 50k monthly, burn 30k monthly" → 30k; "20M, 30M" → unset).
+    Decimals are part of the amount (20.5M → 20_500_000, 0.5M → 500_000).
+    CURRENCY (_amount_currency) then binds to the selected match's own
+    expression only — marker inside the match ($20M), chained immediately
+    before (USD 20M), or right after (20M USD, 20M in USD, 20M, in RON). A
+    currency stated for a DIFFERENT sum in the same answer ("ARR 20M,
+    costs in USD") does NOT attach (RA16-BO01-MONEY-01), and conflicting
+    markers on one expression also yield None. Bare numbers stay
+    currency-unknown: no assumed USD, no backfill. The LLM paths (interview
+    emit schema, fixture generator) carry the same rule in the property
+    description — the currency must be stated for the revenue amount
+    itself.
   people_and_contacts: |
     Exactly one person is is_principal (the user) and gets AuthorityScope.WILDCARD;
     nobody else gets a scope. PersonDraft uses extra="ignore" so an email or
@@ -3699,12 +3814,20 @@ fixtures:
     back to the snapshot. Lets the system be demoed end-to-end without
     polluting any real installation.
   api: /fixtures — list, status, snapshot, reset, unload, load, generate, create, delete.
+  authorization: |
+    REM-AUDIT-18 (F-1): every mutating route requires the `fixtures:write`
+    capability (admin), checked first inside the handler — before any write,
+    generation or external call. `GET /fixtures` and `GET /fixtures/status`
+    require `fixtures:read` (viewer). Same contract as the /clients routes:
+    the shared-secret transport gate alone is not sufficient because these
+    routes swap or destroy the live company context.
   storage: |
     HYBRID. The four curated fixtures stay as git-tracked YAML under repo-root
     fixtures/companies/<name>/. User-generated fixtures live in the
     generated_fixtures SQLite table (module openexecutive.fixtures.store) in the
     same episodic_memory.db on the persistent data volume, so they survive
-    redeploys (container disk is ephemeral). GET /fixtures merges both sources; every list
+    redeploys (container disk is ephemeral). Money: arr + arr_currency
+    (additive TEXT column, idempotent PRAGMA-driven ALTER; NULL = unknown). GET /fixtures merges both sources; every list
     item carries source: "curated" | "generated".
   generation: |
     POST /fixtures/generate {description} runs the Council-configurable
@@ -3763,7 +3886,11 @@ clients:
     notes and/or files — returns a reviewable bundle + suggested slug,
     persists nothing), POST /clients/save (checkpoint active slot without
     switching), POST /clients/{slug}/activate, DELETE /clients/{slug}
-    (refuses the active slot).
+    (refuses the active slot). Every route resolves the BO identity
+    server-side before any slot effect: reads require ``clients:read``
+    (viewer+), every mutation requires ``clients:write`` (admin only) —
+    REM-AUDIT-01 B4 closed the gap where any authenticated caller could
+    swap or destroy the live company context.
   engagement_intake: |
     The engagement-setup path: POST /clients/generate runs the
     Council-configurable engagement_intake agent (module
@@ -3804,7 +3931,8 @@ clients:
     — chat history, scheduled actions, departments, people, watchlist,
     audit/runs), profile.yaml, docs/ (all file
     types), skills/, mcp_servers.json (per-client external MCP tools, e.g.
-    one client's Crayon credentials), meta.json (display name + timestamps).
+    one client's Crayon credentials), meta.json (display name + timestamps +
+    engagement metadata).
   restore_mechanics: |
     DB restore goes through sqlite3's online backup API into the live
     connection's file (inode never changes, so handles held elsewhere stay
@@ -3963,8 +4091,14 @@ clients:
     Practice-level fields on meta.json (PATCH /clients/{slug}, allowlist
     ENGAGEMENT_META_FIELDS in clients/slots.py): role, status
     (active|paused|winding_down|completed), engagement_start, renewal_date,
-    retainer (display only — billing stays external), hours_per_week,
-    primary_contact, notes. Editable for active AND parked slots because
+    retainer (free text, display only — billing stays external; never
+    auto-parsed), retainer_amount + retainer_currency (optional structured
+    pair: decimal string + ISO-4217, both-or-neither on the merged meta;
+    because PATCH drops null, the pair is emptied only via the explicit
+    action flag clear_retainer_money — StrictBool, refused when combined
+    with new pair values, removes both keys atomically under the same
+    meta write; the free-text retainer is never touched by it),
+    hours_per_week, primary_contact, notes. Editable for active AND parked slots because
     meta.json is deliberately OUTSIDE the swapped client state. Invariant:
     renewal awareness lives here, never as scheduled_actions — those swap
     with the client and would vanish when parked.
@@ -4220,6 +4354,90 @@ bo:
     execution:read (viewer), execution:write (admin), execution:operate
     (operator). retention.sweep removes only FINISHED runs past
     retention_days; the audit log is out of scope.
+  turn_barrier: |
+    bo/turn_barrier (REM-AUDIT-14, RA13-A02-01) is the durable turn/switch
+    barrier: ``bo_turn_leases`` (one row per admitted Executive turn:
+    turn_id, kind, ref, tenant, client_slug, scope_token, mailbox, owner,
+    epoch, status active|uncertain|closed, bounded lease) plus a singleton
+    ``bo_switch_state`` (epoch + in_progress + op), all in bo_agents.db —
+    deliberately the store that NEVER swaps with the per-client journal,
+    so coordination survives slot save/restore, factory reset and process
+    restart. admit_turn and begin_switch serialize on BEGIN IMMEDIATE: a
+    turn admitted first blocks the switch (bounded wait
+    ``bo.switch.max_wait_seconds`` then a 409 refusal naming the blocking
+    turn ids — the ``switch_in_progress`` flag symmetrically refuses new
+    admissions), and a lease expiring sweeps to ``uncertain`` — never
+    auto-cleared, operator reconciles via POST
+    /clients/turn-blockers/{id}/reconcile (``verified``|``attested``, the
+    row is kept). Workers re-validate epoch+owner+status at the effect
+    boundary (``turn_still_valid``); a completed switch bumps the epoch so
+    a stale worker refuses its terminal writes. Boot runs
+    ``clear_stale_switch`` (flag only — fail-closed marker stays) and
+    ``seed_open_attempts``: open ``email_attempt@`` markers without close
+    rows become ``uncertain`` leases — absence of the close is never proof
+    the effect did not happen. ``ref_has_effect_history`` doubles as the
+    unswapped fence: same (mailbox, provider mid) already run/uncertain
+    under ANY scope → fence, different mailbox → independent (RA11-B01).
+    No transaction is held across the LLM call — durable claims plus
+    short BEGIN IMMEDIATE transactions. The barrier cannot be disabled;
+    its two settings are bounded knobs, not an off switch.
+
+    RA15-BO01-03 (REM-AUDIT-18) hardened the post-admission half. Each
+    admitted turn carries an ``EffectFence``: ``check()`` validates with a
+    pure read (never blocked by another turn's hold — lock contention
+    alone can never fence a healthy turn) and renews the lease, so expiry
+    only ever means "the owner stopped checking in"; ``run_atomic`` /
+    ``ahold`` hold BEGIN IMMEDIATE across validate+effect so a switch's
+    epoch bump cannot interleave — the effect lands under the epoch it
+    was validated in or not at all (acquire bounded by a 30s busy
+    timeout). The ``_barrier_turn`` wrapper checks the fence at every
+    yielded boundary and closes the inner generator on every exit path;
+    ``_stream_agent_loop`` re-checks each iteration and runs specialist
+    fan-out (``route_parallel``), skill and MCP dispatch inside holds;
+    both ``stream_chat`` tails (normal + committee, incl. fallback) commit
+    session rows, ``chat_turn``/``committee_review`` audit, extraction
+    scheduling and Honcho mirrors under one hold. The email poller
+    registers its task, heartbeats the lease during the Executive turn,
+    and runs the scope check + terminal dedup marker (``run_atomic``) and
+    mark-read (``ahold``) inside the fence. ``complete_turn`` CAS-es on
+    the admission epoch. Reconcile additionally refuses while the owner
+    is demonstrably apt — a live task in this process (``_LIVE_TURNS``
+    registry) or any live foreign pid (single-host limit: another
+    process's tasks cannot be introspected, so liveness is assumed);
+    expiry is never proof of absence. RA15-BO01-06 closes the cancel
+    half: dispatched children (skill/MCP gather, route_parallel fan-out,
+    committee.review) run shielded through ``_run_children`` — a parent
+    cancel never reaches them, so ``task.done()`` stays an honest "the
+    coroutine (and any executor thread it awaited) really finished"
+    signal; every child registers on the lease and ``reconcile_turn``
+    refuses while one is runnable, with a bounded 5s drain on cancel —
+    admin attestation cannot free authority while a child can still
+    produce an effect, and a dead process's children are dead with it.
+    The internal-timeout residual is closed as well: the loop's default
+    executor is instrumented (``_TrackingExecutor`` +
+    ``_CURRENT_TURN`` context var) so ``concurrent.futures`` work a
+    tracked child submits — e.g. ``wait_for(to_thread(...))`` whose
+    timeout ends the task but not the thread — stays attributed to the
+    lease; ``Future.done()`` is an honest thread-completion signal that
+    ``children_alive`` reports to reconcile, and ``complete_turn``
+    degrades to ``uncertain`` rather than closing while any child work
+    can still produce an effect. A child that outlives its turn's
+    unwind also gets a durable ``turn_child_outcome`` row in the
+    unswapped ``bo_control_audit`` (RA15-BO01-09) — the reconcile audit
+    is not a substitute for the effect's audit.
+    The residual audit window is
+    closed too: every durable journal write inside the loop —
+    ``memory_snapshot``, ``cache_event``/usage rows, ``web_search``,
+    ``specialist_consult`` and per-tool ``tool_invocation`` — runs under
+    a fence hold, so a zombie resuming after reconcile+epoch-bump can
+    neither stamp evidence into the swapped-in journal nor emit a
+    visible item; buffered chips/form_patch events are yielded only
+    after the hold releases. The durable trail is readable over the API
+    (F-2/F-3): ``GET /clients/turn-history`` lists non-active leases
+    newest-first and ``GET /clients/control-audit`` the ``bo_control_audit``
+    rows — both ``clients:read`` with ``owner``/``actor`` withheld from
+    non-admin viewers; the /clients page renders blockers + reconcile
+    controls (admin) + the collapsible trail.
   routing_observe: |
     bo/routing (VAL3-01) is the observe-mode model router: an administered
     catalog (provider/model/version, capabilities, regions, cost and quality
@@ -4227,7 +4445,11 @@ bo:
     deterministic engine (eligibility filters in fixed order provider →
     region → capabilities → budget → availability → eval freshness, then
     score desc → cost asc → identity asc tie-break), and durable
-    observations. observe.py hooks audit.usage.log_model_usage post-call:
+    observations. Candidates serialize estimated_cost plus
+    estimated_cost_currency (source Cost.currency; NULL stays unknown) and
+    estimated_cost_unit=per_call (per-1M-token prices scaled by measured
+    usage — estimate, not billed amount). observe.py hooks
+    audit.usage.log_model_usage post-call:
     computes the recommendation vs the model actually used, persists both
     separately, then hands off — the hook performs ZERO network I/O
     (REM-01). The complete bo.model-observation.v1 envelope (stable eventId

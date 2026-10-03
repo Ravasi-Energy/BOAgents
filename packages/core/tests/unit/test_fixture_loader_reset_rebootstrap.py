@@ -285,3 +285,19 @@ def test_reset_does_not_requeue_shipped_docs(
     counts = ReviewStore(db_path=_isolate_dbs).count_by_status()
     assert counts["pending"] == 0, "shipped docs must come back as trusted defaults"
     assert counts["approved"] == counts["total"] > 0
+
+
+def test_reset_all_state_propagates_generic_cleanup_io_failure(
+    settings_stub: Any, _isolate_dbs: Path
+) -> None:
+    """B3: a non-EF I/O failure on the strict cleanup path must propagate
+    out of ``reset_all_state`` — the old blanket swallow would have let the
+    reset report success while prior rows survived in the collections the
+    wipe covers."""
+    def _fail(self: Any, collection: str, where: dict, *, strict: bool = False) -> None:
+        raise OSError("synthetic I/O fault")
+
+    with patch.object(ChromaDBStore, "delete_company_docs", lambda self: None), \
+         patch.object(ChromaDBStore, "delete_documents", _fail), \
+         pytest.raises(OSError, match="synthetic I/O fault"):
+        asyncio.run(fixture_loader.reset_all_state(settings_stub))

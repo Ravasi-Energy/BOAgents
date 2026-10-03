@@ -7,6 +7,7 @@ single-company installs.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -229,3 +230,216 @@ async def test_patch_and_cockpit_routes(env: SimpleNamespace, client: TestClient
     assert acme["role"] == "Fractional COO"
     assert acme["overdue_actions"] == 1
     assert board["generated_at"]
+
+
+async def test_retainer_structured_pair(env: SimpleNamespace) -> None:
+    """Structured retainer: amount+currency must arrive as a pair, ISO-valid;
+    the free-text retainer field is untouched and never parsed."""
+    await create_client_slot(env.settings, display_name="Acme", source="current")
+
+    out = await update_client_meta(
+        env.settings,
+        "acme",
+        {
+            "retainer": "15000 EUR/luna, negotiable",
+            "retainer_amount": "15000.00",
+            "retainer_currency": "EUR",
+        },
+    )
+    assert out["retainer"] == "15000 EUR/luna, negotiable"
+    assert out["retainer_amount"] == "15000.00"
+    assert out["retainer_currency"] == "EUR"
+
+    # Free text alone is still legal (old contract).
+    out = await update_client_meta(env.settings, "acme", {"retainer": "monthly"})
+    assert out["retainer"] == "monthly"
+    assert out["retainer_amount"] == "15000.00"  # pair preserved untouched
+
+
+async def test_retainer_pair_rejects_half_pairs(env: SimpleNamespace) -> None:
+    await create_client_slot(env.settings, display_name="Acme", source="current")
+
+    for patch in (
+        {"retainer_amount": "100"},
+        {"retainer_currency": "USD"},
+        {"retainer_amount": "abc", "retainer_currency": "USD"},
+        {"retainer_amount": "100", "retainer_currency": "usd"},
+        {"retainer_amount": "100", "retainer_currency": "USDD"},
+    ):
+        with pytest.raises(ClientSlotError):
+            await update_client_meta(env.settings, "acme", patch)
+    # Nothing was persisted by the rejected patches.
+    meta = (env.company / "_client_slots" / "acme" / "meta.json").read_text(
+        encoding="utf-8"
+    )
+    assert "retainer_amount" not in meta
+    assert "retainer_currency" not in meta
+
+
+async def test_retainer_pair_merged_state_allows_one_sided_update(
+    env: SimpleNamespace,
+) -> None:
+    """Once the pair exists, updating only one side is legal — the merged
+    meta still holds the pair."""
+    await create_client_slot(env.settings, display_name="Acme", source="current")
+    await update_client_meta(
+        env.settings,
+        "acme",
+        {"retainer_amount": "6000", "retainer_currency": "RON"},
+    )
+    out = await update_client_meta(env.settings, "acme", {"retainer_amount": "7500"})
+    assert out["retainer_amount"] == "7500"
+    assert out["retainer_currency"] == "RON"
+
+
+# ── Retainer pair clear (REM-AUDIT-21) ──────────────────────────────────────
+
+
+async def test_clear_retainer_money_removes_pair_keeps_free_text(
+    env: SimpleNamespace,
+) -> None:
+    """F19-4: a set pair could not be cleared — null was dropped from the
+    patch. The explicit flag removes BOTH keys atomically; the free-text
+    retainer is untouched."""
+    await create_client_slot(env.settings, display_name="Acme", source="current")
+    await update_client_meta(
+        env.settings,
+        "acme",
+        {
+            "retainer": "15000 EUR/luna, negotiable",
+            "retainer_amount": "15000.00",
+            "retainer_currency": "EUR",
+        },
+    )
+
+    out = await update_client_meta(env.settings, "acme", {"clear_retainer_money": True})
+
+    assert out["retainer"] == "15000 EUR/luna, negotiable"
+    assert out["retainer_amount"] is None
+    assert out["retainer_currency"] is None
+    meta = json.loads(
+        (env.company / "_client_slots" / "acme" / "meta.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert "retainer_amount" not in meta
+    assert "retainer_currency" not in meta
+    assert "clear_retainer_money" not in meta
+
+    # Idempotent: clearing an already-absent pair is a no-op.
+    out = await update_client_meta(env.settings, "acme", {"clear_retainer_money": True})
+    assert out["retainer_amount"] is None
+
+    # Omitted/false keeps the existing semantics — no clearing.
+    await update_client_meta(
+        env.settings,
+        "acme",
+        {"retainer_amount": "6000", "retainer_currency": "RON"},
+    )
+    out = await update_client_meta(env.settings, "acme", {"clear_retainer_money": False})
+    assert out["retainer_amount"] == "6000"
+
+
+async def test_clear_retainer_money_conflicts_and_non_bool(env: SimpleNamespace) -> None:
+    await create_client_slot(env.settings, display_name="Acme", source="current")
+    await update_client_meta(
+        env.settings,
+        "acme",
+        {"retainer_amount": "6000", "retainer_currency": "RON"},
+    )
+
+    for patch in (
+        {"clear_retainer_money": True, "retainer_amount": "1"},
+        {"clear_retainer_money": True, "retainer_currency": "USD"},
+        {"clear_retainer_money": "true"},
+        {"clear_retainer_money": 1},
+    ):
+        with pytest.raises(ClientSlotError):
+            await update_client_meta(env.settings, "acme", patch)
+
+    # Rejected patches persisted nothing — the pair is intact.
+    out = await update_client_meta(env.settings, "acme", {"role": "CFO"})
+    assert out["retainer_amount"] == "6000"
+    assert out["retainer_currency"] == "RON"
+
+
+async def test_clear_retainer_money_http(env: SimpleNamespace, client: TestClient) -> None:
+    await create_client_slot(env.settings, display_name="Acme", source="current")
+    client.patch(
+        "/clients/acme",
+        json={
+            "retainer": "7500 USD/月 keep me",
+            "retainer_amount": "7500",
+            "retainer_currency": "USD",
+        },
+    )
+
+    resp = client.patch("/clients/acme", json={"clear_retainer_money": True})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["retainer"] == "7500 USD/月 keep me"
+    assert body["retainer_amount"] is None
+    assert body["retainer_currency"] is None
+
+    # Strict bool at the boundary: "true"/1 are 422, not coercion.
+    assert client.patch(
+        "/clients/acme", json={"clear_retainer_money": "true"}
+    ).status_code == 422
+    assert client.patch(
+        "/clients/acme", json={"clear_retainer_money": 1}
+    ).status_code == 422
+    # set+clear in one transition is refused.
+    client.patch(
+        "/clients/acme",
+        json={"retainer_amount": "100", "retainer_currency": "EUR"},
+    )
+    assert client.patch(
+        "/clients/acme",
+        json={"clear_retainer_money": True, "retainer_amount": "5"},
+    ).status_code == 400
+    out = client.get("/clients").json()
+    acme = next(c for c in out["clients"] if c["slug"] == "acme")
+    assert acme["retainer_amount"] == "100"
+    assert acme["retainer_currency"] == "EUR"
+
+
+async def test_clear_retainer_money_needs_admin(
+    env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """clients:write is admin-only: viewer and operator get refused before
+    the flag can touch meta.json."""
+    from openexecutive import config
+    from openexecutive.api.routes import bo as bo_route
+    from openexecutive.api.routes import clients as route
+
+    from .bo_testkit import use_tmp_db
+
+    use_tmp_db(Path(env.company).parent, monkeypatch)
+    monkeypatch.setenv("BO_TENANT_ID", "tenant-a")
+    monkeypatch.setenv("BO_ADMIN_EMAILS", "admin@test")
+    monkeypatch.setenv("BACKEND_PROXY_SECRET", "test-proxy-only")
+    monkeypatch.setattr(config, "get_settings", lambda: env.settings)
+    app = FastAPI()
+    app.include_router(route.router)
+    bo_route.register_error_handlers(app)
+    http = TestClient(app)
+
+    await create_client_slot(env.settings, display_name="Acme", source="current")
+    admin = {"x-caller-email": "admin@test", "x-caller-proxy-secret": "test-proxy-only"}
+    http.patch(
+        "/clients/acme",
+        json={"retainer_amount": "100", "retainer_currency": "EUR"},
+        headers=admin,
+    )
+    for headers in (
+        {"x-caller-email": "viewer@test", "x-caller-proxy-secret": "test-proxy-only"},
+        {"x-api-key": "svc-key"},
+    ):
+        resp = http.patch(
+            "/clients/acme", json={"clear_retainer_money": True}, headers=headers
+        )
+        assert resp.status_code == 403
+
+    listed = http.get("/clients", headers=admin).json()
+    acme = next(c for c in listed["clients"] if c["slug"] == "acme")
+    assert acme["retainer_amount"] == "100"

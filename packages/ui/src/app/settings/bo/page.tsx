@@ -1,4 +1,5 @@
 "use client";
+import { MoneySettings } from "@/lib/Money";
 
 // Setări BOAgents — BO-SET-001. Toate valorile vin din /bo/settings; fiecare
 // salvare poartă expected_version (CAS) și un conflict 409 cere reîncărcare,
@@ -25,10 +26,11 @@ type LoadState =
 
 // Gruparea pe taburi — registrul marchează fiecare parametru; tabul
 // „exec" e suprafața de execuție/recuperare cerută de VAL4-03.
-const TAB_ORDER = ["general", "routing", "telemetrie", "exec", "pilot"] as const;
+const TAB_ORDER = ["general", "routing", "mail", "telemetrie", "exec", "pilot"] as const;
 const TAB_LABEL: Record<string, string> = {
   general: "General",
   routing: "Rutare modele",
+  mail: "Poștă de intrare",
   telemetrie: "Telemetrie",
   exec: "Execuție și recuperare",
   pilot: "Pilot ERP sintetic",
@@ -262,6 +264,7 @@ export default function BoSettingsPage() {
 
   return (
     <div className="bo-scope" style={{ marginTop: 20 }}>
+      <MoneySettings />
       <div className="bo-row" style={{ marginBottom: 16 }}>
         <Pill kind="info" icon="shield-check">
           tenant: {data.tenant}

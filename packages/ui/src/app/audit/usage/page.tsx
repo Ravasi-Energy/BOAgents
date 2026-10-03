@@ -1,4 +1,5 @@
 "use client";
+import { Money } from "@/lib/Money";
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -16,13 +17,8 @@ function fmtInt(n: number): string {
   return (n ?? 0).toLocaleString();
 }
 
-// Cost spans wide ranges (sub-cent per call up to dollars in aggregate), so
-// show more precision when small to avoid a misleading "$0.00".
-function fmtCost(n: number): string {
-  const v = n ?? 0;
-  if (v === 0) return "$0";
-  return `$${v.toFixed(v < 1 ? 4 : 2)}`;
-}
+// The API field is explicitly cost_usd: USD is the source contract, not a fallback.
+function fmtCost(n: number) { return <Money amount={n} currency="USD" />; }
 
 // Cache-hit ratio: prompt input served from cache as a fraction of ALL prompt
 // input (fresh + cache reads + cache writes). cache_creation tokens are billed
@@ -40,7 +36,7 @@ function cacheHitPct(
   return Math.round((u.cache_read_input_tokens / denom) * 100);
 }
 
-function StatCard({ label, value, hint }: { label: string; value: string; hint?: string }) {
+function StatCard({ label, value, hint }: { label: string; value: React.ReactNode; hint?: string }) {
   return (
     <div className="rounded-xl border border-line bg-surface-elevated/40 px-4 py-3">
       <div className="text-xs text-fg-muted">{label}</div>

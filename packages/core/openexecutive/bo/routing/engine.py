@@ -104,6 +104,12 @@ class Decision:
                     "estimated_cost": (
                         str(c.estimated_cost) if c.estimated_cost is not None else None
                     ),
+                    # Unit and currency from the source Cost record, additive
+                    # next to the legacy bare decimal. The estimate is per
+                    # CALL (per-1M-token prices scaled by measured usage);
+                    # currency=None stays None — never assumed.
+                    "estimated_cost_currency": c.entry.cost.currency,
+                    "estimated_cost_unit": "per_call",
                     "score": c.score,
                 }
                 for c in self.candidates

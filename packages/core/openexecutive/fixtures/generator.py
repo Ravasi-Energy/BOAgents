@@ -190,7 +190,11 @@ _EMIT_TOOL: dict[str, Any] = {
                     "headcount": {"type": "integer"},
                     "annual_revenue_arr": {
                         "type": "number",
-                        "description": "Annual revenue / ARR in USD (a number, not a string).",
+                        "description": "Annual revenue / ARR as a number, in the currency stated by the user.",
+                    },
+                    "annual_revenue_arr_currency": {
+                        "type": "string",
+                        "description": "ISO-4217 code (USD, EUR, RON…) only when a currency was explicitly stated for the revenue amount itself — a currency named for another figure (costs, burn, deals) does not apply. Omit when unstated.",
                     },
                     "mission": {"type": "string"},
                     "vision": {"type": "string"},
@@ -581,6 +585,7 @@ def bundle_to_serialized(bundle: FixtureBundle, scenario_description: str) -> di
         "industry": profile.industry,
         "stage": profile.stage,
         "arr": profile.annual_revenue_arr,
+        "arr_currency": profile.annual_revenue_arr_currency,
         "headcount": profile.headcount,
         "founding_year": profile.founding_year,
         "mission": profile.mission,

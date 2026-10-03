@@ -2,7 +2,19 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+def _iso_currency(v: str | None) -> str | None:
+    """ISO-4217 alphabetic code (USD, EUR, RON); None stays unknown — it is
+    never coerced into a default currency."""
+    if v is None:
+        return None
+    import re
+
+    if not re.match(r"^[A-Z]{3}$", v):
+        raise ValueError("așteptat cod ISO-4217 (ex. USD, EUR, RON)")
+    return v
 
 
 class PageFormField(BaseModel):
@@ -183,8 +195,11 @@ class CultureData(BaseModel):
 
 class FinancialsData(BaseModel):
     burn_rate_monthly: float | None = None
+    burn_rate_currency: str | None = None
     runway_months: float | None = None
     key_metrics: dict = Field(default_factory=dict)
+
+    _check_ccy = field_validator("burn_rate_currency")(_iso_currency)
 
 
 class CompanyProfileResponse(BaseModel):
@@ -194,6 +209,7 @@ class CompanyProfileResponse(BaseModel):
     founding_year: int | None
     headcount: int | None
     annual_revenue_arr: float | None
+    annual_revenue_arr_currency: str | None
     mission: str
     vision: str
     target_customer: TargetCustomerData
@@ -213,6 +229,7 @@ class CompanyProfileUpdateRequest(BaseModel):
     founding_year: int | None = None
     headcount: int | None = None
     annual_revenue_arr: float | None = None
+    annual_revenue_arr_currency: str | None = None
     mission: str | None = None
     vision: str | None = None
     target_customer: TargetCustomerData | None = None
@@ -223,6 +240,8 @@ class CompanyProfileUpdateRequest(BaseModel):
     financials: FinancialsData | None = None
     vendors: list[str] | None = None
     tickers: list[str] | None = None
+
+    _check_arr_ccy = field_validator("annual_revenue_arr_currency")(_iso_currency)
 
 
 

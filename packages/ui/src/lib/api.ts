@@ -327,6 +327,8 @@ export interface CompanyProfile {
   founding_year: number | null;
   headcount: number | null;
   annual_revenue_arr: number | null;
+  arr_currency?: string | null;
+  annual_revenue_arr_currency?: string | null;
   mission: string;
   vision: string;
   target_customer: { profile: string; pain_points: string[] };
@@ -334,7 +336,7 @@ export interface CompanyProfile {
   org_structure: { departments: string[]; leadership_team: string[] };
   strategic_priorities: { current_year: string[]; north_star_metric: string };
   culture: { values: string[]; operating_principles: string[] };
-  financials: { burn_rate_monthly: number | null; runway_months: number | null; key_metrics: Record<string, unknown> };
+  financials: { burn_rate_monthly: number | null; burn_rate_currency?: string | null; runway_months: number | null; key_metrics: Record<string, unknown> };
   /** External dependencies the research watch policy treats as company data. */
   vendors: string[];
   tickers: string[];
@@ -1889,6 +1891,7 @@ export interface FixtureSummary {
   industry: string;
   stage: string;
   arr: number | null;
+  arr_currency?: string | null;
   headcount: number | null;
   founding_year: number | null;
   mission: string;
@@ -2000,6 +2003,7 @@ export interface GeneratedFixtureBundle {
     stage?: string;
     headcount?: number | null;
     annual_revenue_arr?: number | null;
+    annual_revenue_arr_currency?: string | null;
     mission?: string;
     [key: string]: unknown;
   };
@@ -2873,6 +2877,8 @@ export interface ClientSlotSummary {
   engagement_start?: string | null;
   renewal_date?: string | null;
   retainer?: string | null;
+  retainer_amount?: string | null;
+  retainer_currency?: string | null;
   hours_per_week?: number | null;
   primary_contact?: string | null;
   notes?: string | null;
@@ -3043,6 +3049,8 @@ export interface ClientMetaPatch {
   engagement_start?: string;
   renewal_date?: string;
   retainer?: string;
+  retainer_amount?: string | null;
+  retainer_currency?: string | null;
   hours_per_week?: number;
   primary_contact?: string;
   notes?: string;
@@ -3060,6 +3068,93 @@ export async function updateClientMeta(
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(err.detail ?? "Failed to update client");
+  }
+  return res.json();
+}
+
+// ── Turn barrier: open blockers, durable history, control audit ────────────
+// Admin recovery surface for the multi-client switch barrier. `owner`/`actor`
+// are present only for admin callers (the API withholds them from viewers).
+
+export interface TurnBlocker {
+  turn_id: string | null;
+  kind?: string;
+  client_slug?: string;
+  status: string;
+  reason?: string | null;
+  owner?: string;
+  lease_expires_at?: string;
+  created_at?: string;
+}
+
+export interface TurnHistoryRow {
+  turn_id: string;
+  kind: string;
+  ref?: string | null;
+  client_slug?: string;
+  mailbox?: string | null;
+  owner?: string;
+  epoch: number;
+  status: string;
+  resolution?: string | null;
+  reason?: string | null;
+  lease_expires_at?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface ControlAuditRow {
+  id: number;
+  action: string;
+  turn_id?: string | null;
+  actor?: string;
+  resolution?: string | null;
+  reason?: string | null;
+  detail?: string | null;
+  created_at: string;
+}
+
+export async function getTurnBlockers(): Promise<{
+  switch_in_progress: boolean;
+  blockers: TurnBlocker[];
+}> {
+  const res = await fetch(`${API_BASE}/clients/turn-blockers`);
+  if (!res.ok) throw new Error("Failed to load turn blockers");
+  return res.json();
+}
+
+export async function getTurnHistory(
+  limit = 50,
+): Promise<{ turns: TurnHistoryRow[] }> {
+  const res = await fetch(`${API_BASE}/clients/turn-history?limit=${limit}`);
+  if (!res.ok) throw new Error("Failed to load turn history");
+  return res.json();
+}
+
+export async function getControlAudit(): Promise<{ audit: ControlAuditRow[] }> {
+  const res = await fetch(`${API_BASE}/clients/control-audit`);
+  if (!res.ok) throw new Error("Failed to load control audit");
+  return res.json();
+}
+
+// `resolution` distinguishes the evidence class: "verified" = the operator
+// checked journal/provider proof of the outcome; "attested" = human
+// attestation only. Both land as a durable bo_control_audit row.
+export async function reconcileTurn(
+  turnId: string,
+  resolution: "verified" | "attested",
+): Promise<{ turn_id: string; status: string; resolution?: string }> {
+  const res = await fetch(
+    `${API_BASE}/clients/turn-blockers/${encodeURIComponent(turnId)}/reconcile`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ resolution }),
+    },
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail ?? "Failed to reconcile turn");
   }
   return res.json();
 }

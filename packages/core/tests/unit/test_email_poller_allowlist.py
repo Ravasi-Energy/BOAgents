@@ -26,6 +26,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 import openexecutive.integrations.email_poller as poller
+from openexecutive.audit import AuditLogger, set_audit_logger
 from openexecutive.people import store as people_store
 
 
@@ -35,6 +36,18 @@ def isolated_people_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(people_store, "DB_PATH", db_path)
     people_store.initialize_db()
     return db_path
+
+
+@pytest.fixture(autouse=True)
+def isolated_audit(tmp_path: Path) -> Path:
+    """``_handle_email`` journals outcomes + dedup markers — point the
+    default logger at a tmp DB so tests neither leak rows into a stray
+    episodic_memory.db nor see each other's markers."""
+    set_audit_logger(AuditLogger(db_path=tmp_path / "audit.db"))
+    poller.reset_mail_caches()
+    yield tmp_path / "audit.db"
+    set_audit_logger(None)
+    poller.reset_mail_caches()
 
 
 def _settings() -> Any:

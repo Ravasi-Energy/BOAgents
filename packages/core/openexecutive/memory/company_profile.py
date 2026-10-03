@@ -2,13 +2,36 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import secrets
 import stat
 from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+# ISO-4217 alphabetic code (e.g. USD, EUR, RON). Money amounts carry their
+# currency explicitly — None means "not recorded", never an implied USD.
+_CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
+
+
+def _currency_code(v: str | None) -> str | None:
+    if v is None:
+        return None
+    if not isinstance(v, str) or not _CURRENCY_RE.match(v):
+        raise ValueError("așteptat cod ISO-4217 (ex. USD, EUR, RON)")
+    return v
+
+
+def _fmt_amount(amount: float, currency: str | None) -> str:
+    """Amount + explicit currency; unknown currency renders the bare number
+    rather than silently claiming USD."""
+    if currency == "USD":
+        return f"${amount:,.0f}"
+    if currency:
+        return f"{currency} {amount:,.0f}"
+    return f"{amount:,.0f}"
 
 
 class TargetCustomer(BaseModel):
@@ -38,8 +61,11 @@ class Culture(BaseModel):
 
 class Financials(BaseModel):
     burn_rate_monthly: float | None = None
+    burn_rate_currency: str | None = None
     runway_months: float | None = None
     key_metrics: dict[str, Any] = Field(default_factory=dict)
+
+    _check_ccy = field_validator("burn_rate_currency")(_currency_code)
 
 
 class CompanyProfile(BaseModel):
@@ -51,6 +77,7 @@ class CompanyProfile(BaseModel):
     founding_year: int | None = None
     headcount: int | None = None
     annual_revenue_arr: float | None = None
+    annual_revenue_arr_currency: str | None = None
     mission: str = ""
     vision: str = ""
     target_customer: TargetCustomer = Field(default_factory=TargetCustomer)
@@ -68,6 +95,8 @@ class CompanyProfile(BaseModel):
     # company data (auto-added) rather than inferred (needs approval).
     vendors: list[str] = Field(default_factory=list)  # e.g. ["Stripe", "AWS"]
     tickers: list[str] = Field(default_factory=list)  # own + competitor tickers
+
+    _check_arr_ccy = field_validator("annual_revenue_arr_currency")(_currency_code)
 
     @classmethod
     def load_from_yaml(cls, path: Path | str) -> CompanyProfile:
@@ -162,7 +191,9 @@ class CompanyProfile(BaseModel):
         if self.headcount:
             lines.append(f"**Headcount**: {self.headcount}")
         if self.annual_revenue_arr:
-            lines.append(f"**ARR**: ${self.annual_revenue_arr:,.0f}")
+            lines.append(
+                f"**ARR**: {_fmt_amount(self.annual_revenue_arr, self.annual_revenue_arr_currency)}"
+            )
 
         if self.mission:
             lines.extend(["", f"**Mission**: {self.mission}"])
@@ -208,7 +239,8 @@ class CompanyProfile(BaseModel):
         if self.financials.burn_rate_monthly is not None:
             lines.extend(["", "**Financial Position**:"])
             lines.append(
-                f"  Monthly burn: ${self.financials.burn_rate_monthly:,.0f}"
+                "  Monthly burn: "
+                + _fmt_amount(self.financials.burn_rate_monthly, self.financials.burn_rate_currency)
             )
             if self.financials.runway_months is not None:
                 lines.append(f"  Runway: {self.financials.runway_months:.1f} months")

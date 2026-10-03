@@ -55,6 +55,19 @@ _CAP_MIN_ROLE: dict[str, Role] = {
     "execution:read": "viewer",
     "execution:write": "admin",
     "execution:operate": "operator",
+    # Client-company slots swap the entire live company context (docs, DB,
+    # MCP tools, active identity). Reads are viewer-safe; every mutation —
+    # create, intake-generate, save, activate, meta patch, delete — is
+    # admin-only because each one changes which company's data the box
+    # serves or destroys a slot outright.
+    "clients:read": "viewer",
+    "clients:write": "admin",
+    # Fixture ops are the same blast radius as client slots: load/unload/
+    # reset/snapshot swap or wipe the live company context, generate calls
+    # the LLM, create/delete mutate the catalog. Reads stay viewer-safe;
+    # every mutation is admin-only (F-1, REM-AUDIT-18).
+    "fixtures:read": "viewer",
+    "fixtures:write": "admin",
 }
 
 

@@ -497,22 +497,51 @@ def _mark_outcome_tracked(obj: Any) -> bool:
         return True
 
 
+def _attach_task_outcome(task: Any, turn_id: str, label: str) -> None:
+    """Register ``late_child_outcome`` on a child task from whichever
+    thread the orphaning was noticed on. ``Task.add_done_callback``
+    must run on the task's own loop thread; the uncertain-exit paths
+    (``fail_turn_uncertain``, reconcile) can fire inside a
+    ``to_thread`` call, so attach through ``call_soon_threadsafe``
+    while the loop is alive and fall back to a direct attach only when
+    the loop is gone."""
+    def _cb(t: Any, tid: str = turn_id, lbl: str = label) -> None:
+        late_child_outcome(tid, lbl, t)
+
+    try:
+        loop = task.get_loop()
+    except Exception:
+        loop = None
+    if loop is not None and loop.is_running():
+        try:
+            loop.call_soon_threadsafe(task.add_done_callback, _cb)
+            return
+        except RuntimeError:
+            pass
+    try:
+        task.add_done_callback(_cb)
+    except Exception:
+        logger.exception(
+            "turn_barrier: cannot attach outcome audit for %s "
+            "on turn %s", label, turn_id)
+
+
 def _audit_orphaned_work(turn_id: str) -> None:
     """Attach outcome audit to child work still capable of effects at
     the moment its turn could not close — RA15-BO01-09. Tasks get the
     ``late_child_outcome`` callback; executor futures get the same
     durable row written when the worker thread itself reports done
     (the callback fires in the completing thread, which is fine — the
-    write uses its own connection on the unswapped store)."""
+    write uses its own connection on the unswapped store). Called for
+    EVERY uncertain exit — ``complete_turn`` with live children,
+    ``fail_turn_uncertain``, and a reconcile refused on live children —
+    so no path drops the registry without the audit being armed."""
     for task in list(_LIVE_CHILDREN.get(turn_id, ())):
         if task.done() or not _mark_outcome_tracked(task):
             continue
         coro = task.get_coro()
         label = getattr(coro, "__qualname__", "child-task")
-        task.add_done_callback(
-            lambda t, tid=turn_id, lbl=label:
-            late_child_outcome(tid, lbl, t)
-        )
+        _attach_task_outcome(task, turn_id, label)
     with _TRACK_LOCK:
         pending = list(_PENDING_CHILD_WORK.get(turn_id, ()))
     for fut in pending:
@@ -561,7 +590,14 @@ def complete_turn(lease: TurnLease, *, outcome: str) -> bool:
 
 def fail_turn_uncertain(lease: TurnLease, *, reason: str) -> bool:
     """Effect presence unprovable — the lease stays blocking until an
-    operator reconciles it. Never auto-released."""
+    operator reconciles it. Never auto-released.
+
+    An uncertain exit with residual child work must arm the outcome
+    audit BEFORE the registry can forget the pending Future/Task —
+    RA15-BO01-09: the ``TimeoutError``/``_run_child`` path reaches
+    ``fail_turn_uncertain`` without passing through ``complete_turn``,
+    and without the attach the late effect had no durable audit."""
+    _audit_orphaned_work(lease.turn_id)
     return _finish(lease, "uncertain", resolution=None, reason=reason)
 
 
@@ -1493,6 +1529,11 @@ def reconcile_turn(
         # land. Admin attestation is not a substitute for demonstrated
         # child termination.
         if children_alive(turn_id):
+            # Arm the late-outcome audit for the work that is keeping
+            # this lease blocked — RA15-BO01-09: an expiry-swept lease
+            # can reach "uncertain with live children" without any
+            # fail_turn_uncertain call having armed the audit.
+            _audit_orphaned_work(turn_id)
             conn.execute("ROLLBACK")
             raise ReconcileRefusedError(
                 f"turn {turn_id} is uncertain and still has live "

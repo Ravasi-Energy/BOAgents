@@ -853,3 +853,78 @@ def test_late_child_outcome_audit_after_parent_cancel(
     assert "skill:test_late" in rows[0][0]
     assert '"completed"' in rows[0][0]
     assert effect_landed.is_set()
+
+
+def test_uncertain_exit_attaches_orphaned_work_audit(barrier_db):
+    """RA15-BO01-09 residual (timeout-parallel): a child whose
+    ``wait_for(to_thread)`` times out re-raises through ``_run_child``,
+    so the turn exits via ``fail_turn_uncertain`` — NOT ``complete_turn``.
+    The outcome audit must still be armed before the registry forgets
+    the pending Future: after the thread ends, a durable
+    ``turn_child_outcome`` row exists and the lease reconciles."""
+    import asyncio
+    import sqlite3
+    import threading
+
+    from openexecutive.orchestrator import executive as ex_mod
+
+    lease = tb.admit_turn("executive", ref="t-uncertain", wait_s=0)
+    release = threading.Event()
+
+    def _thread_effect() -> None:
+        release.wait(timeout=15)
+
+    def _outcome_rows() -> list[tuple]:
+        conn = sqlite3.connect(str(barrier_db), isolation_level=None)
+        try:
+            return conn.execute(
+                "SELECT detail FROM bo_control_audit "
+                "WHERE turn_id=? AND action='turn_child_outcome'",
+                (lease.turn_id,)).fetchall()
+        finally:
+            conn.close()
+
+    async def _child() -> str:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_thread_effect), timeout=0.05
+        )
+
+    async def _run() -> None:
+        fence = tb.EffectFence(lease)
+        # route_parallel path: the child's TimeoutError propagates —
+        # the stream_chat wrapper turns it into an uncertain exit.
+        with pytest.raises(TimeoutError):
+            await ex_mod._run_child(
+                fence, _child(), label="route_parallel"
+            )
+        assert tb.children_alive(lease.turn_id)
+        tb.fail_turn_uncertain(lease, reason="turn failed")
+
+        _expire(barrier_db, lease)
+        with pytest.raises(tb.ReconcileRefusedError, match="children"):
+            tb.reconcile_turn(
+                lease.turn_id, resolution="attested", actor="op"
+            )
+
+        release.set()
+        t0 = asyncio.get_running_loop().time()
+        while tb.children_alive(lease.turn_id):
+            if asyncio.get_running_loop().time() - t0 > 15:
+                raise AssertionError("tracked executor work never finished")
+            await asyncio.sleep(0.05)
+        await asyncio.sleep(0.2)
+
+        rows = _outcome_rows()
+        assert rows, (
+            "uncertain exit dropped the orphaned-work registry without "
+            "arming the outcome audit")
+        assert '"completed"' in rows[0][0]
+        assert len(rows) == 1, f"duplicate outcome rows: {rows}"
+
+        _expire(barrier_db, lease)
+        out = tb.reconcile_turn(
+            lease.turn_id, resolution="attested", actor="op"
+        )
+        assert out["status"] == "closed"
+
+    asyncio.run(_run())

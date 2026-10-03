@@ -42,13 +42,60 @@ _CCY_SUFFIX = re.compile(
 # the match span, so they never split its clause.
 _CLAUSE_SEPS = re.compile(r"[,.;:\n!?]")
 
-# Field keywords, ranked: the field's own name outranks loose synonyms, so
-# "burn 50k monthly, costs 30k monthly" picks the burn figure (as before),
-# while "revenue 50k monthly, burn 30k monthly" no longer picks revenue's.
 _ARR_STRONG = re.compile(r"\barr\b|\barr(?=\d)", re.IGNORECASE)
 _ARR_WEAK = re.compile(r"\brevenues?\b|\bturnover\b", re.IGNORECASE)
 _BURN_STRONG = re.compile(r"\bburn\w*", re.IGNORECASE)
 _BURN_WEAK = re.compile(r"\bcosts?\b|\bspends?\b|\bexpenses?\b", re.IGNORECASE)
+# Each field's "foreign" set is the OTHER field's vocabulary: a magnitude
+# bound to it explicitly belongs elsewhere ("costs $5M" is not revenue,
+# "revenue $50k monthly" is not burn).
+_ARR_FOREIGN = re.compile(
+    r"\bburn\w*|\bcosts?\b|\bspends?\b|\bexpenses?\b", re.IGNORECASE
+)
+_BURN_FOREIGN = re.compile(
+    r"\barr\b|\brevenues?\b|\bturnover\b", re.IGNORECASE
+)
+
+_NEG_WORD = (
+    r"unavailable|undisclosed|unknown|not stated|not provided|"
+    r"not disclosed|not applicable|not available|declined|"
+    r"prefer not to say|rather not say|private|none|no answer|"
+    r"n/?a\b|tbd|to be determined"
+)
+
+
+def _negation_pattern(target_alt: str) -> re.Pattern[str]:
+    """"<field> is unavailable" / "no <field>" — the answer declares the
+    target does not exist, so no magnitude may fill it."""
+    return re.compile(
+        rf"\b(?:{target_alt})\b[ \t]*(?:[:=\-]|is|was|remains?|still)?[ \t]*"
+        rf"(?:{_NEG_WORD})"
+        rf"|\b(?:no|without|haven't|don't have|do not have|didn't share)\b"
+        rf"[ \t]*(?:an?\s+|any\s+)?(?:{target_alt})\b",
+        re.IGNORECASE,
+    )
+
+
+@dataclass(frozen=True)
+class _FieldHints:
+    strong: re.Pattern[str]
+    weak: re.Pattern[str]
+    foreign: re.Pattern[str]
+    negated: re.Pattern[str]
+
+
+_ARR_HINTS = _FieldHints(
+    strong=_ARR_STRONG,
+    weak=_ARR_WEAK,
+    foreign=_ARR_FOREIGN,
+    negated=_negation_pattern(r"arr|revenues?|turnover"),
+)
+_BURN_HINTS = _FieldHints(
+    strong=_BURN_STRONG,
+    weak=_BURN_WEAK,
+    foreign=_BURN_FOREIGN,
+    negated=_negation_pattern(r"burn(?:ing|ed)?|costs?|spends?|expenses?"),
+)
 
 
 def _clause_bounds(text: str, match: re.Match[str]) -> tuple[int, int]:
@@ -60,36 +107,58 @@ def _clause_bounds(text: str, match: re.Match[str]) -> tuple[int, int]:
     return left, right
 
 
+def _binding_score(text: str, match: re.Match[str], hints: _FieldHints) -> int:
+    """Who does this magnitude belong to? strong=2, weak=1, foreign=-1,
+    nothing=0. An immediate label wins outright ("ARR: 20M", "costs -
+    $5M"); otherwise the nearest field keyword inside the match's clause
+    decides — "our costs are $5M but ARR is $20M" binds each figure to
+    its own field."""
+    pre = text[: match.start()]
+    for pat, w in ((hints.strong, 2), (hints.weak, 1), (hints.foreign, -1)):
+        if re.search(rf"(?:{pat.pattern})[ \t]*[:=\-]?[ \t]*$", pre, re.IGNORECASE):
+            return w
+    left, right = _clause_bounds(text, match)
+    clause = text[left:right]
+    m_start, m_end = match.start() - left, match.end() - left
+    best_key: tuple[int, int] | None = None
+    best_w = 0
+    for pat, w in ((hints.strong, 2), (hints.weak, 1), (hints.foreign, -1)):
+        for kw in pat.finditer(clause):
+            d = max(0, kw.start() - m_end, m_start - kw.end())
+            # A label normally precedes its value, so a keyword on the
+            # left wins a distance tie against one on the right.
+            key = (d, 0 if kw.end() <= m_start else 1)
+            if best_key is None or key < best_key:
+                best_key, best_w = key, w
+    return best_w
+
+
 def _select_amount(
     text: str,
     pattern: re.Pattern[str],
-    strong: re.Pattern[str],
-    weak: re.Pattern[str],
+    hints: _FieldHints,
 ) -> re.Match[str] | None:
     """Pick the magnitude bound to the target field, not another field's.
 
-    A single magnitude keeps historical behaviour (the only candidate
-    wins regardless of keywords). With several magnitudes, each is scored
-    by the keyword its clause carries (strong=2, weak=1, none=0); the
-    unique top scorer wins. A tie or no bound candidate at all is
-    ambiguous — the field stays unset rather than grabbing another
-    field's number ("costs $5M, ARR 20M" must yield 20M, not 5M).
+    The field stays unset when the answer declares the target missing
+    ("ARR unavailable") or when every magnitude explicitly belongs to a
+    foreign field ("costs $5M" is not revenue). A single remaining
+    candidate wins as before; with several, the unique top scorer wins
+    and ties or all-unbound stay unset.
     """
+    if hints.negated.search(text):
+        return None
     matches = list(pattern.finditer(text))
     if not matches:
         return None
-    if len(matches) == 1:
-        return matches[0]
-    best_score = 0
-    best: list[re.Match[str]] = []
-    for m in matches:
-        left, right = _clause_bounds(text, m)
-        clause = text[left:right]
-        score = 2 if strong.search(clause) else 1 if weak.search(clause) else 0
-        if score > best_score:
-            best_score, best = score, [m]
-        elif score == best_score:
-            best.append(m)
+    scored = [(_binding_score(text, m, hints), m) for m in matches]
+    candidates = [m for s, m in scored if s >= 0]
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+    best_score = max(s for s, m in scored if s >= 0)
+    best = [m for s, m in scored if s == best_score]
     return best[0] if best_score > 0 and len(best) == 1 else None
 
 
@@ -330,8 +399,7 @@ def build_profile_from_answers(answers: dict[str, Any]) -> dict[str, Any]:
             re.compile(
                 r"\$?(?<![\d,])(\d[\d,]*(?:\.\d+)?)\s*(?:[Mm]{1,2}|[Mm]illion)\b"
             ),
-            _ARR_STRONG,
-            _ARR_WEAK,
+            _ARR_HINTS,
         )
         if arr_match:
             val = arr_match.group(1).replace(",", "")
@@ -413,8 +481,7 @@ def build_profile_from_answers(answers: dict[str, Any]) -> dict[str, Any]:
                 r"(?:(?:" + _CCY_ATOM + r")[ \t]*)?"
                 r"(?:monthly|/month|per month|burn)"
             ),
-            _BURN_STRONG,
-            _BURN_WEAK,
+            _BURN_HINTS,
         )
         # Same lookbehind as the other two: without it every digit of a
         # long run is a candidate start and the search is quadratic.

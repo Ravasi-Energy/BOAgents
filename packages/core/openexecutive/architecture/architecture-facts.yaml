@@ -3743,11 +3743,19 @@ company_onboarding:
   wizard_money: |
     The form fallback (build_profile_from_answers in onboarding/wizard.py)
     parses ARR and monthly burn from free text with bounded regexes.
-    AMOUNT SELECTION (_select_amount): a single magnitude always wins
-    (historical behaviour); with several, each is scored by the keyword its
-    clause carries — strong (arr, incl. "ARR20M"; burn) outranks weak
-    (revenue/turnover; costs/spend/expenses) — and only a unique top scorer
-    is taken. Ties or all-unbound candidates leave the field UNSET rather
+    AMOUNT SELECTION (_select_amount + _binding_score): every magnitude is
+    bound to the NEAREST field keyword — an immediate label prefix
+    ("ARR: 20M", "costs - $5M") wins outright, otherwise the closest
+    keyword in its clause, left-side preferred on ties. Scores: strong
+    (arr, incl. "ARR20M"; burn) = 2, weak (revenue/turnover;
+    costs/spend/expenses) = 1, the OTHER field's vocabulary = -1
+    (foreign), none = 0. Foreign-bound candidates are excluded entirely,
+    and an answer that declares the target missing ("ARR unavailable",
+    "no burn", "revenue: n/a") yields NO value even when magnitudes
+    remain (RA17-BO01-MONEY-02) — so a lone "costs $5M" never becomes
+    ARR. A single surviving candidate keeps the historical univocal
+    behaviour; with several, only a unique positive top scorer is taken.
+    Ties or all-unbound candidates leave the field UNSET rather
     than grabbing another field's figure ("costs $5M, ARR 20M" → 20M;
     "revenue 50k monthly, burn 30k monthly" → 30k; "20M, 30M" → unset).
     Decimals are part of the amount (20.5M → 20_500_000, 0.5M → 500_000).

@@ -107,3 +107,41 @@ def test_burn_amount_binds_to_the_field(text: str, expected_burn) -> None:
     profile = build_profile_from_answers({"financials": text})
 
     assert profile["financials"].get("burn_rate_monthly") == expected_burn
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # RA17-BO01-MONEY-02: a revenue/ARR figure alone is not a burn
+        # rate, and a declared-missing target stays unset.
+        "revenue $50k monthly",
+        "ARR $20M",
+        "revenue: $50k monthly",
+        "burn unavailable; revenue $50k monthly",
+        "no burn this year",
+        "burn: not stated",
+        "costs undisclosed",
+    ],
+)
+def test_burn_foreign_or_negated_single_candidate_stays_unset(text: str) -> None:
+    profile = build_profile_from_answers({"financials": text})
+
+    assert "burn_rate_monthly" not in profile["financials"]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_burn", "expected_ccy"),
+    [
+        ("revenue $50k monthly, costs $30k monthly", 30_000.0, "USD"),
+        ("burn: $50k monthly", 50_000.0, "USD"),
+        ("ARR $2M, burn $40k monthly", 40_000.0, "USD"),
+    ],
+)
+def test_burn_foreign_candidates_are_excluded_not_selected(
+    text: str, expected_burn: float, expected_ccy
+) -> None:
+    profile = build_profile_from_answers({"financials": text})
+    fin = profile["financials"]
+
+    assert fin["burn_rate_monthly"] == expected_burn
+    assert fin["burn_rate_currency"] == expected_ccy

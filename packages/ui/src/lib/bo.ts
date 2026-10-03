@@ -434,7 +434,7 @@ export interface BoRouteObservation {
   reasons: string[];
   recommendation: BoRouteChoice | null;
   actual_route: BoRouteChoice | null;
-  cost_estimate: { amount: string; currency: string; validUntil: string } | null;
+  cost_estimate: { amount: string; currency: string | null; validUntil: string } | null;
   measured: Record<string, number> | null;
   billed: Record<string, unknown> | null;
   detail: {
@@ -443,6 +443,8 @@ export interface BoRouteObservation {
       eligible: boolean;
       reason: string | null;
       estimated_cost: string | null;
+      estimated_cost_currency?: string | null;
+      estimated_cost_unit?: "per_call";
       score: number | null;
     }[];
   };

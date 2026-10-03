@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useState } from "react";
 
 import Link from "next/link";
+import { Money } from "@/lib/Money";
+import { moneyInputValue, retainerMoneyPatch } from "@/lib/money-format";
 
 import Icon from "@/components/Icon";
 import {
@@ -167,6 +169,8 @@ export default function ClientsPage() {
       status: (c?.status as string) ?? "active",
       renewal_date: (c?.renewal_date as string) ?? "",
       retainer: (c?.retainer as string) ?? "",
+      retainer_amount: moneyInputValue(c?.retainer_amount),
+      retainer_currency: (c?.retainer_currency as string) ?? "",
       primary_contact: (c?.primary_contact as string) ?? "",
       notes: (c?.notes as string) ?? "",
     });
@@ -181,6 +185,8 @@ export default function ClientsPage() {
       const patch = Object.fromEntries(
         Object.entries(metaForm).filter(([, v]) => v !== "" && v !== undefined),
       ) as ClientMetaPatch;
+      const stored = status.clients.find((client) => client.slug === editingSlug);
+      Object.assign(patch, retainerMoneyPatch(metaForm.retainer_amount ?? "", metaForm.retainer_currency ?? "", stored?.retainer_amount != null || stored?.retainer_currency != null));
       await updateClientMeta(editingSlug, patch);
       setToast({ message: "Engagement details saved.", kind: "success" });
       setEditingSlug(null);
@@ -845,6 +851,8 @@ export default function ClientsPage() {
                     </div>
                   </div>
                   <div className="mt-2">
+                    {c.retainer_amount != null && <p>Onorariu: <Money amount={c.retainer_amount} currency={c.retainer_currency} /></p>}
+                    {c.retainer && <p>Text onorariu: {c.retainer}{c.retainer_amount == null ? " — sumă și valută neconfigurate" : ""}</p>}
                     {editingSlug === c.slug ? (
                       <div className="rounded-lg border border-line bg-surface p-3 grid gap-2 sm:grid-cols-2">
                         <input
@@ -877,9 +885,15 @@ export default function ClientsPage() {
                         <input
                           value={metaForm.retainer ?? ""}
                           onChange={(e) => setMetaForm({ ...metaForm, retainer: e.target.value })}
-                          placeholder="Retainer (display only)"
+                          placeholder="Onorariu — text istoric păstrat"
                           className="rounded border border-line bg-surface-elevated px-2 py-1.5 text-xs text-fg placeholder:text-fg-muted focus:outline-none"
                         />
+                        <label>Onorariu — sumă (6.000,25)
+                          <input value={metaForm.retainer_amount ?? ""} onChange={(e) => setMetaForm({ ...metaForm, retainer_amount: e.target.value })} placeholder="6.000,25" />
+                        </label>
+                        <label>Valută onorariu
+                          <input value={metaForm.retainer_currency ?? ""} onChange={(e) => setMetaForm({ ...metaForm, retainer_currency: e.target.value })} placeholder="EUR" />
+                        </label>
                         <input
                           value={metaForm.primary_contact ?? ""}
                           onChange={(e) =>

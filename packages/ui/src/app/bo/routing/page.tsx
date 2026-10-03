@@ -1,4 +1,6 @@
 "use client";
+import { Money } from "@/lib/Money";
+import { moneyInputValue, parseMoneyInput } from "@/lib/money-format";
 
 // Modele și rutare (VAL3-01): catalog administrabil + observații produse de
 // routerul în mod observare. Pagina afișează explicit «observare» — decizia
@@ -86,8 +88,8 @@ function EntryEditor({
   const [regions, setRegions] = useState((entry?.regions ?? []).join(","));
   const [purpose, setPurpose] = useState(entry?.purpose ?? "");
   const [source, setSource] = useState(entry?.source ?? "admin");
-  const [costIn, setCostIn] = useState(entry?.cost.input_per_million ?? "");
-  const [costOut, setCostOut] = useState(entry?.cost.output_per_million ?? "");
+  const [costIn, setCostIn] = useState(moneyInputValue(entry?.cost.input_per_million));
+  const [costOut, setCostOut] = useState(moneyInputValue(entry?.cost.output_per_million));
   const [currency, setCurrency] = useState(entry?.cost.currency ?? "");
   const [validUntil, setValidUntil] = useState(entry?.cost.valid_until ?? "");
   const [score, setScore] = useState(
@@ -142,8 +144,8 @@ function EntryEditor({
         capabilities: csv(capabilities),
         regions: csv(regions),
         cost: {
-          input_per_million: costIn.trim() || null,
-          output_per_million: costOut.trim() || null,
+          input_per_million: parseMoneyInput(costIn),
+          output_per_million: parseMoneyInput(costOut),
           currency: currency.trim() || null,
           valid_until: validUntil.trim() || null,
         },
@@ -394,7 +396,7 @@ function ObservationDetail({ obs }: { obs: BoRouteObservation }) {
           <strong>Estimare cost</strong>
           <div>
             {obs.cost_estimate
-              ? `${obs.cost_estimate.amount} ${obs.cost_estimate.currency} (estimare, nu economie realizată)`
+              ? <><Money amount={obs.cost_estimate.amount} currency={obs.cost_estimate.currency} /> (estimare pe apel, nu economie realizată)</>
               : "necunoscut"}
           </div>
         </div>
@@ -402,7 +404,7 @@ function ObservationDetail({ obs }: { obs: BoRouteObservation }) {
           <strong>Cost facturat</strong>
           <div>
             {obs.billed
-              ? `${String(obs.billed.amount)} ${String(obs.billed.currency)}`
+              ? <Money amount={obs.billed.amount} currency={obs.billed.currency} />
               : "nedisponibil"}
           </div>
         </div>
@@ -430,7 +432,7 @@ function ObservationDetail({ obs }: { obs: BoRouteObservation }) {
                 <td>{c.eligible ? "da" : "nu"}</td>
                 <td>{c.reason ? reasonLabel(c.reason) : "—"}</td>
                 <td>{c.score != null ? c.score.toFixed(2) : "necunoscut"}</td>
-                <td>{c.estimated_cost ?? "necunoscut"}</td>
+                <td>{c.estimated_cost != null ? <><Money amount={c.estimated_cost} currency={c.estimated_cost_currency} /> — {c.estimated_cost_unit === "per_call" ? "pe apel" : "unitate neconfigurată"}</> : "necunoscut"}</td>
               </tr>
             ))}
           </tbody>

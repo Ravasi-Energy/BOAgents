@@ -1,4 +1,6 @@
 "use client";
+import { Money } from "@/lib/Money";
+import { moneyInputValue, parseMoneyNumber, moneyCurrency } from "@/lib/money-format";
 
 // The company-profile section editors, extracted from app/company-profile/page.tsx
 // so the onboarding draft-review screen can reuse the exact editing surface the
@@ -66,6 +68,7 @@ export function snapshotProfile(profile: CompanyProfile): Record<string, unknown
     founding_year: profile.founding_year,
     headcount: profile.headcount,
     annual_revenue_arr: profile.annual_revenue_arr,
+    annual_revenue_arr_currency: profile.annual_revenue_arr_currency ?? null,
     mission: profile.mission,
     vision: profile.vision,
     target_customer_profile: profile.target_customer.profile,
@@ -81,6 +84,7 @@ export function snapshotProfile(profile: CompanyProfile): Record<string, unknown
     departments: profile.org_structure.departments,
     leadership_team: profile.org_structure.leadership_team,
     burn_rate_monthly: profile.financials.burn_rate_monthly,
+    burn_rate_currency: profile.financials.burn_rate_currency ?? null,
     runway_months: profile.financials.runway_months,
   };
 }
@@ -265,13 +269,15 @@ function CompanyBasicsSection({ profile, saving, onSave, pending }: SectionCompo
   const [stage, setStage] = useState(profile.stage);
   const [foundingYear, setFoundingYear] = useState(profile.founding_year?.toString() ?? "");
   const [headcount, setHeadcount] = useState(profile.headcount?.toString() ?? "");
-  const [arr, setArr] = useState(profile.annual_revenue_arr?.toString() ?? "");
+  const [arr, setArr] = useState(moneyInputValue(profile.annual_revenue_arr));
+  const [arrCurrency, setArrCurrency] = useState(profile.annual_revenue_arr_currency ?? "");
 
   useEffect(() => {
     setName(profile.name); setIndustry(profile.industry); setStage(profile.stage);
     setFoundingYear(profile.founding_year?.toString() ?? "");
     setHeadcount(profile.headcount?.toString() ?? "");
-    setArr(profile.annual_revenue_arr?.toString() ?? "");
+    setArr(moneyInputValue(profile.annual_revenue_arr));
+    setArrCurrency(profile.annual_revenue_arr_currency ?? "");
   }, [profile]);
 
   const [editing, setEditing] = usePendingSection(pending, {
@@ -280,20 +286,25 @@ function CompanyBasicsSection({ profile, saving, onSave, pending }: SectionCompo
     stage: (v) => setStage(String(v)),
     founding_year: (v) => setFoundingYear(v == null ? "" : String(v)),
     headcount: (v) => setHeadcount(v == null ? "" : String(v)),
-    annual_revenue_arr: (v) => setArr(v == null ? "" : String(v)),
+    annual_revenue_arr: (v) => setArr(moneyInputValue(v)),
+    annual_revenue_arr_currency: (v) => setArrCurrency(v == null ? "" : String(v)),
   });
 
+  const [moneyError, setMoneyError] = useState("");
+  const saveMoney = async (payload: object) => {
+    try { const amount = parseMoneyNumber(arr); const currency = moneyCurrency(arrCurrency); setMoneyError(""); await onSave({ ...payload, annual_revenue_arr: amount, annual_revenue_arr_currency: currency }); }
+    catch (error) { setMoneyError(error instanceof Error ? error.message : "Sumă invalidă"); throw error; }
+  };
   return (
     <Section
       title="Company Basics"
       editing={editing}
       onEditingChange={setEditing}
       saving={saving}
-      onSave={() => onSave({
+      onSave={() => saveMoney({
         name, industry, stage,
         founding_year: foundingYear ? parseInt(foundingYear) : null,
         headcount: headcount ? parseInt(headcount) : null,
-        annual_revenue_arr: arr ? parseFloat(arr) : null,
       })}
       viewContent={
         <div className="grid grid-cols-2 gap-x-8 gap-y-4">
@@ -302,7 +313,7 @@ function CompanyBasicsSection({ profile, saving, onSave, pending }: SectionCompo
           <div><FieldLabel>Stage</FieldLabel><FieldValue>{profile.stage}</FieldValue></div>
           <div><FieldLabel>Founded</FieldLabel><FieldValue>{profile.founding_year?.toString()}</FieldValue></div>
           <div><FieldLabel>Headcount</FieldLabel><FieldValue>{profile.headcount?.toString()}</FieldValue></div>
-          <div><FieldLabel>ARR</FieldLabel><FieldValue>{profile.annual_revenue_arr != null ? `$${profile.annual_revenue_arr.toLocaleString()}` : undefined}</FieldValue></div>
+          <div><FieldLabel>ARR</FieldLabel><FieldValue>{profile.annual_revenue_arr != null ? <Money amount={profile.annual_revenue_arr} currency={profile.annual_revenue_arr_currency} /> : undefined}</FieldValue></div>
         </div>
       }
       editContent={
@@ -312,7 +323,7 @@ function CompanyBasicsSection({ profile, saving, onSave, pending }: SectionCompo
           <div><FieldLabel>Stage</FieldLabel><Input value={stage} onChange={setStage} placeholder="Series A" /></div>
           <div><FieldLabel>Founded</FieldLabel><Input value={foundingYear} onChange={setFoundingYear} type="number" placeholder="2022" /></div>
           <div><FieldLabel>Headcount</FieldLabel><Input value={headcount} onChange={setHeadcount} type="number" placeholder="40" /></div>
-          <div><FieldLabel>ARR ($)</FieldLabel><Input value={arr} onChange={setArr} type="number" placeholder="500000" /></div>
+          <div><FieldLabel>ARR (6.000,25)</FieldLabel><Input value={arr} onChange={setArr} placeholder="6.000,25" /><label>Valuta ARR (gol = necunoscută)<Input value={arrCurrency} onChange={setArrCurrency} placeholder="EUR" /></label>{moneyError && <p role="alert">{moneyError}</p>}</div>
         </div>
       }
     />
@@ -574,40 +585,49 @@ function OrgSection({ profile, saving, onSave, pending }: SectionComponentProps)
 }
 
 function FinancialsSection({ profile, saving, onSave, pending }: SectionComponentProps) {
-  const [burn, setBurn] = useState(profile.financials.burn_rate_monthly?.toString() ?? "");
+  const [burn, setBurn] = useState(moneyInputValue(profile.financials.burn_rate_monthly));
+  const [burnCurrency, setBurnCurrency] = useState(profile.financials.burn_rate_currency ?? "");
   const [runway, setRunway] = useState(profile.financials.runway_months?.toString() ?? "");
   useEffect(() => {
-    setBurn(profile.financials.burn_rate_monthly?.toString() ?? "");
+    setBurn(moneyInputValue(profile.financials.burn_rate_monthly));
+    setBurnCurrency(profile.financials.burn_rate_currency ?? "");
     setRunway(profile.financials.runway_months?.toString() ?? "");
   }, [profile]);
 
   const [editing, setEditing] = usePendingSection(pending, {
-    burn_rate_monthly: (v) => setBurn(v == null ? "" : String(v)),
+    burn_rate_monthly: (v) => setBurn(moneyInputValue(v)),
+    burn_rate_currency: (v) => setBurnCurrency(v == null ? "" : String(v)),
     runway_months: (v) => setRunway(v == null ? "" : String(v)),
   });
 
+  const [moneyError, setMoneyError] = useState("");
+  const saveMoney = async (payload: object) => {
+    try { const amount = parseMoneyNumber(burn); setMoneyError(""); await onSave({ ...payload, financials: { ...profile.financials, runway_months: runway ? parseFloat(runway) : null, burn_rate_monthly: amount, burn_rate_currency: moneyCurrency(burnCurrency) } }); }
+    catch (error) { setMoneyError(error instanceof Error ? error.message : "Sumă invalidă"); throw error; }
+  };
   return (
     <Section
       title="Financials"
       editing={editing}
       onEditingChange={setEditing}
       saving={saving}
-      onSave={() => onSave({
+      onSave={() => saveMoney({
         financials: {
-          burn_rate_monthly: burn ? parseFloat(burn) : null,
+          burn_rate_monthly: profile.financials.burn_rate_monthly,
+    burn_rate_currency: profile.financials.burn_rate_currency ?? null,
           runway_months: runway ? parseFloat(runway) : null,
           key_metrics: profile.financials.key_metrics,
         }
       })}
       viewContent={
         <div className="grid grid-cols-2 gap-x-8 gap-y-4">
-          <div><FieldLabel>Monthly Burn</FieldLabel><FieldValue>{profile.financials.burn_rate_monthly != null ? `$${profile.financials.burn_rate_monthly.toLocaleString()}/mo` : undefined}</FieldValue></div>
+          <div><FieldLabel>Monthly Burn</FieldLabel><FieldValue>{profile.financials.burn_rate_monthly != null ? <><Money amount={profile.financials.burn_rate_monthly} currency={profile.financials.burn_rate_currency} /> / lună</> : undefined}</FieldValue></div>
           <div><FieldLabel>Runway</FieldLabel><FieldValue>{profile.financials.runway_months != null ? `${profile.financials.runway_months} months` : undefined}</FieldValue></div>
         </div>
       }
       editContent={
         <div className="grid grid-cols-2 gap-3">
-          <div><FieldLabel>Monthly Burn ($)</FieldLabel><Input value={burn} onChange={setBurn} type="number" placeholder="50000" /></div>
+          <div><FieldLabel>Cheltuială lunară (6.000,25)</FieldLabel><Input value={burn} onChange={setBurn} placeholder="6.000,25" /><label>Valuta cheltuielii (gol = necunoscută)<Input value={burnCurrency} onChange={setBurnCurrency} placeholder="EUR" /></label>{moneyError && <p role="alert">{moneyError}</p>}</div>
           <div><FieldLabel>Runway (months)</FieldLabel><Input value={runway} onChange={setRunway} type="number" placeholder="18" /></div>
         </div>
       }

@@ -1,4 +1,5 @@
 "use client";
+import { MoneySettings } from "@/lib/Money";
 
 // Setări BOAgents — BO-SET-001. Toate valorile vin din /bo/settings; fiecare
 // salvare poartă expected_version (CAS) și un conflict 409 cere reîncărcare,
@@ -263,6 +264,7 @@ export default function BoSettingsPage() {
 
   return (
     <div className="bo-scope" style={{ marginTop: 20 }}>
+      <MoneySettings />
       <div className="bo-row" style={{ marginBottom: 16 }}>
         <Pill kind="info" icon="shield-check">
           tenant: {data.tenant}

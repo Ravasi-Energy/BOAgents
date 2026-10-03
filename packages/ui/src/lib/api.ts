@@ -327,6 +327,8 @@ export interface CompanyProfile {
   founding_year: number | null;
   headcount: number | null;
   annual_revenue_arr: number | null;
+  arr_currency?: string | null;
+  annual_revenue_arr_currency?: string | null;
   mission: string;
   vision: string;
   target_customer: { profile: string; pain_points: string[] };
@@ -334,7 +336,7 @@ export interface CompanyProfile {
   org_structure: { departments: string[]; leadership_team: string[] };
   strategic_priorities: { current_year: string[]; north_star_metric: string };
   culture: { values: string[]; operating_principles: string[] };
-  financials: { burn_rate_monthly: number | null; runway_months: number | null; key_metrics: Record<string, unknown> };
+  financials: { burn_rate_monthly: number | null; burn_rate_currency?: string | null; runway_months: number | null; key_metrics: Record<string, unknown> };
   /** External dependencies the research watch policy treats as company data. */
   vendors: string[];
   tickers: string[];
@@ -1889,6 +1891,7 @@ export interface FixtureSummary {
   industry: string;
   stage: string;
   arr: number | null;
+  arr_currency?: string | null;
   headcount: number | null;
   founding_year: number | null;
   mission: string;
@@ -2000,6 +2003,7 @@ export interface GeneratedFixtureBundle {
     stage?: string;
     headcount?: number | null;
     annual_revenue_arr?: number | null;
+    annual_revenue_arr_currency?: string | null;
     mission?: string;
     [key: string]: unknown;
   };
@@ -2873,6 +2877,8 @@ export interface ClientSlotSummary {
   engagement_start?: string | null;
   renewal_date?: string | null;
   retainer?: string | null;
+  retainer_amount?: string | null;
+  retainer_currency?: string | null;
   hours_per_week?: number | null;
   primary_contact?: string | null;
   notes?: string | null;
@@ -3043,6 +3049,8 @@ export interface ClientMetaPatch {
   engagement_start?: string;
   renewal_date?: string;
   retainer?: string;
+  retainer_amount?: string | null;
+  retainer_currency?: string | null;
   hours_per_week?: number;
   primary_contact?: string;
   notes?: string;

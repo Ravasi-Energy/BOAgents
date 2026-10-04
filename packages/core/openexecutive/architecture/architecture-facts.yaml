@@ -2894,27 +2894,37 @@ auth:
         that is not in ALLOWED_EMAILS and whose roster membership is
         currently unreadable; a definite miss (both lists readable,
         neither matched) still revokes.
-    Both callbacks share one helper (`checkEmailAllowed`). The allowlist
-    is the UNION of two additive sources — neither overrides the other:
-      1. ALLOWED_EMAILS: comma-separated env var on the UI, parsed once
-         at module scope. Checked FIRST and a hit short-circuits, so the
-         roster is never fetched for a configured operator: they sign in
-         with the backend down, at no fetch latency. Revocable only by
-         editing the env and restarting.
-      2. Roster: GET /auth/allowed-emails returns every non-archived
-         Person with a non-null email. Consulted only on an env miss,
-         and purely additive.
-    Roster fetch is cached for 5 minutes per Next.js server instance
-    (ROSTER_TTL_MS in auth.ts) and concurrent misses coalesce onto one
-    in-flight request — `authorized` runs per gated request, so without
-    that a page load would fan out into N backend calls. A failed fetch
-    returns null ("unknown") and is deliberately not cached, so the next
-    caller retries instead of being pinned out for a TTL; a stale success
-    is not served past its TTL.
-    The old rule made the roster authoritative as soon as it held one
-    email, which was issue #132: anything that wrote a Person row —
-    including a fixture load, which wipes `people` and inserts its own
-    addresses — silently evicted the operator from their own instance.
+    Both callbacks share one helper (`checkEmailAllowed`). Admission is
+    governed by the server's administered state, not by a list union
+    (BUGHUNT-02 R4 contract — supersedes the issue-#132 union model):
+      1. Roster: GET /auth/allowed-emails returns a single typed shape
+         `{administered: bool, emails: [{email, person_id}]}`. `emails`
+         lists every non-archived Person with a non-null email.
+         `administered` is a durable server fact (`roster_meta` row in
+         the people DB) set at the first administrative roster write;
+         it survives restarts and archiving everyone — an EMPTY
+         administered roster is authoritative and revokes all.
+      2. ALLOWED_EMAILS: comma-separated env var on the UI — a bootstrap
+         source ONLY while the server reports `administered: false`
+         (fresh install, never administered). Once administered, env
+         can no longer grant or retain access; a roster revocation is
+         final for the session.
+    A failed fetch is NOT non-administered: "unknown" must fail closed —
+    a fetch error never turns a revocation into a permission. Explicit
+    recovery: POST /auth/roster/recover-env (service `x-api-key` or
+    delegated admin; viewer refused) clears the flag so env bootstrap is
+    permitted again; every call writes an `auth_roster_recovery` audit
+    row.
+    Roster fetch is revalidated on demand (revocation must not wait out a
+    TTL) and concurrent misses coalesce onto one in-flight request —
+    `authorized` runs per gated request, so without that a page load
+    would fan out into N backend calls. A failed fetch returns null
+    ("unknown") and is deliberately not cached, so the next caller
+    retries instead of being pinned out for a TTL.
+    Historical note: the #132 union rule (env always wins) let a
+    configured-but-removed operator keep access forever; the R4 contract
+    replaces it — env is bootstrap-only and the administered roster is
+    the authority.
     Decision helpers are pure and live in packages/ui/src/lib/allowlist.ts
     (parseAllowedEmails / decideAllowed / resolveAllowed /
     createRosterLoader / describeDenial), unit-tested by

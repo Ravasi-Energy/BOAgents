@@ -118,6 +118,11 @@ def initialize_db(db_path: Path | None = None) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_pa_person
                 ON person_availability(person_id);
+
+            CREATE TABLE IF NOT EXISTS roster_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
         """)
         # Additive migrations: discord_user_id added after initial schema;
         # version added for CAS on PATCH (BUGHUNT-02 P0-7).
@@ -213,6 +218,63 @@ def _row_to_person(row: sqlite3.Row, conn: sqlite3.Connection) -> Person:
 
 
 # --------------------------------------------------------------------------- #
+# Roster administration flag (BUGHUNT-02 R4 — `administered` auth contract)
+# --------------------------------------------------------------------------- #
+
+_ROSTER_ADMINISTERED_KEY = "administered"
+
+
+def _mark_roster_administered(conn: sqlite3.Connection) -> None:
+    """Record that the roster has been administered at least once.
+
+    Write-once inside the mutating transaction: durable across restarts and
+    independent of the live roster contents — archiving every person leaves
+    it set, which is exactly what keeps an empty-but-administered roster
+    authoritative (CONTROL R4).
+    """
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS roster_meta "
+        "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO roster_meta (key, value) VALUES (?, '1')",
+        (_ROSTER_ADMINISTERED_KEY,),
+    )
+
+
+def roster_administered(db_path: Path | None = None) -> bool:
+    """True once the roster has seen at least one administrative write."""
+    path = _resolve_db_path(db_path)
+    if not path.exists():
+        return False
+    with _get_conn(db_path) as conn:
+        if not _table_exists(conn, "roster_meta"):
+            return False
+        row = conn.execute(
+            "SELECT value FROM roster_meta WHERE key = ?",
+            (_ROSTER_ADMINISTERED_KEY,),
+        ).fetchone()
+        return bool(row and row["value"] == "1")
+
+
+def reset_roster_administered(db_path: Path | None = None) -> bool:
+    """Explicitly clear the administered flag (audited recovery path only).
+
+    Returns True when a flag was actually cleared. After reset the server
+    reports ``administered: false`` again, re-permitting the UI's
+    ``ALLOWED_EMAILS`` bootstrap — this is the only way back and callers
+    must gate + audit it (POST /auth/roster/recover-env).
+    """
+    with _get_conn(db_path) as conn:
+        if not _table_exists(conn, "roster_meta"):
+            return False
+        cursor = conn.execute(
+            "DELETE FROM roster_meta WHERE key = ?", (_ROSTER_ADMINISTERED_KEY,)
+        )
+        return cursor.rowcount > 0
+
+
+# --------------------------------------------------------------------------- #
 # People CRUD
 # --------------------------------------------------------------------------- #
 
@@ -239,6 +301,7 @@ def upsert_person(
     leave_str = on_leave_until.isoformat() if on_leave_until else None
 
     with _get_conn(db_path) as conn:
+        _mark_roster_administered(conn)
         if person_id is not None and person_id > 0:
             conn.execute(
                 """
@@ -482,6 +545,8 @@ def archive_person(person_id: int, db_path: Path | None = None) -> bool:
             "UPDATE people SET archived = 1, updated_at = ? WHERE id = ? AND archived = 0",
             (_now(), person_id),
         )
+        if cursor.rowcount > 0:
+            _mark_roster_administered(conn)
         return cursor.rowcount > 0
 
 
@@ -615,4 +680,6 @@ def update_person(
         cursor = conn.execute(
             f"UPDATE people SET {set_clause} WHERE id = ?", values
         )
+        if cursor.rowcount > 0:
+            _mark_roster_administered(conn)
         return cursor.rowcount > 0

@@ -81,6 +81,11 @@ _CAP_MIN_ROLE: dict[str, Role] = {
     "documents:write": "admin",
     "onboarding:read": "viewer",
     "onboarding:write": "admin",
+    # Roster recovery resets the durable `administered` flag, re-permitting
+    # the UI's ALLOWED_EMAILS bootstrap. It exists for lockout — the actor
+    # is the operator holding the shared secret (is_service → operator) or a
+    # delegated admin; a viewer can never reset roster authority (R4).
+    "auth:recover": "operator",
 }
 
 

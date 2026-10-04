@@ -22,9 +22,10 @@ SettingType = Literal["text", "enum", "integer", "timezone", "boolean"]
 # How a PUT's value combines with the stored one (BUGHUNT-02 P0-1/2):
 #   replace    — the payload IS the new value (default, unchanged)
 #   csv_union  — payload items union-add onto the stored CSV; "" is a no-op
-#   json_merge — payload is three-way merged into the stored JSON doc using
-#                the value at expected_version−1 as the writer's base, so
-#                untouched fields survive a stale-but-current-version write
+#   json_merge — payload sparse-merges into the stored JSON doc: fields the
+#                writer sent are applied, omitted fields preserve, keyed
+#                collections upsert, "" is refused, removal only via
+#                explicit *_remove ops (CONTROL R2 — no inferred base)
 MergeStrategy = Literal["replace", "csv_union", "json_merge"]
 ApplyMode = Literal["IMMEDIATE", "NEW_RUN", "RESTART", "MIGRATION"]
 Scope = Literal["tenant"]

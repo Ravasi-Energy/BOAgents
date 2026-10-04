@@ -84,7 +84,8 @@ def test_invalid_definitions_rejected(db: Path, mutate) -> None:  # noqa: ANN001
 
 def test_publish_activates_and_keeps_immutable(db: Path) -> None:
     d = _created(db)
-    published = service.publish(TENANT, ACTOR, d["id"])
+    published = service.publish(TENANT, ACTOR, d["id"],
+                    expected_version=d["draft_version"])
     assert published["status"] == "active"
     assert published["active_version_no"] == 1
     # A fresh draft (v2) is opened as a copy — publishing never leaves the
@@ -95,7 +96,8 @@ def test_publish_activates_and_keeps_immutable(db: Path) -> None:
 
 def test_draft_edit_does_not_touch_active(db: Path) -> None:
     d = _created(db)
-    service.publish(TENANT, ACTOR, d["id"])
+    service.publish(TENANT, ACTOR, d["id"],
+                    expected_version=d["draft_version"])
     v1_before = store.get_version(TENANT, d["id"], version_no=1)
 
     updated = service.update_draft(TENANT, ACTOR, d["id"], {
@@ -110,9 +112,8 @@ def test_draft_edit_does_not_touch_active(db: Path) -> None:
     v1_after = store.get_version(TENANT, d["id"], version_no=1)
     assert v1_after["content"] == v1_before["content"]
     assert v1_after["hash"] == v1_before["hash"]
-    # Under three-way merge (BUGHUNT-02), a steps payload that shares no
-    # base id is an addition — the published step stays and the new one
-    # is appended.
+    # Under upsert-by-id (BUGHUNT-02 R2), a steps payload adds/edits by id —
+    # the published step stays and the new one is appended.
     steps = store.get_version(TENANT, d["id"], status="draft")["content"]["steps"]
     assert "only" in {s["id"] for s in steps}
 
@@ -130,7 +131,8 @@ def test_draft_update_cas_conflict(db: Path) -> None:
 
 def _publish_heartbeat_bot(db: Path) -> dict:
     d = _created(db)
-    return service.publish(TENANT, ACTOR, d["id"])
+    return service.publish(TENANT, ACTOR, d["id"],
+                    expected_version=d["draft_version"])
 
 
 def test_simulate_produces_finding_and_not_executed_receipts(db: Path) -> None:
@@ -190,7 +192,8 @@ def test_check_step_false_stops_pipeline(db: Path) -> None:
         {"id": "after", "type": "note", "message": "nu se ajunge aici"},
     ]
     d = service.create(TENANT, ACTOR, payload)
-    service.publish(TENANT, ACTOR, d["id"])
+    service.publish(TENANT, ACTOR, d["id"],
+                    expected_version=d["draft_version"])
     run = service.simulate(TENANT, ACTOR, d["id"], input_context={"n": 5})
     statuses = {s["step_id"]: s["status"] for s in run["timeline"]}
     assert statuses["gate"] == "SKIPPED"
@@ -243,7 +246,8 @@ def test_non_bot_kind_refused(db: Path) -> None:
     payload = _payload()
     payload["kind"] = "AI"
     d = service.create(TENANT, ACTOR, payload)
-    service.publish(TENANT, ACTOR, d["id"])
+    service.publish(TENANT, ACTOR, d["id"],
+                    expected_version=d["draft_version"])
     with pytest.raises(service.SimulationRefused):
         service.simulate(TENANT, ACTOR, d["id"], input_context={})
 

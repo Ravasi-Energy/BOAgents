@@ -3,6 +3,18 @@
 Aserțiunile sunt contractul sigur (3+1 → 4, lista goală rămâne, câmpurile
 diferite rămân ambele). Pe codul măsurat ele pică acolo unde serverul
 acceptă un document incomplet la versiunea care se potrivește.
+
+CONTROL R2/R3 — diferența de contract față de probele originale ale
+coordonatorului: serverul NU mai deduce baza scriitorului din
+``expected_version − 1`` și NU mai șterge elemente prin omisiune. Contractul
+aprobat este CAS strict + delta explicită: ``expected_version`` este
+versiunea efectiv citită de scriitor; un scriitor stale primește 409 înainte
+de orice efect și își reîncarcă/rebază schimbarea; colecțiile fac upsert,
+ștergerea doar prin ops ``*_remove`` explicite; ``[]``/câmp omis = păstrat;
+payload-ul gol pe documente = refuz explicit. Scrierile „stale dar la
+versiune curentă" din probele originale sunt rescrise ca fluxul onest
+(scrie la baza reală → 409 → rebase → retrimite delta) — aserțiunea de
+ne-pierdere rămâne identică.
 """
 from __future__ import annotations
 
@@ -204,18 +216,21 @@ def test_pd1_trust_store_three_plus_one(bo_db: Path) -> None:
 
 
 def test_pd3_trust_store_empty_string(bo_db: Path) -> None:
+    # CONTROL R2: "" este payload ambiguu (vechiul client „wipe") — refuz
+    # explicit, documentul stocat rămâne intact.
     settings_store.set_value(
         TENANT, "bo.packages.trust_store_json", _trust(["pub-1", "pub-2", "pub-3"]),
         expected_version=0, actor="admin@probe.local", db_path=bo_db,
     )
-    settings_store.set_value(
-        TENANT, "bo.packages.trust_store_json", "",
-        expected_version=1, actor="b@probe.local", db_path=bo_db,
-    )
+    with pytest.raises(settings_store.SettingValidationError):
+        settings_store.set_value(
+            TENANT, "bo.packages.trust_store_json", "",
+            expected_version=1, actor="b@probe.local", db_path=bo_db,
+        )
     after = _pub_count(settings_store.get_effective_value(
         TENANT, "bo.packages.trust_store_json", db_path=bo_db,
     ))
-    _note("PD-3 trust_store sir gol", 3, after, 3)
+    _note("PD-3 trust_store sir gol refuzat", 3, after, 3)
 
 
 def test_pd4_trust_store_different_fields(bo_db: Path) -> None:
@@ -230,10 +245,19 @@ def test_pd4_trust_store_different_fields(bo_db: Path) -> None:
         TENANT, "bo.packages.trust_store_json", json.dumps(changed),
         expected_version=1, actor="a@probe.local", db_path=bo_db,
     )
+    # B a construit documentul pe baza v1 — sub contractul CAS strict o
+    # declară onest și primește 409 înainte de orice efect (CONTROL R2);
+    # după reload/rebase își aplică doar delta proprie la v2.
     stale = json.loads(_trust(["pub-1"]))
     stale["version"] = "trust-B"
+    with pytest.raises(settings_store.ConfigConflictError):
+        settings_store.set_value(
+            TENANT, "bo.packages.trust_store_json", json.dumps(stale),
+            expected_version=1, actor="b@probe.local", db_path=bo_db,
+        )
     settings_store.set_value(
-        TENANT, "bo.packages.trust_store_json", json.dumps(stale),
+        TENANT, "bo.packages.trust_store_json",
+        json.dumps({"version": "trust-B"}),
         expected_version=2, actor="b@probe.local", db_path=bo_db,
     )
     saved = json.loads(settings_store.get_effective_value(
@@ -335,12 +359,20 @@ def test_pd4_bot_different_fields(bo_db: Path) -> None:
         "expected_version": created["draft_version"],
         "content": edited,
     }, db_path=bo_db)
+    # B deține baza v1 (draftul creat) — o declară onest; CAS strict → 409
+    # înainte de orice efect (CONTROL R2), apoi își retrimește doar delta
+    # proprie (trigger.cron) pe versiunea reîncărcată v2.
     stale = _content([
         _step("s1", "unu"), _step("s2", "doi"), _step("s3", "trei"),
     ], cron="0 6 * * *")
+    with pytest.raises(bot_store.ConflictError):
+        bot_service.update_draft(TENANT, "b@probe.local", created["id"], {
+            "expected_version": created["draft_version"],
+            "content": stale,
+        }, db_path=bo_db)
     bot_service.update_draft(TENANT, "b@probe.local", created["id"], {
         "expected_version": saved["draft_version"],
-        "content": stale,
+        "content": {"trigger": {"type": "schedule", "cron": "0 6 * * *"}},
     }, db_path=bo_db)
     content = bot_store.get_version(TENANT, created["id"], status="draft")["content"]
     message = content["steps"][0]["message"]
@@ -364,13 +396,21 @@ def test_pd6_bot_delete_one_keeps_sibling_added_by_other(bo_db: Path) -> None:
             _step("s3", "trei"), _step("s4", "patru"),
         ]),
     }, db_path=bo_db)
+    # CONTROL R2: ștergerea prin omisiune este respinsă — omis lui s2 îl
+    # păstrează; doar op-ul explicit steps_remove șterge pe id stabil.
     bot_service.update_draft(TENANT, "b@probe.local", created["id"], {
         "expected_version": added["draft_version"],
         "content": _content([_step("s1", "unu"), _step("s3", "trei")]),
     }, db_path=bo_db)
     ids = [s["id"] for s in _draft_steps(TENANT, created["id"])]
-    print(f"PD-6 bot sterge s2 pastrand s4 ids={ids}")
-    assert "s2" not in ids
+    print(f"PD-6 bot omisie s2 pastrat ids={ids}")
+    assert ids == ["s1", "s2", "s3", "s4"]
+    bot_service.update_draft(TENANT, "b@probe.local", created["id"], {
+        "expected_version": added["draft_version"] + 1,
+        "steps_remove": ["s2"],
+    }, db_path=bo_db)
+    ids = [s["id"] for s in _draft_steps(TENANT, created["id"])]
+    print(f"PD-6 bot steps_remove s2 pastrand s4 ids={ids}")
     assert ids == ["s1", "s3", "s4"]
 
 
@@ -458,9 +498,18 @@ def test_pd4_catalog_stale_purpose(bo_db: Path) -> None:
         TENANT, entry.entry_id, first,
         expected_version=entry.version, actor="a@probe.local", db_path=bo_db,
     )
+    # B a construit corpul pe baza v1 — o declară onest; CAS strict → 409
+    # înainte de orice efect (CONTROL R2), apoi își retrimește doar delta
+    # proprie (regions+md) pe versiunea reîncărcată.
     stale = _catalog_body(purpose="scop-initial", regions=["eu", "us", "ro", "md"])
+    with pytest.raises(routing_store.ConflictError):
+        routing_store.update_entry(
+            TENANT, entry.entry_id, stale,
+            expected_version=entry.version, actor="b@probe.local",
+            db_path=bo_db,
+        )
     routing_store.update_entry(
-        TENANT, entry.entry_id, stale,
+        TENANT, entry.entry_id, {"regions": ["md"]},
         expected_version=updated.version, actor="b@probe.local", db_path=bo_db,
     )
     saved = routing_store.get_entry(TENANT, entry.entry_id, db_path=bo_db)

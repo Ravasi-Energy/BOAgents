@@ -53,10 +53,10 @@ def initialize_db(db_path: Path | None = None) -> None:
             )
             """
         )
-        # Per-version history — the three-way merge (json_merge keys) needs
-        # the value at expected_version−1 as the writer's base to tell
-        # "field the writer edited" apart from "field they never saw"
-        # (BUGHUNT-02 P0-1/2). Append-only; one row per accepted write.
+        # Per-version history — append-only audit/snapshot trail (one row per
+        # accepted write). It is NEVER read to infer a writer's base: the
+        # contract requires the client to declare the version it actually
+        # read (expected_version) and the CAS gate enforces it (CONTROL R2).
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS bo_settings_history (
@@ -187,38 +187,80 @@ def config_version(tenant: str, db_path: Path | None = None) -> int:
     return int(row["v"])
 
 
-_MISSING = object()
+_TRUST_KEYED = {"publishers": "publisherId", "keys": "keyId"}
+_TRUST_REMOVE = {"publishers_remove": "publishers", "keys_remove": "keys"}
+_TRUST_ID = {"publishers": "publisherId", "keys": "keyId"}
 
 
-def _merge_doc(base: Any, current: Any, incoming: Any) -> Any:
-    """Three-way merge ``incoming`` onto ``current`` using ``base`` as the
-    version the writer's document was built from (BUGHUNT-02 P0-2).
+def _merge_trust_doc(current: dict, incoming: dict) -> dict:
+    """Sparse delta merge of a trust-store document (BUGHUNT-02 P0-2, R2).
 
-    For every key in ``incoming``: when it equals ``base`` the writer did not
-    touch it → the current value survives, even if another writer changed it
-    concurrently. When it differs, it is a deliberate writer edit: dicts
-    merge recursively, lists union-add (removal is never implicit — an
-    explicit field is required by contract), scalars take the writer's value.
-    Keys absent from ``incoming`` are untouched and keep ``current``.
+    Every key present in ``incoming`` is a field the writer deliberately
+    touched — applied as: dicts merge recursively (omitted sub-fields keep
+    their current value), the keyed ``publishers``/``keys`` collections
+    upsert per ``publisherId``/``keyId``, other lists union-add, scalars
+    take the writer's value (an intentional revert to an older value is a
+    legitimate write). ``*_remove`` marker keys are ops, not content, and
+    are applied by the caller — they never persist into the document.
+    Keys absent from ``incoming`` always preserve the current value: an
+    omitted field or collection is never deleted, and ``[]`` never clears.
     """
-    if isinstance(incoming, dict) and isinstance(current, dict):
-        base_map = base if isinstance(base, dict) else {}
-        merged = dict(current)
-        for k, v in incoming.items():
-            bv = base_map.get(k, _MISSING)
-            if bv is not _MISSING and v == bv:
-                continue
-            cv = merged.get(k, _MISSING)
-            if isinstance(v, dict) and isinstance(cv, dict):
-                merged[k] = _merge_doc(bv if bv is not _MISSING else {}, cv, v)
-            elif isinstance(v, list) and isinstance(cv, list):
-                merged[k] = _union_list(cv, v)
-            else:
-                merged[k] = v
-        return merged
-    if isinstance(incoming, list) and isinstance(current, list):
-        return _union_list(current, incoming)
-    return incoming
+    merged = dict(current)
+    for k, v in incoming.items():
+        if k in _TRUST_REMOVE:
+            continue
+        cv = merged.get(k)
+        if k in _TRUST_KEYED and isinstance(v, list) and isinstance(cv, list):
+            merged[k] = _merge_keyed(cv, v, _TRUST_KEYED[k])
+        elif isinstance(v, dict) and isinstance(cv, dict):
+            merged[k] = _merge_trust_doc(cv, v)
+        elif isinstance(v, list) and isinstance(cv, list):
+            merged[k] = _union_list(cv, v)
+        elif v != [] and v != {}:
+            merged[k] = v
+    return merged
+
+
+def _merge_keyed(current: list, incoming: list, id_field: str) -> list:
+    """Upsert ``incoming`` entries into ``current`` keyed by ``id_field`` —
+    an existing id field-merges (present fields win), a new id appends.
+    Removal is never implicit; only ``*_remove`` ops delete entries."""
+    out = [dict(e) if isinstance(e, dict) else e for e in current]
+    idx = {e.get(id_field): i for i, e in enumerate(out) if isinstance(e, dict)}
+    for entry in incoming:
+        if not isinstance(entry, dict):
+            if entry not in out:
+                out.append(entry)
+            continue
+        eid = entry.get(id_field)
+        if eid in idx:
+            out[idx[eid]] = {**out[idx[eid]], **entry}
+        else:
+            idx[eid] = len(out)
+            out.append(dict(entry))
+    return out
+
+
+def _apply_remove(merged: dict, incoming: dict) -> dict:
+    """Apply the explicit ``*_remove`` ops: delete the named ids from the
+    keyed collection. Ids already absent are a no-op (idempotent), never
+    an error — the requested end-state is already reached."""
+    out = dict(merged)
+    for op, coll in _TRUST_REMOVE.items():
+        remove_ids = incoming.get(op)
+        if not isinstance(remove_ids, list) or not remove_ids:
+            continue
+        entries = out.get(coll)
+        if not isinstance(entries, list):
+            continue
+        id_field = _TRUST_ID[coll]
+        drop = set(remove_ids)
+        out[coll] = [
+            e for e in entries
+            if (e.get(id_field) not in drop
+                if isinstance(e, dict) else e not in drop)
+        ]
+    return out
 
 
 def _union_list(current: list, incoming: list) -> list:
@@ -247,22 +289,30 @@ def set_value(
     *,
     expected_version: int,
     actor: str,
+    remove: list[str] | None = None,
     db_path: Path | None = None,
 ) -> dict[str, Any]:
     """Validate + CAS-write one setting. Returns the new effective record.
 
     Keys whose spec declares ``merge != "replace"`` treat ``value`` as a
-    DELTA against the stored document rather than the whole document
-    (BUGHUNT-02 P0-1/2): a CSV union-adds items, a JSON doc three-way
-    merges fields against the value at ``expected_version−1`` — so a stale
-    client writing a full old snapshot at the right version cannot silently
-    drop a concurrent field edit. The CAS check itself is unchanged.
+    DELTA (BUGHUNT-02 P0-1/2, contract CONTROL R2): a CSV union-adds items,
+    a JSON doc sparse-merges the fields the writer sent — omitted fields
+    preserve, ``[]`` never clears, removal only via explicit ``*_remove``
+    ops. ``expected_version`` is the version the writer actually read; the
+    strict CAS refuses any stale write with ``ConfigConflictError`` (409)
+    before any effect — the client reloads and rebases explicitly. There is
+    no base inference anywhere.
     """
     spec = REGISTRY.get(key)
     if spec is None:
         raise UnknownSettingError(key)
-    validated = spec.validate(value)  # raises SettingValidationError
-    validated = validate_tenant_scope(tenant, key, validated)
+    if spec.merge == "json_merge":
+        # The payload is a sparse delta, not a full document — full-doc
+        # validation runs on the MERGED result below, never on the delta.
+        validated = value
+    else:
+        validated = spec.validate(value)  # raises SettingValidationError
+        validated = validate_tenant_scope(tenant, key, validated)
 
     with get_conn(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -283,33 +333,47 @@ def set_value(
             merged = _csv_union(
                 current_raw if isinstance(current_raw, str) else "", validated
             )
+            if remove:
+                drop = {p.strip() for p in remove}
+                merged = ",".join(
+                    p for p in merged.split(",") if p and p not in drop
+                )
             merged = spec.validate(merged) if merged != validated else merged
+        elif remove:
+            raise SettingValidationError(
+                f"{key}: op-ul `remove` este permis doar pe chei csv_union"
+            )
         elif spec.merge == "json_merge":
             incoming_text = validated if isinstance(validated, str) else ""
             if not incoming_text.strip():
-                # Empty payload is a no-op, never a wipe (P0-2: "" must not
-                # erase a populated trust store).
-                merged = current_raw
-            else:
+                # An empty payload is ambiguous (legacy wipe-shaped write) —
+                # refuse it explicitly instead of guessing (CONTROL R2). The
+                # stored document is left untouched.
+                raise SettingValidationError(
+                    f"{key}: document JSON gol refuzat — trimite delta explicit "
+                    "(câmpuri prezente = atinse) sau ops *_remove"
+                )
+            try:
                 incoming_doc = json.loads(incoming_text)
-                base_row = conn.execute(
-                    "SELECT value_json FROM bo_settings_history "
-                    "WHERE tenant = ? AND key = ? AND version = ?",
-                    (tenant, key, expected_version - 1),
-                ).fetchone()
-                base_raw: Any = (
-                    None if base_row is None else json.loads(base_row["value_json"])
+            except json.JSONDecodeError as exc:
+                raise SettingValidationError(
+                    f"{key}: JSON invalid ({exc.msg})"
+                ) from exc
+            if not isinstance(incoming_doc, dict):
+                raise SettingValidationError(
+                    f"{key}: document JSON așteptat (obiect), nu {type(incoming_doc).__name__}"
                 )
-                # The stored value is itself a JSON *string* holding the doc,
-                # so it needs a second parse to become a dict.
-                base_doc: Any = (
-                    json.loads(base_raw)
-                    if isinstance(base_raw, str) and base_raw.strip()
-                    else {}
-                )
-                current_doc = current_raw if isinstance(current_raw, str) and current_raw.strip() else "{}"
-                merged_doc = _merge_doc(base_doc, json.loads(current_doc), incoming_doc)
-                merged = spec.validate(json.dumps(merged_doc))
+            # The CAS above proves the client's declared version IS the
+            # stored one — so the writer's base is the current document
+            # itself. No history lookup, no inferred base.
+            current_doc = current_raw if isinstance(current_raw, str) and current_raw.strip() else "{}"
+            merged_doc = _apply_remove(
+                _merge_trust_doc(json.loads(current_doc), incoming_doc),
+                incoming_doc,
+            )
+            merged = validate_tenant_scope(
+                tenant, key, spec.validate(json.dumps(merged_doc))
+            )
         else:
             merged = validated
 

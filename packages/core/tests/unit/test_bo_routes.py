@@ -40,7 +40,10 @@ def _make_bot(client: TestClient) -> str:
 
 
 def _publish(client: TestClient, bot_id: str) -> None:
-    resp = client.post(f"/bo/bots/{bot_id}/publish", headers=ADMIN)
+    version = client.get(f"/bo/bots/{bot_id}", headers=ADMIN
+                         ).json()["bot"]["draft_version"]
+    resp = client.post(f"/bo/bots/{bot_id}/publish", headers=ADMIN,
+                       json={"expected_version": version})
     assert resp.status_code == 200, resp.text
 
 

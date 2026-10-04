@@ -70,10 +70,9 @@ def initialize_db(db_path: Path | None = None) -> None:
             )
             """
         )
-        # Per-version field snapshot — update_entry's three-way merge reads
-        # the value at expected_version−1 as the writer's base so a stale
-        # full-document PUT cannot silently revert another client's fields
-        # (BUGHUNT-02 P0-4).
+        # Per-version field snapshot — append-only audit/rebase trail;
+        # update_entry never reads it to infer a writer's base (CONTROL R2:
+        # the strict CAS on the declared expected_version is the contract).
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS bo_catalog_history (
@@ -295,18 +294,20 @@ def _union_list(current: list, incoming: list) -> list:
 
 
 def _merge_entry_fields(
-    base: dict[str, Any],
     current: dict[str, Any],
     incoming: dict[str, Any],
 ) -> dict[str, Any]:
-    """Three-way merge one catalog write (BUGHUNT-02 P0-4).
+    """Sparse delta merge of one catalog write (BUGHUNT-02 P0-4, CONTROL R2).
 
-    ``None``, ``[]`` and ``{}`` mean "not provided" — they can never shrink
-    or clear the stored doc. A non-empty list union-adds (idempotent for a
-    stale copy), a non-empty dict merges field-wise, a scalar equal to the
-    writer's base keeps the current value, and anything else is the
-    writer's deliberate edit.
-    """
+    Every field present in ``incoming`` was deliberately touched by the
+    writer and is applied — the strict CAS above already proved the
+    writer's declared version is the stored one, so no base inference is
+    needed or allowed. ``None``, ``[]`` and ``{}`` mean "not provided" —
+    they can never shrink or clear the stored doc; a non-empty list
+    union-adds (idempotent), a non-empty dict merges field-wise, a scalar
+    takes the writer's value (an intentional revert is a legitimate write).
+    Removal from ``capabilities``/``regions`` only via the explicit
+    ``*_remove`` ops, applied by ``update_entry``."""
     merged = dict(current)
     for key, value in incoming.items():
         if key not in current:
@@ -316,16 +317,34 @@ def _merge_entry_fields(
         if isinstance(value, list):
             merged[key] = _union_list(list(merged[key] or []), list(value))
             continue
-        base_v = base.get(key, _MISSING)
-        if base_v is not _MISSING and value == base_v:
-            continue
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
-            merged[key] = _merge_doc(
-                base_v if isinstance(base_v, dict) else {}, merged[key], value
-            )
+            merged[key] = _merge_doc({}, merged[key], value)
         else:
             merged[key] = value
     return merged
+
+
+_REMOVE_FIELDS = {"capabilities_remove": "capabilities",
+                  "regions_remove": "regions"}
+
+
+def _apply_remove_fields(
+    merged: dict[str, Any], ops: dict[str, Any]
+) -> dict[str, Any]:
+    """Apply the explicit ``capabilities_remove``/``regions_remove`` ops —
+    delete the named values from the collection. Values already absent are
+    a no-op (idempotent), never an error."""
+    out = dict(merged)
+    for op, field in _REMOVE_FIELDS.items():
+        values = ops.get(op)
+        if not isinstance(values, list) or not values:
+            continue
+        current = out.get(field)
+        if not isinstance(current, list):
+            continue
+        drop = set(values)
+        out[field] = [v for v in current if v not in drop]
+    return out
 
 
 def _entry_from_row(row: Any) -> CatalogEntry:
@@ -500,18 +519,18 @@ def update_entry(
                 f"expected_version={expected_version} dar versiunea curentă "
                 f"este {current_version}"
             )
-        # Three-way merge: the writer's base is the snapshot at
-        # expected_version−1, so a stale full-document PUT only lands the
-        # fields it actually changed — capabilities a peer added in the
-        # meantime, or a purpose a peer rewrote, survive (BUGHUNT-02 P0-4).
+        # Sparse delta merge: the strict CAS above proves the writer's
+        # declared expected_version IS the stored version, so the merge base
+        # is the current document itself — there is no history lookup and
+        # no inferred base (CONTROL R2). A stale writer gets 409 and rebases
+        # explicitly; fields it omits are preserved; removals only happen
+        # through the explicit ``*_remove`` ops.
         current_doc = _entry_doc_from_row(row)
-        base_row = conn.execute(
-            "SELECT doc_json FROM bo_catalog_history "
-            "WHERE tenant = ? AND entry_id = ? AND version = ?",
-            (tenant, entry_id, expected_version - 1),
-        ).fetchone()
-        base_doc = {} if base_row is None else json.loads(base_row["doc_json"])
-        merged_fields = _merge_entry_fields(base_doc, current_doc, fields)
+        fields = dict(fields)
+        remove_ops = {k: fields.pop(k) for k in _REMOVE_FIELDS if k in fields}
+        merged_fields = _apply_remove_fields(
+            _merge_entry_fields(current_doc, fields), remove_ops
+        )
         v = validate_fields(**merged_fields)
         clash = conn.execute(
             "SELECT entry_id FROM bo_model_catalog WHERE tenant = ? "

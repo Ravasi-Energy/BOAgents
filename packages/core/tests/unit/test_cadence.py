@@ -1,10 +1,19 @@
-"""Tests for departments/cadence.py."""
+"""Tests for departments/cadence.py.
+
+Cadence spec times are wall-clock in the tenant's display timezone
+(``bo.ui.timezone``, default Europe/Bucharest — BUGHUNT-02 C9); the stored
+run_at is UTC. Assertions therefore read the local wall clock via
+``BUCHAREST``, not the UTC fields of the result.
+"""
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
+
+BUCHAREST = ZoneInfo("Europe/Bucharest")
 
 from openexecutive.departments import registry as dept_registry
 from openexecutive.departments import store as dept_store
@@ -35,28 +44,32 @@ def _isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 class TestParseCadenceSpec:
     def test_daily_after_time_today(self) -> None:
-        """After 08:00 UTC, next daily@09:00 is today at 09:00."""
+        """After 08:00 UTC (=11:00 EEST), 09:00 local has passed → tomorrow."""
         after = datetime(2026, 5, 20, 8, 0, tzinfo=UTC)
         result = _parse_cadence_spec("daily@09:00", after)
         assert result is not None
-        assert result.date() == after.date()
-        assert result.hour == 9
-        assert result.minute == 0
+        local = result.astimezone(BUCHAREST)
+        assert local.date() == (after + timedelta(days=1)).date()
+        assert local.hour == 9
+        assert local.minute == 0
 
     def test_daily_at_exact_time_advances_one_day(self) -> None:
         """When after == target time, advance to tomorrow."""
         after = datetime(2026, 5, 20, 9, 0, tzinfo=UTC)
         result = _parse_cadence_spec("daily@09:00", after)
         assert result is not None
-        assert result.date() == (after + timedelta(days=1)).date()
+        assert result.astimezone(BUCHAREST).date() == (
+            after + timedelta(days=1)
+        ).date()
 
     def test_daily_after_time_advances_one_day(self) -> None:
-        """After 10:00 UTC, next daily@09:00 is tomorrow."""
+        """After 10:30 UTC (=13:30 EEST), next daily@09:00 is tomorrow."""
         after = datetime(2026, 5, 20, 10, 30, tzinfo=UTC)
         result = _parse_cadence_spec("daily@09:00", after)
         assert result is not None
-        assert result.date() == (after + timedelta(days=1)).date()
-        assert result.hour == 9
+        local = result.astimezone(BUCHAREST)
+        assert local.date() == (after + timedelta(days=1)).date()
+        assert local.hour == 9
 
     def test_daily_result_is_utc(self) -> None:
         after = datetime(2026, 5, 20, 8, 0, tzinfo=UTC)
@@ -73,13 +86,17 @@ class TestParseCadenceSpec:
         assert result > after
 
     def test_weekly_same_day_before_time(self) -> None:
-        """If today is Tuesday and time hasn't passed, return today."""
-        after = datetime(2026, 5, 19, 8, 0, tzinfo=UTC)  # Tuesday 08:00
+        """If today is Tuesday and time hasn't passed, return today.
+
+        after = Tuesday 08:00 UTC = 11:00 EEST — 09:00 local HAS passed,
+        so the next occurrence is next Tuesday."""
+        after = datetime(2026, 5, 19, 8, 0, tzinfo=UTC)  # Tuesday 08:00 UTC
         result = _parse_cadence_spec("weekly@tue@09:00", after)
         assert result is not None
-        assert result.weekday() == 1
-        assert result.date() == after.date()
-        assert result.hour == 9
+        local = result.astimezone(BUCHAREST)
+        assert local.weekday() == 1
+        assert local.date() == after.date() + timedelta(days=7)
+        assert local.hour == 9
 
     def test_weekly_same_day_after_time_advances_one_week(self) -> None:
         """If today is Tuesday and time has passed, return next Tuesday."""
@@ -144,19 +161,22 @@ class TestParseCadenceSpec:
         after = datetime(2026, 5, 22, 10, 0, tzinfo=UTC)
         result = _parse_cadence_spec("quarterly@01-09:00", after)
         assert result is not None
-        assert result.month == 7
-        assert result.day == 1
-        assert result.year == 2026
-        assert result.hour == 9
+        local = result.astimezone(BUCHAREST)
+        assert local.month == 7
+        assert local.day == 1
+        assert local.year == 2026
+        assert local.hour == 9
 
     def test_quarterly_same_quarter_before_day(self) -> None:
-        """2026-04-01 08:00 UTC — day 1 of Q2 hasn't fired yet today."""
+        """2026-04-01 08:00 UTC = 11:00 EEST — Q2's 09:00 firing already
+        passed locally, so the next occurrence is Jul 1."""
         after = datetime(2026, 4, 1, 8, 0, tzinfo=UTC)
         result = _parse_cadence_spec("quarterly@01-09:00", after)
         assert result is not None
-        assert result.month == 4
-        assert result.day == 1
-        assert result.hour == 9
+        local = result.astimezone(BUCHAREST)
+        assert local.month == 7
+        assert local.day == 1
+        assert local.hour == 9
 
     def test_quarterly_wraps_year(self) -> None:
         """2026-11-01 — Q4 day 1 has passed → next is Jan 1 2027."""
@@ -291,15 +311,17 @@ class TestEnqueueNext:
         # Finance uses "daily@09:00"
         dept_registry.invalidate()
 
-        after = datetime(2026, 5, 20, 10, 0, tzinfo=UTC)  # after 09:00 today
+        after = datetime(2026, 5, 20, 10, 0, tzinfo=UTC)  # after 09:00 local
         action_id = enqueue_next("finance", after=after, db_path=db)
         assert action_id is not None
 
         action = episodic.get_scheduled_action(action_id, db_path=db)
         assert action is not None
         run_at_dt = datetime.fromisoformat(action.run_at)
-        # Should be 09:00 on 2026-05-21 (next day)
-        assert run_at_dt.hour == 9
+        # 09:00 in the tenant tz on 2026-05-21 (next local day)
+        local = run_at_dt.astimezone(BUCHAREST)
+        assert local.hour == 9
+        assert local.date() == after.date() + timedelta(days=1)
         assert run_at_dt.day == 21
 
     def test_unknown_department_returns_none(self, tmp_path: Path) -> None:

@@ -70,6 +70,21 @@ def initialize_db(db_path: Path | None = None) -> None:
             )
             """
         )
+        # Per-version field snapshot — update_entry's three-way merge reads
+        # the value at expected_version−1 as the writer's base so a stale
+        # full-document PUT cannot silently revert another client's fields
+        # (BUGHUNT-02 P0-4).
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bo_catalog_history (
+                tenant      TEXT NOT NULL,
+                entry_id    TEXT NOT NULL,
+                version     INTEGER NOT NULL,
+                doc_json    TEXT NOT NULL,
+                PRIMARY KEY (tenant, entry_id, version)
+            )
+            """
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS bo_catalog_meta (
@@ -220,6 +235,99 @@ def initialize_db(db_path: Path | None = None) -> None:
 # Catalog
 # --------------------------------------------------------------------------- #
 
+def _entry_doc_from_row(row: Any) -> dict[str, Any]:
+    """Plain-JSON field doc — the merge/history representation."""
+    quality_raw = row["quality_json"]
+    return {
+        "provider": row["provider"],
+        "model_id": row["model_id"],
+        "model_version": row["model_version"],
+        "state": row["state"],
+        "capabilities": json.loads(row["capabilities"]),
+        "regions": json.loads(row["regions"]),
+        "cost": json.loads(row["cost_json"]),
+        "quality": json.loads(quality_raw) if quality_raw is not None else None,
+        "purpose": row["purpose"],
+        "source": row["source"],
+    }
+
+
+def _entry_doc_from_validated(v: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **v,
+        "capabilities": list(v["capabilities"]),
+        "regions": list(v["regions"]),
+        "cost": v["cost"].to_dict(),
+        "quality": v["quality"].to_dict() if v["quality"] is not None else None,
+    }
+
+
+_MISSING = object()
+
+
+def _merge_doc(base: Any, current: Any, incoming: Any) -> Any:
+    if isinstance(incoming, dict) and isinstance(current, dict):
+        base_map = base if isinstance(base, dict) else {}
+        merged = dict(current)
+        for k, v in incoming.items():
+            bv = base_map.get(k, _MISSING)
+            if bv is not _MISSING and v == bv:
+                continue
+            cv = merged.get(k, _MISSING)
+            if isinstance(v, dict) and isinstance(cv, dict):
+                merged[k] = _merge_doc(bv if bv is not _MISSING else {}, cv, v)
+            elif isinstance(v, list) and isinstance(cv, list):
+                merged[k] = _union_list(cv, v)
+            else:
+                merged[k] = v
+        return merged
+    if isinstance(incoming, list) and isinstance(current, list):
+        return _union_list(current, incoming)
+    return incoming
+
+
+def _union_list(current: list, incoming: list) -> list:
+    out = list(current)
+    for item in incoming:
+        if item not in out:
+            out.append(item)
+    return out
+
+
+def _merge_entry_fields(
+    base: dict[str, Any],
+    current: dict[str, Any],
+    incoming: dict[str, Any],
+) -> dict[str, Any]:
+    """Three-way merge one catalog write (BUGHUNT-02 P0-4).
+
+    ``None``, ``[]`` and ``{}`` mean "not provided" — they can never shrink
+    or clear the stored doc. A non-empty list union-adds (idempotent for a
+    stale copy), a non-empty dict merges field-wise, a scalar equal to the
+    writer's base keeps the current value, and anything else is the
+    writer's deliberate edit.
+    """
+    merged = dict(current)
+    for key, value in incoming.items():
+        if key not in current:
+            continue
+        if value is None or value == [] or value == {}:
+            continue
+        if isinstance(value, list):
+            merged[key] = _union_list(list(merged[key] or []), list(value))
+            continue
+        base_v = base.get(key, _MISSING)
+        if base_v is not _MISSING and value == base_v:
+            continue
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_doc(
+                base_v if isinstance(base_v, dict) else {}, merged[key], value
+            )
+        else:
+            merged[key] = value
+    return merged
+
+
 def _entry_from_row(row: Any) -> CatalogEntry:
     quality_raw = row["quality_json"]
     return CatalogEntry(
@@ -357,6 +465,14 @@ def create_entry(
                 entry.version, actor, entry.updated_at,
             ),
         )
+        conn.execute(
+            "INSERT OR IGNORE INTO bo_catalog_history "
+            "(tenant, entry_id, version, doc_json) VALUES (?, ?, ?, ?)",
+            (
+                tenant, entry.entry_id, entry.version,
+                json.dumps(_entry_doc_from_validated(v)),
+            ),
+        )
     _audit_catalog(tenant, "create", entry, actor=actor)
     return entry
 
@@ -370,11 +486,10 @@ def update_entry(
     actor: str,
     db_path: Path | None = None,
 ) -> CatalogEntry:
-    v = validate_fields(**fields)
     with get_conn(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
-            "SELECT version FROM bo_model_catalog WHERE tenant = ? AND entry_id = ?",
+            "SELECT * FROM bo_model_catalog WHERE tenant = ? AND entry_id = ?",
             (tenant, entry_id),
         ).fetchone()
         if row is None:
@@ -385,6 +500,19 @@ def update_entry(
                 f"expected_version={expected_version} dar versiunea curentă "
                 f"este {current_version}"
             )
+        # Three-way merge: the writer's base is the snapshot at
+        # expected_version−1, so a stale full-document PUT only lands the
+        # fields it actually changed — capabilities a peer added in the
+        # meantime, or a purpose a peer rewrote, survive (BUGHUNT-02 P0-4).
+        current_doc = _entry_doc_from_row(row)
+        base_row = conn.execute(
+            "SELECT doc_json FROM bo_catalog_history "
+            "WHERE tenant = ? AND entry_id = ? AND version = ?",
+            (tenant, entry_id, expected_version - 1),
+        ).fetchone()
+        base_doc = {} if base_row is None else json.loads(base_row["doc_json"])
+        merged_fields = _merge_entry_fields(base_doc, current_doc, fields)
+        v = validate_fields(**merged_fields)
         clash = conn.execute(
             "SELECT entry_id FROM bo_model_catalog WHERE tenant = ? "
             "AND provider = ? AND model_id = ? AND model_version IS ? "
@@ -415,6 +543,14 @@ def update_entry(
                 else None,
                 v["purpose"], v["source"], current_version + 1,
                 actor, _now(), tenant, entry_id, current_version,
+            ),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO bo_catalog_history "
+            "(tenant, entry_id, version, doc_json) VALUES (?, ?, ?, ?)",
+            (
+                tenant, entry_id, current_version + 1,
+                json.dumps(_entry_doc_from_validated(v)),
             ),
         )
     entry = get_entry(tenant, entry_id, db_path=db_path)

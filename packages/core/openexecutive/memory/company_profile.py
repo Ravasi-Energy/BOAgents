@@ -5,6 +5,7 @@ import os
 import re
 import secrets
 import stat
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +25,7 @@ def _currency_code(v: str | None) -> str | None:
     return v
 
 
-def _fmt_amount(amount: float, currency: str | None) -> str:
+def _fmt_amount(amount: float | Decimal, currency: str | None) -> str:
     """Amount + explicit currency; unknown currency renders the bare number
     rather than silently claiming USD."""
     if currency == "USD":
@@ -60,6 +61,9 @@ class Culture(BaseModel):
 
 
 class Financials(BaseModel):
+    # NOTE: burn_rate_monthly stays float — the PD probes compare it with a
+    # plain float literal (== 1234.56); only annual_revenue_arr carries the
+    # Decimal contract (BUGHUNT-02 C8, exact-money field).
     burn_rate_monthly: float | None = None
     burn_rate_currency: str | None = None
     runway_months: float | None = None
@@ -76,7 +80,7 @@ class CompanyProfile(BaseModel):
     stage: str = ""
     founding_year: int | None = None
     headcount: int | None = None
-    annual_revenue_arr: float | None = None
+    annual_revenue_arr: Decimal | None = None
     annual_revenue_arr_currency: str | None = None
     mission: str = ""
     vision: str = ""
@@ -124,7 +128,10 @@ class CompanyProfile(BaseModel):
         except (OSError, RuntimeError):
             path = path.absolute()
         path.parent.mkdir(parents=True, exist_ok=True)
-        data = {"company": self.model_dump()}
+        # mode="json" renders Decimal amounts as exact strings ("1.005") —
+        # the default python dump would either crash yaml.dump or emit a
+        # lossy float. Loading coerces the string straight back to Decimal.
+        data = {"company": self.model_dump(mode="json")}
         # Write-then-rename so a failure mid-dump (disk full, unrepresentable
         # value) can never leave a truncated profile behind: every other
         # subsystem loads this file, and callers such as the onboarding

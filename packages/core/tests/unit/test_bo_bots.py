@@ -110,8 +110,11 @@ def test_draft_edit_does_not_touch_active(db: Path) -> None:
     v1_after = store.get_version(TENANT, d["id"], version_no=1)
     assert v1_after["content"] == v1_before["content"]
     assert v1_after["hash"] == v1_before["hash"]
-    assert store.get_version(TENANT, d["id"], status="draft")["content"][
-        "steps"][0]["id"] == "only"
+    # Under three-way merge (BUGHUNT-02), a steps payload that shares no
+    # base id is an addition — the published step stays and the new one
+    # is appended.
+    steps = store.get_version(TENANT, d["id"], status="draft")["content"]["steps"]
+    assert "only" in {s["id"] for s in steps}
 
 
 def test_draft_update_cas_conflict(db: Path) -> None:

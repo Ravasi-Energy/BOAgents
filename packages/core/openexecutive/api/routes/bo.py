@@ -188,6 +188,10 @@ class _BotPatch(BaseModel):
     content: dict[str, Any] | None = None
 
 
+class _BotPublish(BaseModel):
+    expected_version: int | None = Field(default=None, ge=1)
+
+
 class _SimulateRequest(BaseModel):
     input: dict[str, Any] | None = None
     version_no: int | None = Field(default=None, ge=1)
@@ -309,9 +313,13 @@ def patch_bot(def_id: str, body: _BotPatch,
 
 @router.post("/bots/{def_id}/publish")
 def publish_bot(def_id: str,
-                ident: BoIdentity) -> Any:
+                ident: BoIdentity,
+                body: _BotPublish | None = None) -> Any:
     bo_identity.require(ident, "bots:write")
-    definition = bot_service.publish(ident.tenant, ident.actor, def_id)
+    definition = bot_service.publish(
+        ident.tenant, ident.actor, def_id,
+        expected_version=None if body is None else body.expected_version,
+    )
     return {"bot": definition, "result": "APPLIED",
             "active_version_no": definition["active_version_no"]}
 

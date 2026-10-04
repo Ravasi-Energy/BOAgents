@@ -548,15 +548,19 @@ def bundle_to_serialized(bundle: FixtureBundle, scenario_description: str) -> di
     profile = bundle.profile
 
     profile_yaml = yaml.safe_dump(
-        {"company": profile.model_dump()}, default_flow_style=False, sort_keys=True
+        {"company": profile.model_dump(mode="json")},
+        default_flow_style=False,
+        sort_keys=True,
     )
     people_yaml = yaml.safe_dump(
-        {"people": [p.model_dump() for p in bundle.people]}, sort_keys=False
+        {"people": [p.model_dump(mode="json") for p in bundle.people]},
+        sort_keys=False,
     )
     departments_yaml = yaml.safe_dump(
-        {"departments": [d.model_dump() for d in bundle.departments]}, sort_keys=False
+        {"departments": [d.model_dump(mode="json") for d in bundle.departments]},
+        sort_keys=False,
     )
-    memory_json = json.dumps(bundle.memory.model_dump(), indent=2)
+    memory_json = json.dumps(bundle.memory.model_dump(mode="json"), indent=2)
     docs_json = json.dumps({d.filename: d.content for d in bundle.docs})
 
     # Compact org summaries for the demo cards — same shape the curated list

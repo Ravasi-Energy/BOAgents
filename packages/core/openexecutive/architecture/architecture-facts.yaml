@@ -1257,7 +1257,9 @@ departments:
   cadence: |
     openexecutive.departments.cadence — supports `daily@HH:MM`,
     `weekly@DOW@HH:MM` or `weekly@DOW-HH:MM` (DOW is a 3-letter day,
-    e.g. `weekly@thu@09:00`), and `quarterly@DD-HH:MM`. Times are UTC.
+    e.g. `weekly@thu@09:00`), and `quarterly@DD-HH:MM`. Times are
+    wall-clock in the tenant's display timezone (`bo.ui.timezone`,
+    default Europe/Bucharest); the stored run_at is UTC.
     The scheduler runner enqueues a `department_check_in` workflow
     when a cadence is due, then `enqueue_next()` chains the following
     occurrence. Lifecycle cleanup: deleting a department cancels its
@@ -1382,7 +1384,7 @@ scheduler:
     client is restored, then chains the next nightly occurrence via
     seed_client_rotation (idempotent).
   module: openexecutive.scheduler
-  runner: openexecutive.scheduler.runner — asyncio task started in the FastAPI lifespan. Polls every 30s; `claim_due_actions` uses an UPDATE…RETURNING claim so a row is fired at most once per process. Single-worker assumption (do not run two scheduler processes against the same DB). Each poll is gated on an active company profile via `_company_profile_active()` (true when `load_or_create_profile().is_empty()` is false) — when no profile is configured the poll loop claims and dispatches no scheduled actions, so every due row (including the recurring principal-brief rows seeded once in the startup prologue) stays `pending` and fires only once a company profile is saved (the Executive has no company context to act on before then). The hold is logged once per gap and once on resume, not every poll. A second loop-level gate holds claiming while the clients `.restore_blocked` marker exists — fail-CLOSED (a marker read error also holds), the inverse of the rotation pause's fail-open, because live state may belong to no client and due rows would run the wrong company's outbound work.
+  runner: openexecutive.scheduler.runner — asyncio task started in the FastAPI lifespan. Polls every 30s; `claim_due_actions` uses an UPDATE…RETURNING claim so a row is fired at most once per process, and stamps `claimed_at` so `requeue_orphaned_running` recycles only claims older than the 10-minute lease (`REQUEUE_LEASE_SECONDS`) — a fresh claim is an in-flight dispatch, never re-claimed mid-flight (double-claim fix); the sweep runs at boot and every ~10 minutes from the tick loop (`_maybe_requeue_orphans`). Single-worker assumption (do not run two scheduler processes against the same DB). Each poll is gated on an active company profile via `_company_profile_active()` (true when `load_or_create_profile().is_empty()` is false) — when no profile is configured the poll loop claims and dispatches no scheduled actions, so every due row (including the recurring principal-brief rows seeded once in the startup prologue) stays `pending` and fires only once a company profile is saved (the Executive has no company context to act on before then). The hold is logged once per gap and once on resume, not every poll. A second loop-level gate holds claiming while the clients `.restore_blocked` marker exists — fail-CLOSED (a marker read error also holds), the inverse of the rotation pause's fail-open, because live state may belong to no client and due rows would run the wrong company's outbound work.
   table: |
     scheduled_actions (in episodic_memory.db). Schema (see
     memory/episodic.py):

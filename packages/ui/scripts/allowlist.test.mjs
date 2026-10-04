@@ -33,18 +33,18 @@ test("normalizeEmail lowercases and trims, and survives null", () => {
   assert.equal(normalizeEmail(undefined), "");
 });
 
-// --- decideAllowed: the union rule -----------------------------------------
+// --- decideAllowed: the authoritative-roster rule ---------------------------
 
-test("issue #132: an ALLOWED_EMAILS entry survives a roster full of other people", () => {
-  // The exact reported scenario: operator in the env list, roster populated by
-  // a fixture load that knows nothing about them. Before the union fix this
-  // returned { allowed: false }, locking the operator out of their own box.
+test("BUGHUNT-02 C12: a readable roster revokes an env-listed email it does not hold", () => {
+  // The revocation contract: archived/removed Person whose email still sits
+  // in ALLOWED_EMAILS. A readable roster decides outright — the env list is
+  // only the fallback for an UNREADABLE roster.
   const decision = decideAllowed(
     "operator@corp.com",
     set("operator@corp.com"),
     set("jordan.avery@example.com", "sam.chen@example.com"),
   );
-  assert.deepEqual(decision, { allowed: true, source: "env", rosterUnknown: false });
+  assert.deepEqual(decision, { allowed: false, source: "no_match", rosterUnknown: false });
 });
 
 test("a roster member not in ALLOWED_EMAILS is admitted", () => {
@@ -86,36 +86,46 @@ test("an unreadable roster leaves a non-env email unknown, not denied outright",
   });
 });
 
-test("an email in both lists is attributed to env", () => {
+test("an email in both lists is attributed to the roster", () => {
   const both = decideAllowed("op@corp.com", set("op@corp.com"), set("op@corp.com"));
-  assert.equal(both.source, "env");
+  assert.equal(both.source, "roster");
   assert.equal(both.allowed, true);
 });
 
 test("matching is case-insensitive against both lists", () => {
-  assert.equal(decideAllowed("Alex@Example.COM", set("alex@example.com"), NONE).allowed, true);
+  // Env hit is only reachable with the roster unreadable; roster hit is
+  // case-insensitive while readable.
+  assert.equal(decideAllowed("Alex@Example.COM", set("alex@example.com"), null).allowed, true);
   assert.equal(decideAllowed("Alex@Example.COM", NONE, set("alex@example.com")).allowed, true);
 });
 
 test("an empty email is never admitted by an empty-string list entry", () => {
   // parseAllowedEmails drops blanks, but decideAllowed is exported, so guard
   // the case where a caller hands it a hand-built set containing "".
-  const decision = decideAllowed("", set(""), set(""));
+  const decision = decideAllowed("", set(""), null);
   assert.equal(decision.allowed, false);
 });
 
-// --- resolveAllowed: lazy roster fetch --------------------------------------
+// --- resolveAllowed: roster consulted first ---------------------------------
 
-test("an ALLOWED_EMAILS hit never touches the roster", async () => {
-  // This is what makes the env list work with the backend completely down.
+test("the roster is always consulted, even for an ALLOWED_EMAILS hit", async () => {
+  // Revocation only reaches the process through the roster, so an env hit
+  // can no longer skip the fetch. A readable empty roster revokes the
+  // env-listed email outright.
   let calls = 0;
   const loadRoster = async () => {
     calls += 1;
     return NONE;
   };
   const decision = await resolveAllowed("op@corp.com", set("op@corp.com"), loadRoster);
+  assert.deepEqual(decision, { allowed: false, source: "no_match", rosterUnknown: false });
+  assert.equal(calls, 1);
+});
+
+test("an env hit with an unreadable roster is admitted via env", async () => {
+  // The fail-open-for-operators cell: backend down, env list decides.
+  const decision = await resolveAllowed("op@corp.com", set("op@corp.com"), async () => null);
   assert.deepEqual(decision, { allowed: true, source: "env", rosterUnknown: false });
-  assert.equal(calls, 0);
 });
 
 test("an ALLOWED_EMAILS miss fetches the roster exactly once", async () => {
@@ -131,7 +141,7 @@ test("an ALLOWED_EMAILS miss fetches the roster exactly once", async () => {
 });
 
 test("resolveAllowed normalizes before matching the env list", async () => {
-  const decision = await resolveAllowed("  Op@Corp.com ", set("op@corp.com"), async () => NONE);
+  const decision = await resolveAllowed("  Op@Corp.com ", set("op@corp.com"), async () => null);
   assert.equal(decision.allowed, true);
 });
 
@@ -240,7 +250,10 @@ test("the loader omits x-api-key when no shared secret is configured", async () 
   assert.equal("x-api-key" in fetchImpl.calls[0].init.headers, false);
 });
 
-test("a successful roster is cached for its TTL and refetched after it expires", async () => {
+test("every call revalidates — a cached roster is never served (C12)", async () => {
+  // The revocation contract: caching a membership is exactly how a revoked
+  // Person would stay admitted for up to a TTL. Sequential calls each
+  // fetch, even within the TTL window.
   let clock = 0;
   const fetchImpl = recordingFetch((n) => okResponse([{ email: `p${n}@corp.com`, person_id: n }]));
   const load = createRosterLoader({
@@ -252,12 +265,9 @@ test("a successful roster is cached for its TTL and refetched after it expires",
     now: () => clock,
   });
   assert.deepEqual([...(await load())], ["p1@corp.com"]);
-  clock = 999;
-  assert.deepEqual([...(await load())], ["p1@corp.com"]);
-  assert.equal(fetchImpl.calls.length, 1, "served from cache inside the TTL");
-  clock = 1000;
+  clock = 999; // well inside the former TTL window
   assert.deepEqual([...(await load())], ["p2@corp.com"]);
-  assert.equal(fetchImpl.calls.length, 2, "refetched once the TTL elapsed");
+  assert.equal(fetchImpl.calls.length, 2, "revalidated inside the TTL window");
 });
 
 test("an HTTP error yields null, warns, and is not cached", async () => {
@@ -335,12 +345,9 @@ test("a body that fails to parse as JSON yields null", async () => {
   assert.equal(await load(), null);
 });
 
-test("at most one fetch is ever in flight, across cache misses and expiries", async () => {
-  // This is the invariant that makes an out-of-order resolve impossible: an
-  // earlier-started but slower fetch can never land after a newer one and
-  // clobber a fresher roster, because a second fetch never starts while the
-  // first is pending. Without it, the cache write would need its own guard.
-  let clock = 0;
+test("at most one fetch is ever in flight; sequential calls each revalidate", async () => {
+  // Coalescing remains — concurrent callers share one fetch — but a
+  // completed result is never reused, so the roster is always fresh.
   let open = 0;
   let peak = 0;
   let n = 0;
@@ -349,7 +356,6 @@ test("at most one fetch is ever in flight, across cache misses and expiries", as
     sharedSecret: "",
     ttlMs: 1000,
     timeoutMs: 1000,
-    now: () => clock,
     fetchImpl: async () => {
       open += 1;
       peak = Math.max(peak, open);
@@ -360,15 +366,12 @@ test("at most one fetch is ever in flight, across cache misses and expiries", as
     },
   });
 
-  // A burst of misses, then a burst straddling the TTL expiry.
   await Promise.all([load(), load(), load()]);
-  clock = 1000;
   await Promise.all([load(), load(), load()]);
   assert.equal(peak, 1, "never more than one concurrent backend fetch");
-  assert.equal(n, 2, "one fetch per TTL window, not per caller");
+  assert.equal(n, 2, "one fetch per sequential call, one shared per burst");
 
-  clock = 1500;
-  assert.deepEqual([...(await load())], ["p2@corp.com"], "the newest roster is what is cached");
+  assert.deepEqual([...(await load())], ["p3@corp.com"], "each call sees the newest roster");
 });
 
 // Companion to the TTL-straddling test above: this is the simple baseline
@@ -416,13 +419,14 @@ test("ENV_HIT cannot be mutated by a caller into a lockout", () => {
   // Both decision functions return one shared object for an env hit, so an
   // accidental write would poison every later env hit in the process — the
   // #132 lockout class. Frozen, the write throws under ESM strict mode.
+  // (Env hits require the roster to be unreadable: `null`, not a set.)
   const env = set("op@corp.com");
-  const first = decideAllowed("op@corp.com", env, NONE);
+  const first = decideAllowed("op@corp.com", env, null);
   assert.equal(Object.isFrozen(first), true);
   assert.throws(() => {
     first.allowed = false;
   }, TypeError);
-  assert.equal(decideAllowed("op@corp.com", env, NONE).allowed, true);
+  assert.equal(decideAllowed("op@corp.com", env, null).allowed, true);
 });
 
 test("a hung fetch is abandoned at the timeout instead of pinning joiners", async () => {
@@ -471,21 +475,19 @@ test("a hung fetch is abandoned at the timeout instead of pinning joiners", asyn
   assert.equal(attempts, 2);
 });
 
-test("a backwards clock step does not make an expired roster look fresh", async () => {
-  let clock = 10_000;
+test("no roster result is ever reused — the second call sees the newest answer", async () => {
   let n = 0;
   const load = createRosterLoader({
     baseUrl: "http://api:8000",
     sharedSecret: "",
-    ttlMs: 1000,
+    ttlMs: 60_000,
     timeoutMs: 1000,
-    now: () => clock,
     fetchImpl: async () => {
       n += 1;
       return { ok: true, status: 200, json: async () => [{ email: `p${n}@corp.com`, person_id: n }] };
     },
   });
   assert.deepEqual([...(await load())], ["p1@corp.com"]);
-  clock = 0; // NTP steps the clock backwards past the entry's fetchedAt
-  assert.deepEqual([...(await load())], ["p2@corp.com"], "refetched rather than served stale");
+  assert.deepEqual([...(await load())], ["p2@corp.com"], "refetched, not replayed");
+  assert.equal(n, 2);
 });

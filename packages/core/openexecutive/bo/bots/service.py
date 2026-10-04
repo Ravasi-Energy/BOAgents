@@ -105,6 +105,101 @@ def create(tenant: str, actor: str, payload: dict[str, Any],
     return definition
 
 
+_MISSING = object()
+
+
+def _merge_doc(base: Any, current: Any, incoming: Any) -> Any:
+    """Three-way field merge — ``incoming == base`` means the writer did not
+    touch the field, so the concurrent writer's value survives."""
+    if isinstance(incoming, dict) and isinstance(current, dict):
+        base_map = base if isinstance(base, dict) else {}
+        merged = dict(current)
+        for k, v in incoming.items():
+            bv = base_map.get(k, _MISSING)
+            if bv is not _MISSING and v == bv:
+                continue
+            cv = merged.get(k, _MISSING)
+            if isinstance(v, dict) and isinstance(cv, dict):
+                merged[k] = _merge_doc(bv if bv is not _MISSING else {}, cv, v)
+            elif isinstance(v, list) and isinstance(cv, list):
+                merged[k] = _union_list(cv, v)
+            else:
+                merged[k] = v
+        return merged
+    if isinstance(incoming, list) and isinstance(current, list):
+        return _union_list(current, incoming)
+    return incoming
+
+
+def _union_list(current: list, incoming: list) -> list:
+    out = list(current)
+    for item in incoming:
+        if item not in out:
+            out.append(item)
+    return out
+
+
+def _merge_steps(base: Any, current: Any, incoming: Any) -> list:
+    """Id-keyed merge of the step list (BUGHUNT-02 P0-3).
+
+    ``[]`` is a no-op — it never clears. A payload that touches no base id
+    is an addition-only delta (union). A payload that DOES carry base ids is
+    a full-list write: ids present in the base but omitted here were
+    deliberately deleted and are removed — but ids a *peer* added (in
+    current, not in base) always survive. Per-step fields merge three-way,
+    so editing one step's message never reverts a peer's edit of another.
+    """
+    if not isinstance(incoming, list) or not incoming:
+        return list(current) if isinstance(current, list) else []
+    base_list = base if isinstance(base, list) else []
+    current_list = current if isinstance(current, list) else []
+    base_by_id = {s.get("id"): s for s in base_list if isinstance(s, dict)}
+    in_by_id = {s.get("id"): s for s in incoming if isinstance(s, dict)}
+    deleted = (
+        set(base_by_id) - set(in_by_id)
+        if set(in_by_id) & set(base_by_id)
+        else set()
+    )
+    merged_steps = [s for s in current_list if s.get("id") not in deleted]
+    cur_ids = {s.get("id") for s in merged_steps}
+    for i, s in enumerate(merged_steps):
+        sid = s.get("id")
+        if sid in in_by_id:
+            merged_steps[i] = _merge_doc(
+                base_by_id.get(sid, {}), s, in_by_id.pop(sid)
+            )
+    for s in incoming:
+        sid = s.get("id")
+        if sid in in_by_id and sid not in cur_ids:
+            merged_steps.append(in_by_id.pop(sid))
+    return merged_steps
+
+
+def _merge_content(base: dict, current: dict, incoming: dict) -> dict:
+    """Content-level three-way merge. ``steps`` is id-keyed (see
+    ``_merge_steps``); every other field follows ``_merge_doc`` — dicts
+    recurse, lists union-add, scalars keep the concurrent value when the
+    writer did not touch them."""
+    merged = dict(current)
+    for key, value in incoming.items():
+        bv = base.get(key, _MISSING)
+        if key == "steps":
+            merged[key] = _merge_steps(
+                bv if bv is not _MISSING else [], merged.get(key, []), value
+            )
+            continue
+        if bv is not _MISSING and value == bv:
+            continue
+        cv = merged.get(key, _MISSING)
+        if isinstance(value, dict) and isinstance(cv, dict):
+            merged[key] = _merge_doc(bv if bv is not _MISSING else {}, cv, value)
+        elif isinstance(value, list) and isinstance(cv, list):
+            merged[key] = _union_list(cv, value)
+        else:
+            merged[key] = value
+    return merged
+
+
 def update_draft(tenant: str, actor: str, def_id: str, payload: dict[str, Any],
                  db_path: Path | None = None) -> dict[str, Any]:
     expected = payload.get("expected_version")
@@ -114,6 +209,19 @@ def update_draft(tenant: str, actor: str, def_id: str, payload: dict[str, Any],
     hashed = None
     if payload.get("content") is not None:
         content = validate_content(payload["content"])
+        incoming_doc = content.model_dump(mode="json")
+        # Three-way merge against the writer's base — the draft snapshot at
+        # expected_version−1 (BUGHUNT-02 P0-3). A stale client holding a
+        # full old document only lands the fields it actually changed; a
+        # partial delta (new steps, extra refs) merges instead of replacing.
+        base_doc = store.get_draft_history(
+            tenant, def_id, expected - 1, db_path=db_path
+        )
+        current_doc = store.get_version(
+            tenant, def_id, status="draft", db_path=db_path
+        )["content"]
+        merged_doc = _merge_content(base_doc or {}, current_doc, incoming_doc)
+        content = validate_content(merged_doc)
         dumped = content.model_dump(mode="json")
         canon = _canonical(dumped)
         hashed = content_hash(dumped)
@@ -136,10 +244,13 @@ def update_draft(tenant: str, actor: str, def_id: str, payload: dict[str, Any],
 
 
 def publish(tenant: str, actor: str, def_id: str,
+            expected_version: int | None = None,
             db_path: Path | None = None) -> dict[str, Any]:
     draft = store.get_version(tenant, def_id, status="draft", db_path=db_path)
     validate_content(draft["content"])  # publish-time revalidation
-    definition = store.publish(tenant, def_id, actor=actor, db_path=db_path)
+    definition = store.publish(tenant, def_id, actor=actor,
+                               expected_version=expected_version,
+                               db_path=db_path)
     _audit(tenant, actor, "bo_bot_publish",
            f"{def_id} publicat la v{definition['active_version_no']}",
            {"definition_id": def_id, "active_version_no": definition["active_version_no"]})

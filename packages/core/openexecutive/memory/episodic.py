@@ -94,6 +94,10 @@ class ScheduledAction(BaseModel):
     # pin per-action routing (e.g. fixture-staged proposals; the
     # Executive's schedule_followup tool when the LLM specifies scope).
     required_scope: str | None = None
+    # Claim lease timestamp (BUGHUNT-02 C13): set by claim_due_actions so
+    # requeue_orphaned_running can distinguish a row still being dispatched
+    # from a crashed-worker's stale claim. NULL on pre-migration rows.
+    claimed_at: str | None = None
 
 
 class OutboundContext(BaseModel):
@@ -279,6 +283,11 @@ def initialize_db(db_path: Path = DB_PATH) -> None:
             # route to a non-principal approver (e.g. vendor_onboarding
             # → the Product head). Nullable; None falls back to WILDCARD.
             ("required_scope", "TEXT"),
+            # Claim lease (BUGHUNT-02 C13): stamped by claim_due_actions;
+            # requeue_orphaned_running only recycles 'running' rows whose
+            # claim is older than the lease — an in-flight dispatch is no
+            # longer flipped back to 'pending' and double-claimed.
+            ("claimed_at", "TEXT"),
         ):
             if col not in _sa_existing:
                 try:
@@ -1184,19 +1193,37 @@ def recent_sends_for_channel_ref(
     return [(str(r["created_at"]), str(r["intent_text"])) for r in rows]
 
 
-def requeue_orphaned_running(db_path: Path | None = None) -> int:
-    """Flip any 'running' rows back to 'pending'.
+# BUGHUNT-02 C13: a 'running' row younger than this lease is an in-flight
+# dispatch, not an orphan — recycling it re-claims and double-fires it.
+# Only claims older than the lease (or pre-migration NULLs) are orphans.
+REQUEUE_LEASE_SECONDS = 600
 
-    Call on scheduler startup. Rows are claimed via UPDATE…RETURNING into the
-    'running' state and only flipped to 'done' or 'failed' after dispatch
-    completes. A crash mid-dispatch would otherwise leave them stuck forever.
+
+def requeue_orphaned_running(
+    db_path: Path | None = None, *, stale_after_seconds: int = REQUEUE_LEASE_SECONDS
+) -> int:
+    """Flip stale 'running' rows back to 'pending'.
+
+    Call on scheduler startup (and periodically from the tick loop). Rows are
+    claimed via UPDATE…RETURNING into the 'running' state and only flipped to
+    'done' or 'failed' after dispatch completes. A crash mid-dispatch would
+    otherwise leave them stuck forever — so claims older than
+    ``stale_after_seconds`` are recycled. Fresh claims (in-flight dispatches,
+    or a second worker's live claim) are left alone, closing the
+    double-claim window. Pre-migration rows with ``claimed_at IS NULL`` are
+    treated as orphans: the old code only ran this at startup when the
+    claiming process was already gone.
     """
     resolved = _resolve_db_path(db_path)
     if not resolved.exists():
         return 0
+    cutoff = (datetime.now(UTC) - timedelta(seconds=stale_after_seconds)).isoformat()
     with _get_conn(resolved) as conn:
         cursor = conn.execute(
-            "UPDATE scheduled_actions SET status = 'pending' WHERE status = 'running'"
+            "UPDATE scheduled_actions SET status = 'pending' "
+            "WHERE status = 'running' "
+            "AND (claimed_at IS NULL OR claimed_at <= ?)",
+            (cutoff,),
         )
         return int(cursor.rowcount)
 
@@ -1218,14 +1245,14 @@ def claim_due_actions(
     with _get_conn(resolved) as conn:
         rows = conn.execute(
             "UPDATE scheduled_actions "
-            "SET status = 'running', attempts = attempts + 1 "
+            "SET status = 'running', attempts = attempts + 1, claimed_at = ? "
             "WHERE id IN ("
             "  SELECT id FROM scheduled_actions "
             "  WHERE status = 'pending' AND run_at <= ? "
             "  ORDER BY run_at LIMIT ?"
             ") "
             "RETURNING *",
-            (now.isoformat(), limit),
+            (now.isoformat(), now.isoformat(), limit),
         ).fetchall()
     return [ScheduledAction(**dict(row)) for row in rows]
 

@@ -1,13 +1,31 @@
-// Who may sign in. Two ADDITIVE sources, never one overriding the other
-// (issue #132): the operator's ALLOWED_EMAILS env list is always honored, and
-// the backend People roster grants access on top of it.
+// Who may sign in. The backend People roster is AUTHORITATIVE whenever it is
+// readable; the operator's ALLOWED_EMAILS env list is the fallback used only
+// when the roster cannot be read at all (BUGHUNT-02 R-1 / C12).
 //
-// The previous rule made the roster authoritative the moment it held a single
-// email, so anything that wrote a Person row — including a fixture load, which
-// wipes `people` and inserts its own @example.com addresses — silently evicted
-// the operator from their own instance, with recovery requiring direct DB
-// access. Under the union that cannot happen: an env entry is revocable only
-// by editing the env.
+// The earlier union rule (#132) honored env unconditionally, which made the
+// roster unable to revoke: a Person removed or archived stayed signed in
+// forever because their email still sat in ALLOWED_EMAILS, and there was no
+// server-side lever to end that session. Under the authoritative rule a
+// readable roster decides membership outright — an env-listed email absent
+// from the roster is denied, and `decideSessionAction` revokes it.
+//
+// Consequence, stated plainly: on a fresh install the operator's own email
+// must exist in the People roster (onboarding seeds it) — ALLOWED_EMAILS
+// alone no longer admits anyone while the backend answers.
+//
+// No imports — not React, not next-auth — so `npm test` can exercise this
+// directly under `node --experimental-strip-types` (see
+// scripts/allowlist.test.mjs).
+//
+// The roster loader lives here rather than in its own module even though the
+// decision logic below is pure and the loader is the one piece with a socket,
+// a clock and mutable state. Splitting them would need the loader to import
+// `normalizeEmail` at runtime, and Node's ESM loader requires an explicit
+// `.ts` on that relative import while TypeScript rejects it without
+// `allowImportingTsExtensions`. That flag does work (it is compatible with
+// this project's `noEmit`), so this is a preference, not a hard block: one
+// cohesive 260-line module beat adding a compiler option and the only
+// `.ts`-suffixed import in the codebase. Revisit if this file grows again.
 //
 // No imports — not React, not next-auth — so `npm test` can exercise this
 // directly under `node --experimental-strip-types` (see
@@ -25,11 +43,11 @@
 
 /** Where an allow/deny decision came from. Recorded in audit-log `details`. */
 export type AllowSource =
-  /** Matched ALLOWED_EMAILS. The roster was not consulted. */
+  /** Matched ALLOWED_EMAILS — only possible while the roster is unreadable. */
   | "env"
-  /** Missed ALLOWED_EMAILS, matched the People roster. */
+  /** Matched the People roster (the authoritative source when readable). */
   | "roster"
-  /** Definite miss: both lists were readable and neither held the email. */
+  /** Definite miss: the roster was readable and did not hold the email. */
   | "no_match"
   /** Missed ALLOWED_EMAILS; the roster was unreadable, so membership is unknown. */
   | "env_only_roster_unavailable";
@@ -84,12 +102,15 @@ const ENV_HIT: AllowDecision = Object.freeze({
 } as const);
 
 /**
- * The union rule, as a pure function. `roster === null` means the roster could
- * not be read; an empty set means it was read and is genuinely empty.
+ * The authoritative-roster rule, as a pure function. `roster === null` means
+ * the roster could not be read — only then does ALLOWED_EMAILS decide. Any
+ * readable roster (including an empty one) is authoritative: absence is a
+ * definite deny, so a removed/archived Person is revoked even while their
+ * email lingers in the env list.
  *
- * Note that an env hit yields `rosterUnknown: false` even when the roster is
- * unreadable — the decision never consulted the roster, so there is nothing
- * unknown about it.
+ * Note that an env hit yields `rosterUnknown: false` even though the roster
+ * is unreadable by construction in that branch — the decision never
+ * consulted the roster, so there is nothing unknown about it.
  */
 export function decideAllowed(
   email: string,
@@ -97,8 +118,8 @@ export function decideAllowed(
   roster: ReadonlySet<string> | null,
 ): AllowDecision {
   const normalized = normalizeEmail(email);
-  if (matchesEnv(normalized, envAllowed)) return ENV_HIT;
   if (roster === null) {
+    if (matchesEnv(normalized, envAllowed)) return ENV_HIT;
     return {
       allowed: false,
       source: "env_only_roster_unavailable",
@@ -108,19 +129,17 @@ export function decideAllowed(
   if (normalized.length > 0 && roster.has(normalized)) {
     return { allowed: true, source: "roster", rosterUnknown: false };
   }
-  // Both lists readable and neither matched — a definite no. An empty roster
-  // lands here too, so it revokes rather than failing open.
+  // Roster readable and it does not hold the email — a definite no. An
+  // empty roster lands here too, so it revokes rather than failing open.
   return { allowed: false, source: "no_match", rosterUnknown: false };
 }
 
 /**
- * `decideAllowed` with the roster fetched lazily: an env hit short-circuits
- * before `loadRoster` is ever called, so an operator listed in ALLOWED_EMAILS
- * signs in with the backend completely down and pays no fetch latency.
- *
- * The flip side is that env-listed users never warm the roster cache, so the
- * first roster-only request after a restart pays the fetch. That is the right
- * trade: it buys the guarantee that the env list works when nothing else does.
+ * `decideAllowed` with the roster fetched lazily. The roster is ALWAYS
+ * consulted first — an env hit can no longer short-circuit, because a
+ * readable roster is what carries revocations. The env list only decides
+ * when the fetch fails (`roster === null`), which keeps an operator in
+ * ALLOWED_EMAILS able to sign in with the backend completely down.
  */
 export async function resolveAllowed(
   email: string,
@@ -128,7 +147,6 @@ export async function resolveAllowed(
   loadRoster: () => Promise<ReadonlySet<string> | null>,
 ): Promise<AllowDecision> {
   const normalized = normalizeEmail(email);
-  if (matchesEnv(normalized, envAllowed)) return ENV_HIT;
   return decideAllowed(normalized, envAllowed, await loadRoster());
 }
 
@@ -180,6 +198,13 @@ export function describeDenial(source: AllowSource): string {
 export type RosterLoaderOptions = {
   baseUrl: string;
   sharedSecret: string;
+  /**
+   * Retained for interface compatibility — the loader no longer serves
+   * cached rosters at all (BUGHUNT-02 R-1 / C12): a cached hit could keep
+   * an archived Person signed in for up to the TTL, so every call
+   * revalidates against the backend. Only concurrent in-flight fetches
+   * are coalesced.
+   */
   ttlMs: number;
   /**
    * Abandon a roster fetch after this long. Required because callers share one
@@ -195,31 +220,29 @@ export type RosterLoaderOptions = {
 };
 
 /**
- * Build a cached loader for GET /auth/allowed-emails. The cache and the
- * in-flight promise live in the returned closure, so there is one per Next.js
- * server instance.
+ * Build a loader for GET /auth/allowed-emails. The in-flight promise lives
+ * in the returned closure, so there is one per Next.js server instance.
  *
- * This is called from the `authorized` callback, which the middleware runs on
- * essentially every non-asset request — not just at sign-in. So the cache is
- * what keeps a page load from becoming N backend calls, and concurrent callers
- * share a single in-flight fetch rather than each opening their own.
+ * This is called from the `authorized` callback, which the middleware runs
+ * on essentially every non-asset request — not just at sign-in. Every call
+ * revalidates: NO result is ever served from cache, because a cached
+ * membership is exactly how a revoked/archived Person would stay admitted
+ * for up to a TTL (BUGHUNT-02 R-1 / C12). What remains is coalescing —
+ * concurrent callers share a single in-flight fetch rather than each
+ * opening their own — and a completed or failed fetch is never reused.
  *
- * Returns `null` on any failure, which callers read as "roster unknown". A
- * failure is deliberately NOT cached, so the next attempt retries rather than
- * pinning a roster-only user out for a TTL after a blip; and a stale success is
- * deliberately NOT served past its TTL, because "serve stale on refresh
- * failure" is a different revocation contract than the one docs/auth.md states.
+ * Returns `null` on any failure, which callers read as "roster unknown"
+ * (env fallback territory). A failure is NOT retained: the next call
+ * retries rather than pinning anyone out after a blip.
  */
 export function createRosterLoader(
   opts: RosterLoaderOptions,
 ): () => Promise<ReadonlySet<string> | null> {
-  const { baseUrl, sharedSecret, ttlMs, timeoutMs, fetchImpl } = opts;
-  const now = opts.now ?? (() => Date.now());
+  const { baseUrl, sharedSecret, timeoutMs, fetchImpl } = opts;
   const warn = opts.onWarn ?? (() => {});
-  let cache: { fetchedAt: number; emails: ReadonlySet<string> } | null = null;
   let inFlight: Promise<ReadonlySet<string> | null> | null = null;
 
-  async function fetchRoster(at: number): Promise<ReadonlySet<string> | null> {
+  async function fetchRoster(): Promise<ReadonlySet<string> | null> {
     try {
       const headers: Record<string, string> = {};
       if (sharedSecret) headers["x-api-key"] = sharedSecret;
@@ -252,14 +275,6 @@ export function createRosterLoader(
           .map((r) => normalizeEmail(r.email))
           .filter((e) => e.length > 0),
       );
-      // `at` is the PRE-fetch timestamp, so the effective TTL is shortened by
-      // the fetch duration — conservative, and deliberate. Writing it
-      // unconditionally is safe only because `loadRoster` keeps at most one
-      // fetch in flight: without that, an earlier-started but slower fetch
-      // could resolve last, clobber a fresher roster and stamp it with the
-      // older `fetchedAt`, keeping an archived Person admitted for up to an
-      // extra TTL window.
-      cache = { fetchedAt: at, emails };
       return emails;
     } catch (err) {
       warn(
@@ -271,19 +286,15 @@ export function createRosterLoader(
   }
 
   return function loadRoster(): Promise<ReadonlySet<string> | null> {
-    const at = now();
-    // `age >= 0` matters: a backwards clock step makes the delta negative,
-    // which would otherwise read as "fresh" and serve an expired roster for
-    // up to another TTL.
-    const age = cache ? at - cache.fetchedAt : Infinity;
-    if (cache && age >= 0 && age < ttlMs) return Promise.resolve(cache.emails);
-    // Coalesce concurrent misses onto one request. This is what keeps a page
-    // load — `authorized` runs per gated request — from fanning out into N
-    // backend calls, and it is why at most one fetch is ever in flight.
-    // Cleared in `finally`, so a failure is not retained and the next caller
-    // retries rather than being pinned out for a TTL.
+    // Coalesce concurrent callers onto one request. This is what keeps a
+    // page load — `authorized` runs per gated request — from fanning out
+    // into N backend calls, and it is why at most one fetch is ever in
+    // flight. Cleared in `finally`, so neither a success nor a failure is
+    // retained: the NEXT call revalidates, which is what makes revoking a
+    // Person take effect on their very next request rather than after a
+    // cache window.
     if (inFlight) return inFlight;
-    const pending = fetchRoster(at).finally(() => {
+    const pending = fetchRoster().finally(() => {
       if (inFlight === pending) inFlight = null;
     });
     inFlight = pending;

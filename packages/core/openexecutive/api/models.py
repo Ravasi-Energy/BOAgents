@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -208,7 +209,7 @@ class CompanyProfileResponse(BaseModel):
     stage: str
     founding_year: int | None
     headcount: int | None
-    annual_revenue_arr: float | None
+    annual_revenue_arr: Decimal | None
     annual_revenue_arr_currency: str | None
     mission: str
     vision: str
@@ -228,7 +229,7 @@ class CompanyProfileUpdateRequest(BaseModel):
     stage: str | None = None
     founding_year: int | None = None
     headcount: int | None = None
-    annual_revenue_arr: float | None = None
+    annual_revenue_arr: Decimal | None = None
     annual_revenue_arr_currency: str | None = None
     mission: str | None = None
     vision: str | None = None
@@ -240,6 +241,11 @@ class CompanyProfileUpdateRequest(BaseModel):
     financials: FinancialsData | None = None
     vendors: list[str] | None = None
     tickers: list[str] | None = None
+    # Explicit removal lists (BUGHUNT-02 P0-5): `vendors` is union-ADDED onto
+    # the stored list — never a replacement — so deletion has to be spelled
+    # out by name. `vendors=[]` is a no-op, not a clear.
+    vendors_remove: list[str] | None = None
+    tickers_remove: list[str] | None = None
 
     _check_arr_ccy = field_validator("annual_revenue_arr_currency")(_iso_currency)
 

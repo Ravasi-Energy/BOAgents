@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import logging
 from datetime import date
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
+from openexecutive.bo import identity as bo_identity
 from openexecutive.people import registry as people_registry
 from openexecutive.people import store as people_store
 from openexecutive.people.models import (
@@ -59,6 +61,8 @@ class PersonPatch(BaseModel):
     clear_on_leave: bool = False
     reports_to_person_id: int | None = None
     department_slugs: list[str] | None = None
+    department_slugs_remove: list[str] | None = None
+    expected_version: int | None = None
     authority_scope: list[AuthorityScope] | None = None
     availability: list[AvailabilityWindow] | None = None
 
@@ -94,11 +98,20 @@ def get_person(person_id: int) -> Person:
 
 
 # --------------------------------------------------------------------------- #
-# Mutation routes
+# Mutation routes — every one gated by the BO role model (BUGHUNT-02 P0-8/9/10).
+# No identity / viewer / wrong tenant → 403; only an admin may mutate. The
+# `ident` parameter also satisfies the static caller-inventory contract.
 # --------------------------------------------------------------------------- #
 
+def _admin_ident(request: Request) -> bo_identity.Identity:
+    return bo_identity.require_http(request, "people:write")
+
+
 @router.post("/people", response_model=Person, status_code=status.HTTP_201_CREATED)
-def create_person(body: PersonCreate) -> Person:
+def create_person(
+    body: PersonCreate,
+    ident: Annotated[bo_identity.Identity, Depends(_admin_ident)],
+) -> Person:
     pid = people_store.upsert_person(
         full_name=body.full_name,
         role=body.role,
@@ -125,27 +138,45 @@ def create_person(body: PersonCreate) -> Person:
 
 
 @router.patch("/people/{person_id}", response_model=Person)
-def patch_person(person_id: int, body: PersonPatch) -> Person:
+def patch_person(
+    person_id: int,
+    body: PersonPatch,
+    ident: Annotated[bo_identity.Identity, Depends(_admin_ident)],
+) -> Person:
     if people_store.get_person(person_id) is None:
         raise HTTPException(status_code=404, detail="Person not found")
 
     raw = body.model_dump(exclude_unset=True)
     if raw:
-        people_store.update_person(
-            person_id,
-            full_name=body.full_name,
-            role=body.role,
-            email=body.email,
-            slack_user_id=body.slack_user_id,
-            telegram_chat_id=body.telegram_chat_id,
-            discord_user_id=body.discord_user_id,
-            preferred_channel=body.preferred_channel,  # type: ignore[arg-type]
-            response_sla_hours=body.response_sla_hours,
-            on_leave_until=body.on_leave_until,
-            clear_on_leave=body.clear_on_leave,
-            reports_to_person_id=body.reports_to_person_id,
-            department_slugs=body.department_slugs,
-        )
+        try:
+            people_store.update_person(
+                person_id,
+                full_name=body.full_name,
+                role=body.role,
+                email=body.email,
+                slack_user_id=body.slack_user_id,
+                telegram_chat_id=body.telegram_chat_id,
+                discord_user_id=body.discord_user_id,
+                preferred_channel=body.preferred_channel,  # type: ignore[arg-type]
+                response_sla_hours=body.response_sla_hours,
+                on_leave_until=body.on_leave_until,
+                clear_on_leave=body.clear_on_leave,
+                reports_to_person_id=body.reports_to_person_id,
+                department_slugs=body.department_slugs,
+                department_slugs_remove=body.department_slugs_remove,
+                expected_version=body.expected_version,
+            )
+        except people_store.PersonConflictError as exc:
+            current = people_store.get_person(person_id)
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "error": "version_conflict",
+                    "message": str(exc),
+                    "current_version": current.version if current else None,
+                    "current": current.model_dump() if current else None,
+                },
+            ) from exc
     if "authority_scope" in raw:
         people_store.set_authority_scope(
             person_id, body.authority_scope or []
@@ -162,7 +193,10 @@ def patch_person(person_id: int, body: PersonPatch) -> Person:
 
 
 @router.post("/people/{person_id}/archive", status_code=status.HTTP_204_NO_CONTENT)
-def archive_person(person_id: int) -> Response:
+def archive_person(
+    person_id: int,
+    ident: Annotated[bo_identity.Identity, Depends(_admin_ident)],
+) -> Response:
     if people_store.get_person(person_id) is None:
         raise HTTPException(status_code=404, detail="Person not found")
     people_store.archive_person(person_id)

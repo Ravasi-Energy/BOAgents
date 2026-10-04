@@ -85,6 +85,7 @@ def initialize_db(db_path: Path | None = None) -> None:
                 on_leave_until TEXT,
                 reports_to_person_id INTEGER,
                 archived INTEGER NOT NULL DEFAULT 0,
+                version INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (reports_to_person_id) REFERENCES people(id)
@@ -118,14 +119,19 @@ def initialize_db(db_path: Path | None = None) -> None:
             CREATE INDEX IF NOT EXISTS idx_pa_person
                 ON person_availability(person_id);
         """)
-        # Additive migration: discord_user_id added after initial schema.
+        # Additive migrations: discord_user_id added after initial schema;
+        # version added for CAS on PATCH (BUGHUNT-02 P0-7).
         cols = {row["name"] for row in conn.execute("PRAGMA table_info(people)")}
-        if "discord_user_id" not in cols:
-            try:
-                conn.execute("ALTER TABLE people ADD COLUMN discord_user_id TEXT")
-            except sqlite3.OperationalError as exc:
-                if "duplicate column" not in str(exc).lower():
-                    raise
+        for col, ddl in (
+            ("discord_user_id", "ALTER TABLE people ADD COLUMN discord_user_id TEXT"),
+            ("version", "ALTER TABLE people ADD COLUMN version INTEGER NOT NULL DEFAULT 1"),
+        ):
+            if col not in cols:
+                try:
+                    conn.execute(ddl)
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column" not in str(exc).lower():
+                        raise
 
 
 # --------------------------------------------------------------------------- #
@@ -196,6 +202,9 @@ def _row_to_person(row: sqlite3.Row, conn: sqlite3.Connection) -> Person:
         on_leave_until=on_leave,
         reports_to_person_id=row["reports_to_person_id"],
         archived=bool(row["archived"]),
+        # `.keys()` is required: `in row` on sqlite3.Row iterates values,
+        # not column names — legacy rows without the column must read 1.
+        version=int(row["version"]) if "version" in row.keys() else 1,  # noqa: SIM118
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         authority_scope=_load_scope(person_id, conn),
@@ -238,7 +247,7 @@ def upsert_person(
                     email=?, slack_user_id=?, telegram_chat_id=?, discord_user_id=?,
                     preferred_channel=?,
                     response_sla_hours=?, on_leave_until=?, reports_to_person_id=?,
-                    updated_at=?
+                    version = version + 1, updated_at=?
                 WHERE id=?
                 """,
                 (
@@ -506,6 +515,10 @@ def find_approvers(
         return [_row_to_person(row, conn) for row in rows]
 
 
+class PersonConflictError(Exception):
+    """expected_version did not match the stored version → HTTP 409."""
+
+
 def update_person(
     person_id: int,
     *,
@@ -521,11 +534,21 @@ def update_person(
     clear_on_leave: bool = False,
     reports_to_person_id: int | None = None,
     department_slugs: list[str] | None = None,
+    department_slugs_remove: list[str] | None = None,
+    expected_version: int | None = None,
     db_path: Path | None = None,
 ) -> bool:
     """Partial update. Returns True if a row was modified.
 
     Pass `clear_on_leave=True` to explicitly set on_leave_until to NULL.
+
+    ``department_slugs`` is a DELTA: entries are union-added onto the
+    existing list (BUGHUNT-02 P0-7 — a partial PATCH must not silently
+    drop memberships added by someone else). Removal is explicit via
+    ``department_slugs_remove``; there is no implicit clear. When
+    ``expected_version`` is given it is checked against the row's CAS
+    counter — a stale writer loses deterministically with
+    ``PersonConflictError`` → HTTP 409.
     """
     fields: list[tuple[str, object]] = []
     if full_name is not None:
@@ -550,14 +573,45 @@ def update_person(
         fields.append(("on_leave_until", on_leave_until.isoformat()))
     if reports_to_person_id is not None:
         fields.append(("reports_to_person_id", reports_to_person_id))
-    if department_slugs is not None:
-        fields.append(("department_slugs_json", json.dumps(department_slugs)))
+    if department_slugs is not None or department_slugs_remove is not None:
+        with _get_conn(db_path) as conn:
+            row = conn.execute(
+                "SELECT department_slugs_json FROM people WHERE id = ?",
+                (person_id,),
+            ).fetchone()
+        try:
+            current_slugs: list[str] = (
+                json.loads(row["department_slugs_json"]) if row else []
+            ) or []
+        except (ValueError, TypeError):
+            current_slugs = []
+        merged = list(current_slugs)
+        for slug in department_slugs or []:
+            if slug not in merged:
+                merged.append(slug)
+        for slug in department_slugs_remove or []:
+            if slug in merged:
+                merged.remove(slug)
+        fields.append(("department_slugs_json", json.dumps(merged)))
     if not fields:
         return get_person(person_id, db_path) is not None
     fields.append(("updated_at", _now()))
     set_clause = ", ".join(f"{n} = ?" for n, _ in fields)
     values = [v for _, v in fields] + [person_id]
     with _get_conn(db_path) as conn:
+        if expected_version is not None:
+            row = conn.execute(
+                "SELECT version FROM people WHERE id = ?", (person_id,)
+            ).fetchone()
+            if row is None:
+                return False
+            current_version = int(row["version"])
+            if expected_version != current_version:
+                raise PersonConflictError(
+                    f"expected_version={expected_version} dar versiunea curentă "
+                    f"este {current_version}"
+                )
+        set_clause += ", version = version + 1"
         cursor = conn.execute(
             f"UPDATE people SET {set_clause} WHERE id = ?", values
         )

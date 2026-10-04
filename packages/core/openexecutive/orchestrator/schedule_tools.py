@@ -487,7 +487,16 @@ async def handle_schedule_followup(tool_input: dict[str, Any]) -> str:
     except ValueError:
         return json.dumps({"error": f"run_at not parseable as ISO8601: {run_at_raw!r}"})
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
+        # BUGHUNT-02 C9: a naive run_at is wall-clock in the tenant's
+        # configured timezone (bo.ui.timezone), not UTC — pinning naive
+        # input to UTC silently shifted every user-facing reminder by the
+        # UTC offset.
+        import os
+
+        from openexecutive.bo.settings import store as _bo_settings
+
+        tenant = os.environ.get("BO_TENANT_ID", "local").strip().lower()
+        parsed = parsed.replace(tzinfo=_bo_settings.ui_timezone(tenant))
     parsed_utc = parsed.astimezone(UTC)
 
     now = datetime.now(UTC)

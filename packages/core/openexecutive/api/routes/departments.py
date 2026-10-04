@@ -12,10 +12,12 @@ headers, same shape as Phase A's /morning-brief).
 from __future__ import annotations
 
 import logging
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field, field_validator
 
+from openexecutive.bo import identity as bo_identity
 from openexecutive.departments import registry, store
 from openexecutive.departments.models import (
     AuthorityLevel,
@@ -152,11 +154,19 @@ def get_department(slug: str) -> DepartmentState:
 
 
 # --------------------------------------------------------------------------- #
-# Department mutation
+# Department mutation — gated by the BO role model (BUGHUNT-02 P0-8/9/10):
+# no identity / viewer / wrong tenant → 403 before any write.
 # --------------------------------------------------------------------------- #
 
+def _admin_ident(request: Request) -> bo_identity.Identity:
+    return bo_identity.require_http(request, "departments:write")
+
+
 @router.post("/departments", response_model=DepartmentState, status_code=status.HTTP_201_CREATED)
-def create_department(body: DepartmentCreate) -> DepartmentState:
+def create_department(
+    body: DepartmentCreate,
+    ident: Annotated[bo_identity.Identity, Depends(_admin_ident)],
+) -> DepartmentState:
     """Create a new custom department. Slug is auto-derived from title."""
     try:
         state = store.create_department(body.title, mission=body.mission)
@@ -167,7 +177,10 @@ def create_department(body: DepartmentCreate) -> DepartmentState:
 
 
 @router.delete("/departments/{slug}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_department(slug: str) -> Response:
+def delete_department(
+    slug: str,
+    ident: Annotated[bo_identity.Identity, Depends(_admin_ident)],
+) -> Response:
     """Delete a department and all its Goals."""
     if store.get_department(slug) is None:
         raise HTTPException(status_code=404, detail="Unknown department")
@@ -177,7 +190,11 @@ def delete_department(slug: str) -> Response:
 
 
 @router.patch("/departments/{slug}", response_model=DepartmentState)
-def patch_department(slug: str, patch: DepartmentPatch) -> DepartmentState:
+def patch_department(
+    slug: str,
+    patch: DepartmentPatch,
+    ident: Annotated[bo_identity.Identity, Depends(_admin_ident)],
+) -> DepartmentState:
     if store.get_department(slug) is None:
         raise HTTPException(status_code=404, detail="Unknown department")
 
@@ -264,12 +281,21 @@ def _delete_goal_impl(slug: str, goal_id: int) -> None:
     response_model=Goal,
     status_code=status.HTTP_201_CREATED,
 )
-def create_goal(slug: str, body: GoalCreate) -> Goal:
+def create_goal(
+    slug: str,
+    body: GoalCreate,
+    ident: Annotated[bo_identity.Identity, Depends(_admin_ident)],
+) -> Goal:
     return _create_goal(slug, body)
 
 
 @router.patch("/departments/{slug}/goals/{goal_id}", response_model=Goal)
-def patch_goal(slug: str, goal_id: int, body: GoalPatch) -> Goal:
+def patch_goal(
+    slug: str,
+    goal_id: int,
+    body: GoalPatch,
+    ident: Annotated[bo_identity.Identity, Depends(_admin_ident)],
+) -> Goal:
     return _patch_goal(slug, goal_id, body)
 
 
@@ -277,7 +303,11 @@ def patch_goal(slug: str, goal_id: int, body: GoalPatch) -> Goal:
     "/departments/{slug}/goals/{goal_id}",
     status_code=status.HTTP_204_NO_CONTENT,
 )
-def delete_goal(slug: str, goal_id: int) -> Response:
+def delete_goal(
+    slug: str,
+    goal_id: int,
+    ident: Annotated[bo_identity.Identity, Depends(_admin_ident)],
+) -> Response:
     _delete_goal_impl(slug, goal_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -293,7 +323,12 @@ def delete_goal(slug: str, goal_id: int) -> Response:
     deprecated=True,
     summary="Deprecated alias for POST /departments/{slug}/goals",
 )
-def create_okr_alias(slug: str, body: dict, response: Response) -> Goal:
+def create_okr_alias(
+    slug: str,
+    body: dict,
+    response: Response,
+    ident: Annotated[bo_identity.Identity, Depends(_admin_ident)],
+) -> Goal:
     _set_deprecated_headers(response, f"/departments/{slug}/goals")
     try:
         parsed = GoalCreate(**_translate_legacy_body(body))
@@ -308,7 +343,13 @@ def create_okr_alias(slug: str, body: dict, response: Response) -> Goal:
     deprecated=True,
     summary="Deprecated alias for PATCH /departments/{slug}/goals/{goal_id}",
 )
-def patch_okr_alias(slug: str, okr_id: int, body: dict, response: Response) -> Goal:
+def patch_okr_alias(
+    slug: str,
+    okr_id: int,
+    body: dict,
+    response: Response,
+    ident: Annotated[bo_identity.Identity, Depends(_admin_ident)],
+) -> Goal:
     _set_deprecated_headers(response, f"/departments/{slug}/goals/{okr_id}")
     try:
         parsed = GoalPatch(**_translate_legacy_body(body))
@@ -323,7 +364,12 @@ def patch_okr_alias(slug: str, okr_id: int, body: dict, response: Response) -> G
     deprecated=True,
     summary="Deprecated alias for DELETE /departments/{slug}/goals/{goal_id}",
 )
-def delete_okr_alias(slug: str, okr_id: int, response: Response) -> Response:
+def delete_okr_alias(
+    slug: str,
+    okr_id: int,
+    response: Response,
+    ident: Annotated[bo_identity.Identity, Depends(_admin_ident)],
+) -> Response:
     _delete_goal_impl(slug, okr_id)
     # Even with 204 the response body is empty; headers still ride along.
     response.status_code = status.HTTP_204_NO_CONTENT

@@ -91,6 +91,35 @@ def _maybe_sweep_alerts(now: datetime) -> int:
     return expired
 
 
+# Stale-claim sweep (BUGHUNT-02 C13): a crashed dispatch leaves its row in
+# 'running' until the NEXT boot. Recycling claims older than the lease from
+# the tick loop bounds crash recovery without waiting for a restart; fresh
+# claims (in-flight dispatches) are left alone, so the sweep cannot
+# double-claim a live row.
+_ORPHAN_SWEEP_INTERVAL = timedelta(minutes=10)
+_last_orphan_sweep_at: datetime | None = None
+
+
+def _maybe_requeue_orphans(now: datetime) -> int:
+    global _last_orphan_sweep_at
+    if (
+        _last_orphan_sweep_at is not None
+        and now - _last_orphan_sweep_at < _ORPHAN_SWEEP_INTERVAL
+    ):
+        return 0
+    _last_orphan_sweep_at = now
+    try:
+        requeued = requeue_orphaned_running()
+        if requeued:
+            logger.warning(
+                "scheduler: requeued %d stale 'running' row(s)", requeued
+            )
+        return requeued
+    except Exception:
+        logger.exception("scheduler: orphan requeue sweep failed")
+        return 0
+
+
 async def run_scheduler(
     gateway: MCPGateway | None = None,
     *,
@@ -209,6 +238,7 @@ async def run_scheduler(
                 # an operator completes the recorded recovery path.
                 await asyncio.sleep(poll_interval_seconds)
                 continue
+            _maybe_requeue_orphans(now)
             due = claim_due_actions(now)
             if due:
                 logger.info("scheduler: %d due action(s)", len(due))

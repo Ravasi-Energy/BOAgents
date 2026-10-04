@@ -18,6 +18,14 @@ from typing import Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 SettingType = Literal["text", "enum", "integer", "timezone", "boolean"]
+
+# How a PUT's value combines with the stored one (BUGHUNT-02 P0-1/2):
+#   replace    — the payload IS the new value (default, unchanged)
+#   csv_union  — payload items union-add onto the stored CSV; "" is a no-op
+#   json_merge — payload is three-way merged into the stored JSON doc using
+#                the value at expected_version−1 as the writer's base, so
+#                untouched fields survive a stale-but-current-version write
+MergeStrategy = Literal["replace", "csv_union", "json_merge"]
 ApplyMode = Literal["IMMEDIATE", "NEW_RUN", "RESTART", "MIGRATION"]
 Scope = Literal["tenant"]
 
@@ -238,6 +246,7 @@ class SettingSpec:
     effect_ro: str
     acceptance_ro: str
     validate: Callable[[Any], Any] = field(compare=False)
+    merge: MergeStrategy = "replace"
 
     def to_meta(self) -> dict[str, Any]:
         """Public metadata for the settings UI — never includes the value."""
@@ -404,6 +413,7 @@ REGISTRY: dict[str, SettingSpec] = {
         effect_ro="Se aplică la următorul import; părțile revocate nu mai verifică.",
         acceptance_ro="JSON invalid sau registru malformat este respins la salvare.",
         validate=lambda v: _validate_trust_store(v),
+        merge="json_merge",
     ),
     "bo.packages.rollback_requires_approval": SettingSpec(
         key="bo.packages.rollback_requires_approval",
@@ -553,6 +563,7 @@ REGISTRY: dict[str, SettingSpec] = {
         effect_ro="Se aplică la următoarea observație; candidații în afara listei → PROVIDER_DENIED.",
         acceptance_ro="CSV invalid sau cu spații/@ este respins la salvare.",
         validate=lambda v: _validate_csv(v, label="Provideri permiși"),
+        merge="csv_union",
     ),
     "bo.router.allowed_regions": SettingSpec(
         key="bo.router.allowed_regions",
@@ -571,6 +582,7 @@ REGISTRY: dict[str, SettingSpec] = {
         effect_ro="Candidatul fără regiune comună cu lista → REGION_DENIED.",
         acceptance_ro="CSV invalid este respins la salvare.",
         validate=lambda v: _validate_csv(v, label="Regiuni permise"),
+        merge="csv_union",
     ),
     "bo.router.required_capabilities": SettingSpec(
         key="bo.router.required_capabilities",
@@ -589,6 +601,7 @@ REGISTRY: dict[str, SettingSpec] = {
         effect_ro="Candidatul care nu acoperă lista → CAPABILITY_MISSING.",
         acceptance_ro="CSV invalid este respins la salvare.",
         validate=lambda v: _validate_csv(v, label="Capabilități cerute"),
+        merge="csv_union",
     ),
     "bo.router.min_quality": SettingSpec(
         key="bo.router.min_quality",

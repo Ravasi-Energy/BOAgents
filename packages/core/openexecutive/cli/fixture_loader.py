@@ -1693,26 +1693,26 @@ def _seed_people(people_path: Path) -> int:
         AvailabilityWindow,
     )
 
-    # Wipe existing rows — fixture loading is destructive by design.
-    db_path = people_store.DB_PATH
-    if db_path.exists():
-        conn = sqlite3.connect(str(db_path))
-        try:
-            # Child tables first to satisfy foreign-key ordering when PRAGMA
-            # foreign_keys=ON. department_slugs are stored as a JSON column on
-            # `people` itself (no separate junction table).
-            conn.execute("DELETE FROM person_authority_scope")
-            conn.execute("DELETE FROM person_availability")
-            conn.execute("DELETE FROM people")
-            conn.commit()
-        finally:
-            conn.close()
+    # BUGHUNT-02 C6: fixture loading is additive — it must not wipe people
+    # that exist outside the fixture. Rows are keyed by email, then by exact
+    # full_name; matches update in place, new names insert. Pre-existing
+    # people untouched by the fixture keep their rows, scopes and windows.
+    existing_people = people_store.list_people(include_archived=True)
+    id_by_email = {
+        (p.email or "").strip().lower(): p.id
+        for p in existing_people if p.email
+    }
+    id_by_name = {p.full_name.strip().lower(): p.id for p in existing_people}
 
     name_to_id: dict[str, int] = {}
     for row in rows:
         full_name = row.get("full_name") or row.get("name")
         if not full_name:
             continue
+        email = row.get("email")
+        person_id = (
+            id_by_email.get(email.strip().lower()) if email else None
+        ) or id_by_name.get(full_name.strip().lower())
         person_id = people_store.upsert_person(
             full_name=full_name,
             role=row.get("role", ""),
@@ -1724,8 +1724,12 @@ def _seed_people(people_path: Path) -> int:
             response_sla_hours=int(row.get("response_sla_hours", 24)),
             department_slugs=list(row.get("department_slugs", [])),
             is_principal=bool(row.get("is_principal", False)),
+            person_id=person_id,
         )
         name_to_id[full_name] = person_id
+        if email:
+            id_by_email[email.strip().lower()] = person_id
+        id_by_name[full_name.strip().lower()] = person_id
 
         scopes_raw = row.get("authority_scope", [])
         scopes: list[AuthorityScope] = []

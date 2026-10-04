@@ -3,9 +3,30 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def _money_value(raw: str) -> Decimal:
+    """Normalize a captured amount literal to a Decimal.
+
+    The LAST separator wins as the decimal mark when both are present:
+    "1,234.56" is English (comma thousands), "1.234,56" is Romanian (dot
+    thousands). Commas alone stay thousands ("1,500" → 1500) unless the
+    tail is 1-2 digits — "12,50" reads as a decimal comma. Decimal, never
+    float — money must not round-trip through binary floats (BUGHUNT-02).
+    """
+    if "," in raw:
+        if "." in raw and raw.rfind(",") > raw.rfind("."):
+            return Decimal(raw.replace(".", "").replace(",", "."))
+        if "." not in raw:
+            head, _, tail = raw.rpartition(",")
+            if head.isdigit() and "," not in head and len(tail) in (1, 2):
+                return Decimal(f"{head}.{tail}")
+        return Decimal(raw.replace(",", ""))
+    return Decimal(raw)
 
 _CCY_FORMS = {
     "$": "USD", "usd": "USD", "us dollar": "USD", "us dollars": "USD",
@@ -45,7 +66,12 @@ _CLAUSE_SEPS = re.compile(r"[,.;:\n!?]")
 _ARR_STRONG = re.compile(r"\barr\b|\barr(?=\d)", re.IGNORECASE)
 _ARR_WEAK = re.compile(r"\brevenues?\b|\bturnover\b", re.IGNORECASE)
 _BURN_STRONG = re.compile(r"\bburn\w*", re.IGNORECASE)
-_BURN_WEAK = re.compile(r"\bcosts?\b|\bspends?\b|\bexpenses?\b", re.IGNORECASE)
+# Bilingual: Romanian operators answer "costuri lunare"/"cheltuieli" — an
+# unstated-language answer must still bind its amount to burn (BUGHUNT-02).
+_BURN_WEAK = re.compile(
+    r"\bcosts?\b|\bcosturi\b|\bspends?\b|\bexpenses?\b|\bcheltuieli\b",
+    re.IGNORECASE,
+)
 # Each field's "foreign" set is the OTHER field's vocabulary: a magnitude
 # bound to it explicitly belongs elsewhere ("costs $5M" is not revenue,
 # "revenue $50k monthly" is not burn).
@@ -402,20 +428,21 @@ def build_profile_from_answers(answers: dict[str, Any]) -> dict[str, Any]:
             _ARR_HINTS,
         )
         if arr_match:
-            val = arr_match.group(1).replace(",", "")
             # Defensive: this is a best-effort parse of free text, so a
             # surprising input must never take down onboarding. Skipping
             # the field costs one profile value; raising costs the run.
             # The answer text itself stays out of the log line.
             try:
-                profile["annual_revenue_arr"] = float(val) * 1_000_000
+                profile["annual_revenue_arr"] = _money_value(
+                    arr_match.group(1)
+                ) * 1_000_000
                 # Currency only when the answer itself states one — a bare
                 # "$20M" keeps USD (the regex required the $); "20 million"
                 # stays unknown rather than being assumed USD.
                 profile["annual_revenue_arr_currency"] = _amount_currency(
                     text, arr_match
                 )
-            except ValueError:
+            except InvalidOperation:
                 logger.warning("onboarding: could not parse ARR from the business-model answer")
 
     if "competitive_landscape" in answers:
@@ -476,10 +503,15 @@ def build_profile_from_answers(answers: dict[str, Any]) -> dict[str, Any]:
         # so _amount_currency sees it inside the match body.
         burn_match = _select_amount(
             text,
+            # The first alternative is Romanian notation ("1.234,56" —
+            # dot thousands, comma decimal); the second stays English
+            # ("1,234.56", "1234"). _money_value picks the decimal mark
+            # by the LAST separator, so both stay unambiguous.
             re.compile(
-                r"\$?(?<![\d,])(\d[\d,]*(?:\.\d+)?)\s*(?:[Kk]\s*)?"
+                r"\$?(?<![\d,])(\d{1,3}(?:\.\d{3})+,\d{1,2}|\d[\d,]*(?:\.\d+)?)"
+                r"\s*(?:[Kk]\s*)?"
                 r"(?:(?:" + _CCY_ATOM + r")[ \t]*)?"
-                r"(?:monthly|/month|per month|burn)"
+                r"(?:monthly|/month|per month|burn|lunar[ae]?)"
             ),
             _BURN_HINTS,
         )
@@ -489,14 +521,15 @@ def build_profile_from_answers(answers: dict[str, Any]) -> dict[str, Any]:
 
         fin: dict[str, Any] = {}
         if burn_match:
-            val = burn_match.group(1).replace(",", "")
             multiplier = 1000 if "k" in text[burn_match.start():burn_match.end()].lower() else 1
             try:
-                fin["burn_rate_monthly"] = float(val) * multiplier
+                fin["burn_rate_monthly"] = _money_value(
+                    burn_match.group(1)
+                ) * multiplier
                 fin["burn_rate_currency"] = _amount_currency(
                     text, burn_match
                 )
-            except ValueError:
+            except InvalidOperation:
                 # Financials are promised "stored locally only" — keep the
                 # answer text out of the log stream.
                 logger.warning("onboarding: could not parse burn rate from the financials answer")

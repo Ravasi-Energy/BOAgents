@@ -7,8 +7,9 @@ import time
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from typing import Annotated
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 
 from openexecutive.api.intake_uploads import (
     _INTAKE_GEN_CHARS_PER_FILE,
@@ -29,6 +30,7 @@ from openexecutive.api.models import (
     OnboardTranscriptTurn,
     OnboardTurnResponse,
 )
+from openexecutive.bo import identity as bo_identity
 from openexecutive.config import get_settings
 from openexecutive.memory.company_profile import CompanyProfile
 from openexecutive.onboarding.interview import (
@@ -529,8 +531,15 @@ async def get_interview(session_id: str) -> OnboardSessionResponse:
     )
 
 
+def _admin_ident(request: Request) -> bo_identity.Identity:
+    return bo_identity.require_http(request, "onboarding:write")
+
+
 @router.post("/onboard/interview/commit", response_model=CompanyProfileResponse)
-async def commit_interview(body: OnboardCommitRequest) -> CompanyProfileResponse:
+async def commit_interview(
+    body: OnboardCommitRequest,
+    ident: Annotated[bo_identity.Identity, Depends(_admin_ident)],
+) -> CompanyProfileResponse:
     """Save the reviewed draft. The single write in this whole flow.
 
     Ordering matters and is load-bearing — see the section header above.

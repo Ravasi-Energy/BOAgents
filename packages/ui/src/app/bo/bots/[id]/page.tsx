@@ -20,6 +20,8 @@ import {
   type BoRun,
 } from "@/lib/bo";
 
+import { buildBotDelta, rebaseBotDraft, type BotEdit } from "@/lib/bot-delta";
+
 type DetailState =
   | { kind: "loading" }
   | { kind: "error" }
@@ -54,6 +56,7 @@ export default function BoBotDetailPage() {
   >(null);
 
   // Keep the actually-read edit version; refetch is not consent to rebase.
+  const editBase = useRef<BotEdit | null>(null);
   const editVersion = useRef<number | null>(null);
   const editRevision = useRef(0);
   const draftDirty = useRef(false);
@@ -94,6 +97,7 @@ export default function BoBotDetailPage() {
       setState({ kind: "data", detail, runs: runs.runs, role });
       if (!draftDirty.current) {
         editVersion.current = detail.bot.draft_version;
+        editBase.current = { name: detail.bot.name, description: detail.bot.description, content: detail.draft?.content ?? {} };
         setName(detail.bot.name);
         setDescription(detail.bot.description);
         setContentJson(JSON.stringify(detail.draft?.content ?? {}, null, 2));
@@ -117,6 +121,7 @@ export default function BoBotDetailPage() {
     currentBot.current = id;
     draftDirty.current = false;
     editVersion.current = null;
+    editBase.current = null;
     setConflicted(false);
     void load();
   }, [id, load]);
@@ -127,6 +132,25 @@ export default function BoBotDetailPage() {
     setConflicted(false);
     setBusy("save");
     try { await load(); } finally { setBusy(null); }
+  }
+
+  async function reloadPreservingDraft() {
+    if (!editBase.current) return;
+    setBusy("save");
+    try {
+      const fresh = await getBoBot(id);
+      if (currentBot.current !== id) return;
+      const nextBase = { name: fresh.bot.name, description: fresh.bot.description, content: fresh.draft?.content ?? {} };
+      const next = rebaseBotDraft(editBase.current, { name, description, content: JSON.parse(contentJson) }, nextBase);
+      editBase.current = nextBase;
+      editVersion.current = fresh.bot.draft_version;
+      setName(next.name); setDescription(next.description); setContentJson(JSON.stringify(next.content, null, 2));
+      setConflicted(false);
+      setNotice({ kind: "warn", text: "Versiunea curentă a fost citită. Editurile sunt păstrate; verifică și salvează explicit." });
+      await load();
+    } catch {
+      setNotice({ kind: "danger", text: "Reîncărcarea/rebase a eșuat. Editura și baza citită sunt păstrate." });
+    } finally { setBusy(null); }
   }
 
   async function saveDraft() {
@@ -151,12 +175,9 @@ export default function BoBotDetailPage() {
       return;
     }
     try {
-      await patchBoBot(id, {
-        expected_version: editVersion.current,
-        name,
-        description,
-        content: parsed,
-      });
+      if (!editBase.current) throw Error("Baza editurii nu a fost citită.");
+      const payload = buildBotDelta(editBase.current, { name, description, content: parsed! }, editVersion.current);
+      await patchBoBot(id, payload);
       if (editRevision.current === revision) draftDirty.current = false;
       setNotice({ kind: "ok", text: editRevision.current === revision ? "Ciorna a fost salvată." : "Versiunea trimisă a fost salvată. Editurile noi sunt păstrate local și nu au fost încă salvate." });
       await load();
@@ -183,11 +204,11 @@ export default function BoBotDetailPage() {
   }
 
   async function publish() {
-    if (state.kind !== "data") return;
+    if (state.kind !== "data" || state.role !== "admin" || draftDirty.current || conflicted || editVersion.current === null) return;
     setBusy("publish");
     setNotice(null);
     try {
-      const res = await publishBoBot(id);
+      const res = await publishBoBot(id, editVersion.current);
       setNotice({
         kind: "ok",
         text: `Publicat — versiunea v${res.active_version_no} este acum activă.`,
@@ -200,6 +221,8 @@ export default function BoBotDetailPage() {
           kind: "danger",
           text: Array.isArray(d) ? d.join(" · ") : "Definiția nu validează.",
         });
+      } else if (err instanceof BoApiError && err.status === 409) {
+        setNotice({ kind: "warn", text: "Conflict de versiune la publicare. Citește și verifică versiunea curentă înainte de publicare." });
       } else {
         setNotice({ kind: "danger", text: "Publicarea a eșuat." });
       }
@@ -356,6 +379,9 @@ export default function BoBotDetailPage() {
               <InlineAlert kind="warn">Conflict de versiune. Editura locală este păstrată; refetch-ul nu schimbă baza ei.</InlineAlert>
             ) : null}
             <div>
+              <button type="button" className="bo-btn" disabled={!canWrite || busy !== null} onClick={reloadPreservingDraft}>
+                Reîncarcă și păstrează editura
+              </button>
               <button type="button" className="bo-btn" onClick={saveDraft}
                 disabled={!canWrite || busy !== null || conflicted}
                 title={!canWrite ? "Editarea cere rol de administrator" : undefined}>

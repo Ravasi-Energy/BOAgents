@@ -1,4 +1,5 @@
 "use client";
+import { profileDelta } from "@/lib/p0-edit";
 import { Money } from "@/lib/Money";
 import { moneyInputValue, parseMoneyNumber, moneyCurrency } from "@/lib/money-format";
 
@@ -435,18 +436,21 @@ function CompetitiveSection({ profile, saving, onSave, pending }: SectionCompone
   );
 }
 
-function ExternalDependenciesSection({ profile, saving, onSave, pending }: SectionComponentProps) {
+function ExternalDependenciesSection({ profile, saving, onSave, pending, persisted }: SectionComponentProps) {
+  const [vendorsRemove, setVendorsRemove] = useState("");
   const [vendors, setVendors] = useState(listToText(profile.vendors ?? []));
   const [tickers, setTickers] = useState(listToText(profile.tickers ?? []));
-  useEffect(() => {
-    setVendors(listToText(profile.vendors ?? []));
-    setTickers(listToText(profile.tickers ?? []));
-  }, [profile]);
+
 
   const [editing, setEditing] = usePendingSection(pending, {
     vendors: (v) => setVendors(listToText(v as string[])),
     tickers: (v) => setTickers(listToText(v as string[])),
   });
+  useEffect(() => {
+    if (editing) return;
+    setVendors(listToText(profile.vendors ?? []));
+    setTickers(listToText(profile.tickers ?? []));
+  }, [profile, editing]);
 
   return (
     <Section
@@ -454,7 +458,7 @@ function ExternalDependenciesSection({ profile, saving, onSave, pending }: Secti
       editing={editing}
       onEditingChange={setEditing}
       saving={saving}
-      onSave={() => onSave({ vendors: textToList(vendors), tickers: textToList(tickers) })}
+      onSave={() => onSave({ vendors: textToList(vendors), tickers: textToList(tickers), ...(persisted && textToList(vendorsRemove).length ? {vendors_remove:textToList(vendorsRemove)} : {}) })}
       viewContent={
         <div className="space-y-4">
           <p className="text-xs text-fg-subtle">
@@ -468,7 +472,8 @@ function ExternalDependenciesSection({ profile, saving, onSave, pending }: Secti
       }
       editContent={
         <div className="space-y-3">
-          <div><FieldLabel>Vendors (one per line)</FieldLabel><Textarea value={vendors} onChange={setVendors} rows={3} placeholder={"Stripe\nAWS"} /></div>
+          {persisted ? <div><FieldLabel>Explicit vendor removal (one per line)</FieldLabel><Textarea value={vendorsRemove} onChange={setVendorsRemove} rows={2} /></div> : null}
+          <div><FieldLabel>Vendors (one per line; omitted entries stay)</FieldLabel><Textarea value={vendors} onChange={setVendors} rows={3} placeholder={"Stripe\nAWS"} /></div>
           <div><FieldLabel>Tickers (one per line — yours and competitors&apos;)</FieldLabel><Textarea value={tickers} onChange={setTickers} rows={3} placeholder={"CRM\nHUBS"} /></div>
         </div>
       }
@@ -584,25 +589,35 @@ function OrgSection({ profile, saving, onSave, pending }: SectionComponentProps)
   );
 }
 
-function FinancialsSection({ profile, saving, onSave, pending }: SectionComponentProps) {
+function FinancialsSection({ profile, saving, onSave, pending, persisted }: SectionComponentProps) {
+  const editBase = useRef(profile.financials);
   const [burn, setBurn] = useState(moneyInputValue(profile.financials.burn_rate_monthly));
   const [burnCurrency, setBurnCurrency] = useState(profile.financials.burn_rate_currency ?? "");
   const [runway, setRunway] = useState(profile.financials.runway_months?.toString() ?? "");
-  useEffect(() => {
-    setBurn(moneyInputValue(profile.financials.burn_rate_monthly));
-    setBurnCurrency(profile.financials.burn_rate_currency ?? "");
-    setRunway(profile.financials.runway_months?.toString() ?? "");
-  }, [profile]);
+
 
   const [editing, setEditing] = usePendingSection(pending, {
     burn_rate_monthly: (v) => setBurn(moneyInputValue(v)),
     burn_rate_currency: (v) => setBurnCurrency(v == null ? "" : String(v)),
     runway_months: (v) => setRunway(v == null ? "" : String(v)),
   });
+  useEffect(() => {
+    if (editing) return;
+    editBase.current=profile.financials;
+    setBurn(moneyInputValue(profile.financials.burn_rate_monthly));
+    setBurnCurrency(profile.financials.burn_rate_currency ?? "");
+    setRunway(profile.financials.runway_months?.toString() ?? "");
+  }, [profile, editing]);
 
   const [moneyError, setMoneyError] = useState("");
   const saveMoney = async (payload: object) => {
-    try { const amount = parseMoneyNumber(burn); setMoneyError(""); await onSave({ ...payload, financials: { ...profile.financials, runway_months: runway ? parseFloat(runway) : null, burn_rate_monthly: amount, burn_rate_currency: moneyCurrency(burnCurrency) } }); }
+    try {
+      const base=editBase.current;
+      const amount=burn === moneyInputValue(base.burn_rate_monthly) ? base.burn_rate_monthly : parseMoneyNumber(burn);
+      const patch={ ...payload, financials: { ...base, runway_months: runway ? parseFloat(runway) : null, burn_rate_monthly: amount, burn_rate_currency: moneyCurrency(burnCurrency) } };
+      setMoneyError("");
+      await onSave(persisted ? profileDelta(patch,{financials:base}) as Partial<CompanyProfile> : patch);
+    }
     catch (error) { setMoneyError(error instanceof Error ? error.message : "Sumă invalidă"); throw error; }
   };
   return (
@@ -642,6 +657,7 @@ interface SectionComponentProps {
   // Ask OE suggested values (flat keys) — sections merge their own keys
   // into draft state and flip into edit mode when one lands.
   pending: PendingValues | null;
+  persisted?: boolean;
 }
 
 // ── composed section list ────────────────────────────────────────────────────
@@ -679,6 +695,7 @@ export interface ProfileSectionsProps {
   /** Ask OE suggested values. Only the profile page registers a form, so the
    * onboarding draft screen leaves this null. */
   pending?: PendingValues | null;
+  persisted?: boolean;
   /** Sections to leave out. Onboarding omits "org" because org_structure is
    * derived from its people and department tables at commit time — rendering
    * it here too would give the user two places to edit the same thing. */
@@ -690,13 +707,14 @@ export function ProfileSections({
   saving,
   onSave,
   pending = null,
+  persisted = false,
   omit = [],
 }: ProfileSectionsProps) {
   const hidden = new Set(omit);
   return (
     <div className="flex flex-col gap-4">
       {SECTION_ORDER.filter(({ id }) => !hidden.has(id)).map(({ id, Component }) => (
-        <Component key={id} profile={profile} saving={saving} onSave={onSave} pending={pending} />
+        <Component key={id} profile={profile} saving={saving} onSave={onSave} pending={pending} persisted={persisted} />
       ))}
     </div>
   );

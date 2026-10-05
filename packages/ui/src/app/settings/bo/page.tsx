@@ -1,4 +1,5 @@
 "use client";
+import { CSV_SETTINGS, settingPatch, P0EditError } from "@/lib/p0-edit";
 import { MoneySettings } from "@/lib/Money";
 
 // Setări BOAgents — BO-SET-001. Toate valorile vin din /bo/settings; fiecare
@@ -45,13 +46,16 @@ function SettingEditor({
   canEdit: boolean;
   onSaved: (s: BoSetting) => void;
 }) {
+  const [base, setBase] = useState(setting);
+  const [conflict, setConflict] = useState(false);
+  const [removeDraft, setRemoveDraft] = useState("");
   const [draft, setDraft] = useState(String(setting.value ?? ""));
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<
     { kind: "ok" | "warn" | "danger"; text: string } | null
   >(null);
 
-  const dirty = draft !== String(setting.value ?? "");
+  const dirty = draft !== String(base.value ?? "") || !!removeDraft.trim();
 
   async function save() {
     setSaving(true);
@@ -69,7 +73,10 @@ function SettingEditor({
       value = draft === "true";
     }
     try {
-      const res = await putBoSetting(setting.key, value, setting.version);
+      const patch = settingPatch(setting.key, draft, base, removeDraft);
+      if (CSV_SETTINGS.has(setting.key) || setting.key === "bo.packages.trust_store_json") value = patch.value;
+      const res = await putBoSetting(setting.key, value, base.version, "remove" in patch ? patch.remove : undefined);
+      setBase(res.setting);setDraft(String(res.setting.value ?? ""));setRemoveDraft("");setConflict(false);
       onSaved(res.setting);
       setNotice({
         kind: "ok",
@@ -78,10 +85,13 @@ function SettingEditor({
           : `Salvat. ${setting.effect_ro}`,
       });
     } catch (err) {
-      if (err instanceof BoApiError && err.status === 409) {
+      if (err instanceof P0EditError) {
+        setNotice({kind:'danger',text:err.message});
+      } else if (err instanceof BoApiError && err.status === 409) {
+        setConflict(true);
         setNotice({
           kind: "warn",
-          text: "Altă modificare s-a salvat între timp. Reîncarcă pagina pentru valoarea curentă.",
+          text: "Conflict 409. Editura este păstrată; citește baza curentă înainte de salvare.",
         });
       } else if (err instanceof BoApiError && err.status === 422) {
         const detail =
@@ -97,6 +107,27 @@ function SettingEditor({
     }
   }
 
+  async function rebase() {
+    setSaving(true);
+    try {
+      const fresh=(await getBoSettings()).settings.find(s=>s.key===setting.key);
+      if(!fresh)throw Error("Setarea nu mai există.");
+      // Keep the user's sparse operation against its original read base.
+      const delta=settingPatch(setting.key,draft,base,removeDraft);
+      if(CSV_SETTINGS.has(setting.key)) {
+        setDraft([...new Set([...String(fresh.value??'').split(','),...String(delta.value).split(',')])].filter(Boolean).join(','));
+      } else if(setting.key==='bo.packages.trust_store_json') {
+        // A sparse JSON draft stays sparse after explicit rebase. Unchanged
+        // fresh fields are never copied back into a later write.
+        setDraft(String(delta.value));
+        setBase(fresh);setConflict(false);
+        setNotice({kind:'ok',text:'Baza curentă citită; delta JSON păstrată.'});return;
+      }
+      setBase(fresh);setConflict(false);
+      setNotice({kind:'ok',text:'Baza curentă citită; editura păstrată.'});
+    } catch {setNotice({kind:'danger',text:'Reîncărcarea a eșuat; editura și baza sunt păstrate.'});}
+    finally {setSaving(false);}
+  }
   const inputId = `set-${setting.key}`;
   const disabled = !canEdit || saving;
 
@@ -167,7 +198,7 @@ function SettingEditor({
           type="button"
           className="bo-btn bo-btn--primary"
           onClick={save}
-          disabled={disabled || !dirty}
+          disabled={disabled || !dirty || conflict}
           title={
             !canEdit
               ? "Necesită rol de administrator"
@@ -186,6 +217,8 @@ function SettingEditor({
           ? ` Ultima modificare: ${setting.updated_by}.`
           : ""}
       </p>
+      {CSV_SETTINGS.has(setting.key) ? <Field label="Eliminare explicită (CSV)" htmlFor={inputId+'-remove'}><input id={inputId+'-remove'} className="bo-input" aria-label={'Eliminare explicită '+setting.label_ro} value={removeDraft} disabled={disabled} onChange={e=>setRemoveDraft(e.target.value)} /></Field> : null}
+      {conflict ? <button className="bo-btn" disabled={saving} onClick={rebase}>Reîncarcă și păstrează editura</button> : null}
       {notice ? (
         <div style={{ marginTop: 10 }}>
           <InlineAlert kind={notice.kind === "ok" ? "info" : notice.kind}>

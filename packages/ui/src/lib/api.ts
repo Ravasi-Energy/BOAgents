@@ -348,7 +348,7 @@ export async function getCompanyProfile(): Promise<CompanyProfile> {
   return res.json();
 }
 
-export async function updateCompanyProfile(patch: Partial<CompanyProfile>): Promise<CompanyProfile> {
+export async function updateCompanyProfile(patch: Partial<CompanyProfile> | Record<string, unknown>): Promise<CompanyProfile> {
   const res = await fetch(`${API_BASE}/company-profile`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
@@ -370,7 +370,7 @@ export async function uploadDocument(
     method: "POST",
     body: formData,
   });
-  if (!res.ok) throw new Error("Failed to upload document");
+  if (!res.ok) throw new Error(`Failed to upload document (HTTP ${res.status}); file kept for retry.`);
   return res.json();
 }
 
@@ -428,7 +428,7 @@ export async function getBuiltinFile(
   domain: string,
   filename: string
 ): Promise<BuiltinFileContent> {
-  const res = await fetch(`${API_BASE}/knowledge/builtin/${domain}/${filename}`);
+  const res = await fetch(`${API_BASE}/knowledge/builtin/${encodeURIComponent(domain)}/${encodeURIComponent(filename)}`);
   if (!res.ok) throw new Error("Failed to fetch file content");
   return res.json();
 }
@@ -455,7 +455,7 @@ export async function updateBuiltinFile(
   filename: string,
   content: string
 ): Promise<{ chunks_indexed: number }> {
-  const res = await fetch(`${API_BASE}/knowledge/builtin/${domain}/${filename}`, {
+  const res = await fetch(`${API_BASE}/knowledge/builtin/${encodeURIComponent(domain)}/${encodeURIComponent(filename)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ domain, filename, content }),
@@ -465,7 +465,7 @@ export async function updateBuiltinFile(
 }
 
 export async function deleteBuiltinFile(domain: string, filename: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/knowledge/builtin/${domain}/${filename}`, {
+  const res = await fetch(`${API_BASE}/knowledge/builtin/${encodeURIComponent(domain)}/${encodeURIComponent(filename)}`, {
     method: "DELETE",
   });
   if (!res.ok) throw new Error("Failed to delete file");
@@ -486,7 +486,7 @@ export async function getFailureFile(
   domain: string,
   filename: string
 ): Promise<BuiltinFileContent> {
-  const res = await fetch(`${API_BASE}/knowledge/failures/${domain}/${filename}`);
+  const res = await fetch(`${API_BASE}/knowledge/failures/${encodeURIComponent(domain)}/${encodeURIComponent(filename)}`);
   if (!res.ok) throw new Error("Failed to fetch failure content");
   return res.json();
 }
@@ -513,7 +513,7 @@ export async function updateFailureFile(
   filename: string,
   content: string
 ): Promise<{ chunks_indexed: number }> {
-  const res = await fetch(`${API_BASE}/knowledge/failures/${domain}/${filename}`, {
+  const res = await fetch(`${API_BASE}/knowledge/failures/${encodeURIComponent(domain)}/${encodeURIComponent(filename)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ domain, filename, content }),
@@ -523,7 +523,7 @@ export async function updateFailureFile(
 }
 
 export async function deleteFailureFile(domain: string, filename: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/knowledge/failures/${domain}/${filename}`, {
+  const res = await fetch(`${API_BASE}/knowledge/failures/${encodeURIComponent(domain)}/${encodeURIComponent(filename)}`, {
     method: "DELETE",
   });
   if (!res.ok) throw new Error("Failed to delete failure file");
@@ -2139,7 +2139,7 @@ export async function listDepartments(): Promise<DepartmentState[]> {
 }
 
 export async function getDepartment(slug: string): Promise<DepartmentState> {
-  const res = await fetch(`${API_BASE}/departments/${slug}`);
+  const res = await fetch(`${API_BASE}/departments/${encodeURIComponent(slug)}`);
   if (!res.ok) throw new Error(`Failed to load department: ${res.statusText}`);
   return res.json();
 }
@@ -2159,7 +2159,7 @@ export interface DepartmentPatch {
 }
 
 export async function updateDepartment(slug: string, patch: DepartmentPatch): Promise<DepartmentState> {
-  const res = await fetch(`${API_BASE}/departments/${slug}`, {
+  const res = await fetch(`${API_BASE}/departments/${encodeURIComponent(slug)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(patch),
@@ -2184,7 +2184,7 @@ export async function createDepartment(body: DepartmentCreate): Promise<Departme
 }
 
 export async function deleteDepartment(slug: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/departments/${slug}`, {
+  const res = await fetch(`${API_BASE}/departments/${encodeURIComponent(slug)}`, {
     method: "DELETE",
   });
   if (!res.ok) throw new Error(`Failed to delete department: ${res.statusText}`);
@@ -2200,7 +2200,7 @@ export interface GoalCreate {
 }
 
 export async function createGoal(slug: string, body: GoalCreate): Promise<Goal> {
-  const res = await fetch(`${API_BASE}/departments/${slug}/goals`, {
+  const res = await fetch(`${API_BASE}/departments/${encodeURIComponent(slug)}/goals`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -2219,7 +2219,7 @@ export interface GoalPatch {
 }
 
 export async function updateGoal(slug: string, goalId: number, patch: GoalPatch): Promise<Goal> {
-  const res = await fetch(`${API_BASE}/departments/${slug}/goals/${goalId}`, {
+  const res = await fetch(`${API_BASE}/departments/${encodeURIComponent(slug)}/goals/${goalId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(patch),
@@ -2229,7 +2229,7 @@ export async function updateGoal(slug: string, goalId: number, patch: GoalPatch)
 }
 
 export async function deleteGoal(slug: string, goalId: number): Promise<void> {
-  const res = await fetch(`${API_BASE}/departments/${slug}/goals/${goalId}`, {
+  const res = await fetch(`${API_BASE}/departments/${encodeURIComponent(slug)}/goals/${goalId}`, {
     method: "DELETE",
   });
   if (!res.ok) throw new Error(`Failed to delete Goal: ${res.statusText}`);
@@ -2248,6 +2248,7 @@ export interface AvailabilityWindow {
 
 export interface Person {
   id: number;
+  version: number;
   full_name: string;
   role: string;
   is_principal: boolean;
@@ -2304,6 +2305,7 @@ export async function createPerson(body: PersonCreate): Promise<Person> {
 }
 
 export interface PersonPatch {
+  expected_version?: number;
   full_name?: string;
   role?: string;
   email?: string | null;
@@ -2319,13 +2321,18 @@ export interface PersonPatch {
   availability?: AvailabilityWindow[];
 }
 
+export class PersonUpdateError extends Error {
+  status: number;
+  constructor(status: number) { super(status === 409 ? "Conflict 409: editura este păstrată. Reîncarcă explicit înainte de salvare." : `Failed to update person: HTTP ${status}`); this.status = status; }
+}
+
 export async function updatePerson(id: number, patch: PersonPatch): Promise<Person> {
   const res = await fetch(`${API_BASE}/people/${id}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(patch),
   });
-  if (!res.ok) throw new Error(`Failed to update person: ${res.statusText}`);
+  if (!res.ok) throw new PersonUpdateError(res.status);
   return res.json();
 }
 

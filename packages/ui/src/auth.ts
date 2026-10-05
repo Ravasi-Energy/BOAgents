@@ -1,3 +1,4 @@
+import { deniedAuthResponse } from "@/lib/auth-denial";
 import NextAuth from "next-auth";
 import Google from "next-auth/providers/google";
 import {
@@ -8,19 +9,13 @@ import {
   resolveAllowed,
 } from "@/lib/allowlist";
 
-// Operator-controlled allowlist, read once at startup (docs/auth.md promises a
-// restart is what makes an edit live). ALWAYS honored: the backend People
-// roster is ADDITIVE on top of it, never a replacement — see lib/allowlist.ts
-// for why (issue #132).
+// Env bootstrap is admitted only after the backend confirms administered:false.
 const ENV_ALLOWED = parseAllowedEmails(process.env.ALLOWED_EMAILS);
 
 const BACKEND_BASE = process.env.BACKEND_BASE_URL ?? "http://localhost:8000";
 const BACKEND_SHARED_SECRET = process.env.BACKEND_SHARED_SECRET ?? "";
 
-// How long a fetched roster is trusted. `authorized` runs on nearly every
-// gated request, so this is what keeps one page load from becoming N backend
-// calls — and it bounds how long an archived Person stays admitted. Quoted as
-// "5 minutes" in docs/auth.md; keep the two in step.
+// Interface compatibility only: completed roster responses are never cached.
 const ROSTER_TTL_MS = 5 * 60 * 1000;
 
 // Give up on a roster fetch well before undici's ~300s default. Concurrent
@@ -40,15 +35,7 @@ const loadRoster = createRosterLoader({
   onWarn: (message) => console.warn(message),
 });
 
-/**
- * Resolve whether an email is on the allowlist — the union of ALLOWED_EMAILS
- * and the People roster. An env hit short-circuits, so the roster is never
- * fetched for a configured operator.
- *
- * Called by both the NextAuth `signIn` callback (strict, denies on miss) and
- * the `authorized` callback (re-runs on every gated request so a user removed
- * from the roster mid-session is bounced on next request).
- */
+// Both login and existing JWT authorization revalidate the current DTO.
 const checkEmailAllowed = (email: string) =>
   resolveAllowed(email, ENV_ALLOWED, loadRoster);
 
@@ -144,21 +131,15 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     // whose JWT predates the roster being installed — would keep coasting
     // until their JWT expires.
     //
-    // Fails open ONLY for a session that is not in ALLOWED_EMAILS and whose
-    // roster membership is currently unreadable, so a brief backend hiccup
-    // doesn't sign out everyone with a valid session — the strict `signIn`
-    // gate already vetted them once. A *definite* miss (both lists readable,
-    // neither matched) still revokes. `decideSessionAction` owns that
-    // ordering so it can be tested without importing this module.
-    authorized: async ({ auth }) => {
-      if (!auth?.user?.email) return false;
+    // Unknown/error also revokes. A previous valid JWT does not bypass this gate.
+    authorized: async ({ auth, request }) => {
+      if (!auth?.user?.email) return deniedAuthResponse(request);
       const email = auth.user.email.toLowerCase();
       const decision = await checkEmailAllowed(email);
       // Exhaustive on purpose: a `!== "revoke"` test would admit any future
       // SessionAction, i.e. fail open. This way adding one is a build error.
       switch (decideSessionAction(decision)) {
         case "allow":
-        case "allow_roster_unknown":
           return true;
         case "revoke":
           // Fire-and-forget audit so a mid-session eviction leaves a
@@ -171,12 +152,11 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
               revoked: true,
               reason: "not_in_allowlist",
               source: decision.source,
-              // Always false on this branch; read off the decision anyway so
-              // it cannot silently desync from decideSessionAction.
+              // Distinguish an explicit revocation from an unavailable roster.
               roster_unavailable: decision.rosterUnknown,
             },
           );
-          return false;
+          return deniedAuthResponse(request);
       }
     },
   },

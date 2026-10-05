@@ -14,7 +14,7 @@ test("C12 archived user in ALLOWED_EMAILS is revoked (authoritative roster)", ()
   const archived = decideAllowed(
     "plecat@probe.local",
     new Set(["plecat@probe.local"]),
-    new Set(),
+    { administered: true, emails: new Set() },
   );
   const action = decideSessionAction(archived);
   assert.equal(action, "revoke");
@@ -34,7 +34,7 @@ test("C12 roster loader revalidates inside TTL (revocation is not cached)", asyn
       ok: true,
       json: async () => {
         fetches += 1;
-        return roster.map((email, index) => ({ email, person_id: index + 1 }));
+        return { administered: true, emails: roster.map((email, index) => ({ email, person_id: index + 1 })) };
       },
     }),
   });
@@ -43,5 +43,8 @@ test("C12 roster loader revalidates inside TTL (revocation is not cached)", asyn
   now += 60 * 1000;
   const duringTtl = await load();
   assert.equal(fetches, 2);
-  assert.equal([...(duringTtl ?? [])].length, 0);
+  assert.equal(first.administered, true);
+  assert.equal(first.emails.size, 1);
+  assert.equal(duringTtl.administered, true);
+  assert.equal(duringTtl.emails.size, 0);
 });

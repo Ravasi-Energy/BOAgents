@@ -1,4 +1,5 @@
 "use client";
+import { catalogPatch } from "@/lib/p0-edit";
 import { Money } from "@/lib/Money";
 import { moneyInputValue, parseMoneyInput } from "@/lib/money-format";
 
@@ -6,7 +7,7 @@ import { moneyInputValue, parseMoneyInput } from "@/lib/money-format";
 // routerul în mod observare. Pagina afișează explicit «observare» — decizia
 // calculată nu schimbă niciodată modelul folosit, iar estimarea de cost nu
 // este prezentată ca economie realizată.
-import { Fragment, useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState, useRef } from "react";
 
 import {
   BoPage,
@@ -78,6 +79,11 @@ function EntryEditor({
   onSaved: () => void;
   onCancel: () => void;
 }) {
+  const [base, setBase] = useState(entry);
+  const initialObservedAt = useRef(entry?.quality?.observed_at || new Date().toISOString().replace(/\.\d+Z$/, "Z"));
+  const originalPayload = useRef<Record<string, unknown> | null>(null);
+  const [removeCaps, setRemoveCaps] = useState("");
+  const [removeRegions, setRemoveRegions] = useState("");
   const [provider, setProvider] = useState(entry?.provider ?? "");
   const [modelId, setModelId] = useState(entry?.model_id ?? "");
   const [modelVersion, setModelVersion] = useState(entry?.model_version ?? "");
@@ -117,11 +123,7 @@ function EntryEditor({
       .map((s) => s.trim())
       .filter(Boolean);
 
-  async function submit() {
-    setErr(null);
-    setConflict(false);
-    setBusy(true);
-    try {
+  function payload() {
       const quality =
         score.trim() || taskKind.trim()
           ? {
@@ -132,7 +134,7 @@ function EntryEditor({
               eval_set_version: evalVersion.trim() || "v1",
               observed_at:
                 observedAt.trim() ||
-                new Date().toISOString().replace(/\.\d+Z$/, "Z"),
+                initialObservedAt.current,
               sample_count: Number(sampleCount) || 0,
             }
           : null;
@@ -153,20 +155,35 @@ function EntryEditor({
         purpose: purpose.trim() || "general",
         source: source.trim() || "admin",
       };
-      if (entry) {
-        await updateBoCatalogEntry(entry.entry_id, {
-          ...payload,
-          expected_version: entry.version,
-        });
+      return payload;
+  }
+  if(!originalPayload.current) originalPayload.current=payload();
+  async function rebase() {
+    if(!base)return;
+    setBusy(true);
+    try {
+      const fresh=(await getBoRoutingCatalog()).entries.find(row=>row.entry_id===base.entry_id);
+      if(!fresh)throw Error('Intrarea nu mai există.');
+      setBase(fresh);setConflict(false);setErr('Baza curentă citită; editurile locale sunt păstrate.');
+    } catch {setErr('Reîncărcarea a eșuat; editura și baza sunt păstrate.');}
+    finally {setBusy(false);}
+  }
+  async function submit() {
+    if(conflict)return;
+    setErr(null);setBusy(true);
+    try {
+      const draft=payload();
+      if (base) {
+        await updateBoCatalogEntry(base.entry_id, catalogPatch(draft, originalPayload.current!, base, {capabilities:removeCaps,regions:removeRegions}));
       } else {
-        await createBoCatalogEntry(payload);
+        await createBoCatalogEntry(draft);
       }
       onSaved();
     } catch (e) {
       if (e instanceof BoApiError && e.status === 409) {
         setConflict(true);
         setErr(
-          "Altă sesiune a modificat intrarea între timp — reîncarcă și reia editarea.",
+          "Altă sesiune a modificat intrarea între timp — editura este păstrată; citește baza curentă.",
         );
       } else if (e instanceof BoApiError) {
         setErr(`${e.code}${e.detail ? ` — ${String(e.detail)}` : ""}`);
@@ -183,6 +200,8 @@ function EntryEditor({
       <h3 className="bo-card-title">
         {entry ? `Editează ${entry.provider}/${entry.model_id}` : "Intrare nouă în catalog"}
       </h3>
+      {base ? <div className="bo-row"><Field label="Eliminare explicită capabilități (CSV)" htmlFor="cat-remove-caps"><input id="cat-remove-caps" className="bo-input" value={removeCaps} onChange={e=>setRemoveCaps(e.target.value)} /></Field><Field label="Eliminare explicită regiuni (CSV)" htmlFor="cat-remove-regions"><input id="cat-remove-regions" className="bo-input" value={removeRegions} onChange={e=>setRemoveRegions(e.target.value)} /></Field></div> : null}
+      {conflict ? <button className="bo-btn" onClick={rebase} disabled={busy}>Reîncarcă și păstrează editura</button> : null}
       {err ? (
         <InlineAlert kind={conflict ? "warn" : "danger"}>{err}</InlineAlert>
       ) : null}

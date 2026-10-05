@@ -21,6 +21,7 @@ const PROSE_CLASS =
 
 export default function CompanyPanel({ domains }: CompanyPanelProps) {
   const [docs, setDocs] = useState<CompanyDoc[]>([]);
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [domain, setDomain] = useState("general");
@@ -46,17 +47,19 @@ export default function CompanyPanel({ domains }: CompanyPanelProps) {
   }, [viewing]);
 
   async function handleFile(file: File) {
+    setPendingFile(file);
     setIsUploading(true);
     setError(null);
     try {
       await uploadDocument(file, domain);
       const updated = await listDocuments();
       setDocs(updated);
+      setPendingFile(null);
+      if (fileInputRef.current) fileInputRef.current.value = "";
     } catch (e) {
       setError(e instanceof Error ? e.message : "Upload failed");
     } finally {
       setIsUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = "";
     }
   }
 
@@ -149,6 +152,7 @@ export default function CompanyPanel({ domains }: CompanyPanelProps) {
           </label>
         </div>
         <p className="text-xs text-fg-subtle mt-3">PDF, DOCX, MD, TXT — up to 50 MB</p>
+        {pendingFile && error ? <div className="mt-3 text-xs text-fg-muted"><p>Pending file: {pendingFile.name}</p><button type="button" disabled={isUploading} onClick={()=>handleFile(pendingFile)} className="mt-2 px-3 py-1.5 rounded bg-surface-input">Retry upload</button></div> : null}
         {isUploading && (
           <p className="mt-3 text-xs text-indigo-400 animate-pulse">Indexing…</p>
         )}

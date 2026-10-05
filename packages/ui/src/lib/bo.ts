@@ -75,11 +75,12 @@ export function putBoSetting(
   key: string,
   value: unknown,
   expectedVersion: number,
+  remove?: string[],
 ): Promise<{ result: string; applied: boolean; setting: BoSetting }> {
   return req(`/settings/${encodeURIComponent(key)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ value, expected_version: expectedVersion }),
+    body: JSON.stringify({ value, expected_version: expectedVersion, ...(remove?.length ? {remove} : {}) }),
   });
 }
 
@@ -522,6 +523,8 @@ export function updateBoCatalogEntry(
     purpose: string;
     source: string;
     expected_version: number;
+    capabilities_remove?: string[];
+    regions_remove?: string[];
   },
 ): Promise<{ entry: BoCatalogEntry }> {
   return req(`/routing/catalog/${id}`, {

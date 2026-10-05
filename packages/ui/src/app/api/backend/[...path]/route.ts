@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { auth } from "@/auth";
+import { backendUrl } from "@/lib/backend-url";
 
 // Streaming-aware proxy to the FastAPI backend. Replaces the `rewrites()` rule
 // in next.config.ts, which buffers SSE responses in dev so the chat stream
@@ -26,10 +27,7 @@ async function proxy(req: NextRequest, params: { path: string[] }): Promise<Resp
     });
   }
 
-  const path = params.path.join("/");
-  const url = new URL(`${BACKEND_BASE}/${path}`);
-  // Preserve query string.
-  req.nextUrl.searchParams.forEach((v, k) => url.searchParams.append(k, v));
+  const url = backendUrl(BACKEND_BASE, params.path, req.nextUrl.searchParams);
 
   // Copy headers, drop hop-by-hop and Next.js internals. Also drop
   // the entire `x-caller-*` family — we re-stamp the caller identity

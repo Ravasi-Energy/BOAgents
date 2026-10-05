@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef } from "react";
+import { profileDelta } from "@/lib/p0-edit";
 import Link from "next/link";
 import { useAskOEFormContext } from "@/components/askoe/AskOEContext";
 import {
@@ -42,13 +43,15 @@ export default function CompanyProfilePage() {
     async (patch: Partial<CompanyProfile>) => {
       setSaving(true);
       try {
-        const updated = await updateCompanyProfile(patch);
+        if(!profile)throw Error("Profilul citit lipsește.");
+        const delta=profileDelta(patch as unknown as Record<string, unknown>, profile as unknown as Record<string, unknown>);
+        const updated = await updateCompanyProfile(delta);
         setProfile(updated);
       } finally {
         setSaving(false);
       }
     },
-    []
+    [profile]
   );
 
   // Register with Ask OE once the profile is loaded. Field values are the
@@ -148,7 +151,7 @@ export default function CompanyProfilePage() {
                 </Link>
               </div>
 
-              <ProfileSections profile={profile} saving={saving} onSave={save} pending={pending} />
+              <ProfileSections persisted profile={profile} saving={saving} onSave={save} pending={pending} />
             </>
           )}
         </div>

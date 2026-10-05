@@ -264,21 +264,29 @@ def _entry_doc_from_validated(v: dict[str, Any]) -> dict[str, Any]:
 _MISSING = object()
 
 
-def _merge_doc(base: Any, current: Any, incoming: Any) -> Any:
+def _merge_doc(current: Any, incoming: Any) -> Any:
     if isinstance(incoming, dict) and isinstance(current, dict):
-        base_map = base if isinstance(base, dict) else {}
         merged = dict(current)
         for k, v in incoming.items():
-            bv = base_map.get(k, _MISSING)
-            if bv is not _MISSING and v == bv:
+            if k.endswith("_remove"):
                 continue
             cv = merged.get(k, _MISSING)
             if isinstance(v, dict) and isinstance(cv, dict):
-                merged[k] = _merge_doc(bv if bv is not _MISSING else {}, cv, v)
+                merged[k] = _merge_doc(cv, v)
             elif isinstance(v, list) and isinstance(cv, list):
                 merged[k] = _union_list(cv, v)
             else:
                 merged[k] = v
+        # `<field>_remove` ops are consumed at any dict depth — they drop
+        # named entries from a same-level list and never persist (CONTROL R12).
+        for k, v in incoming.items():
+            if not k.endswith("_remove") or not isinstance(v, list) or not v:
+                continue
+            entries = merged.get(k[: -len("_remove")])
+            if isinstance(entries, list):
+                merged[k[: -len("_remove")]] = [
+                    e for e in entries if e not in v
+                ]
         return merged
     if isinstance(incoming, list) and isinstance(current, list):
         return _union_list(current, incoming)
@@ -318,7 +326,7 @@ def _merge_entry_fields(
             merged[key] = _union_list(list(merged[key] or []), list(value))
             continue
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
-            merged[key] = _merge_doc({}, merged[key], value)
+            merged[key] = _merge_doc(merged[key], value)
         else:
             merged[key] = value
     return merged

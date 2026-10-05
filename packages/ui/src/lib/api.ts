@@ -321,6 +321,8 @@ export async function commitOnboardDraft(
 }
 
 export interface CompanyProfile {
+  /** Durable CAS counter persisted server-side — PATCH must pin it. */
+  version: number;
   name: string;
   industry: string;
   stage: string;

@@ -13,6 +13,9 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
+# Module-attribute call (not `from ... import log_event`) so the suite's
+# audit silencer — monkeypatch.setattr(audit, "log_event", ...) — applies.
+from openexecutive import audit as _audit
 from openexecutive.bo import identity as bo_identity
 from openexecutive.people import registry as people_registry
 from openexecutive.people import store as people_store
@@ -62,9 +65,19 @@ class PersonPatch(BaseModel):
     reports_to_person_id: int | None = None
     department_slugs: list[str] | None = None
     department_slugs_remove: list[str] | None = None
-    expected_version: int | None = None
+    # Durable CAS (CONTROL R12): required — a writer always declares the
+    # version it read; missing → 422, stale → 409.
+    expected_version: int
     authority_scope: list[AuthorityScope] | None = None
     availability: list[AvailabilityWindow] | None = None
+    # Explicit clear ops for the nullable contact/reference fields —
+    # sending the field as JSON null is refused (ambiguous), clearing is
+    # only ever spelled out by name.
+    clear_email: bool = False
+    clear_slack_user_id: bool = False
+    clear_telegram_chat_id: bool = False
+    clear_discord_user_id: bool = False
+    clear_reports_to: bool = False
 
 
 # --------------------------------------------------------------------------- #
@@ -112,20 +125,23 @@ def create_person(
     body: PersonCreate,
     ident: Annotated[bo_identity.Identity, Depends(_admin_ident)],
 ) -> Person:
-    pid = people_store.upsert_person(
-        full_name=body.full_name,
-        role=body.role,
-        is_principal=body.is_principal,
-        department_slugs=body.department_slugs,
-        email=body.email,
-        slack_user_id=body.slack_user_id,
-        telegram_chat_id=body.telegram_chat_id,
-        discord_user_id=body.discord_user_id,
-        preferred_channel=body.preferred_channel,  # type: ignore[arg-type]
-        response_sla_hours=body.response_sla_hours,
-        on_leave_until=body.on_leave_until,
-        reports_to_person_id=body.reports_to_person_id,
-    )
+    try:
+        pid = people_store.upsert_person(
+            full_name=body.full_name,
+            role=body.role,
+            is_principal=body.is_principal,
+            department_slugs=body.department_slugs,
+            email=body.email,
+            slack_user_id=body.slack_user_id,
+            telegram_chat_id=body.telegram_chat_id,
+            discord_user_id=body.discord_user_id,
+            preferred_channel=body.preferred_channel,  # type: ignore[arg-type]
+            response_sla_hours=body.response_sla_hours,
+            on_leave_until=body.on_leave_until,
+            reports_to_person_id=body.reports_to_person_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if body.authority_scope:
         people_store.set_authority_scope(pid, body.authority_scope)
     if body.availability:
@@ -147,7 +163,38 @@ def patch_person(
         raise HTTPException(status_code=404, detail="Person not found")
 
     raw = body.model_dump(exclude_unset=True)
-    if raw:
+    # Explicit-clear contract (CONTROL R12): a JSON null on a nullable
+    # field is ambiguous (clear vs. don't-touch) — refused; the clear_* op
+    # must be named. A clear_* flag together with a concrete value for the
+    # same field is contradictory — refused as well.
+    clearable = {
+        "email": body.clear_email,
+        "slack_user_id": body.clear_slack_user_id,
+        "telegram_chat_id": body.clear_telegram_chat_id,
+        "discord_user_id": body.clear_discord_user_id,
+        "reports_to_person_id": body.clear_reports_to,
+    }
+    for field, flag in clearable.items():
+        if field in raw and raw[field] is None and not flag:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "ambiguous_null",
+                    "message": f"{field}: null nu șterge — folosește "
+                    f"clear_{field.replace('reports_to_person_id', 'reports_to')}",
+                },
+            )
+        if flag and field in raw and raw[field] is not None:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "contradictory_clear",
+                    "message": f"clear_{field} cu valoare dată — "
+                    "ori ștergi explicit, ori scrii o valoare.",
+                },
+            )
+    mutating_keys = set(raw) - {"expected_version"}
+    if mutating_keys:
         try:
             people_store.update_person(
                 person_id,
@@ -161,9 +208,22 @@ def patch_person(
                 response_sla_hours=body.response_sla_hours,
                 on_leave_until=body.on_leave_until,
                 clear_on_leave=body.clear_on_leave,
+                clear_email=body.clear_email,
+                clear_slack_user_id=body.clear_slack_user_id,
+                clear_telegram_chat_id=body.clear_telegram_chat_id,
+                clear_discord_user_id=body.clear_discord_user_id,
+                clear_reports_to=body.clear_reports_to,
                 reports_to_person_id=body.reports_to_person_id,
                 department_slugs=body.department_slugs,
                 department_slugs_remove=body.department_slugs_remove,
+                # Scope/availability ride the same CAS-fenced transaction —
+                # a scope-only PATCH is still a fenced write (CONTROL R12).
+                authority_scope=(
+                    body.authority_scope if "authority_scope" in raw else None
+                ),
+                availability=(
+                    body.availability if "availability" in raw else None
+                ),
                 expected_version=body.expected_version,
             )
         except people_store.PersonConflictError as exc:
@@ -177,13 +237,21 @@ def patch_person(
                     "current": current.model_dump() if current else None,
                 },
             ) from exc
-    if "authority_scope" in raw:
-        people_store.set_authority_scope(
-            person_id, body.authority_scope or []
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        clears = sorted(f for f, flag in clearable.items() if flag) + (
+            ["on_leave_until"] if body.clear_on_leave else []
         )
-    if "availability" in raw:
-        people_store.set_availability(
-            person_id, body.availability or []
+        _audit.log_event(
+            "people_person_updated",
+            f"Persoana #{person_id} actualizată",
+            actor=ident.actor,
+            details={
+                "person_id": person_id,
+                "fields": sorted(k for k in mutating_keys
+                                 if not k.startswith("clear_")),
+                "cleared": clears,
+            },
         )
     people_registry.invalidate()
     person = people_store.get_person(person_id)

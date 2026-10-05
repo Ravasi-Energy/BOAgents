@@ -188,7 +188,6 @@ def config_version(tenant: str, db_path: Path | None = None) -> int:
 
 
 _TRUST_KEYED = {"publishers": "publisherId", "keys": "keyId"}
-_TRUST_REMOVE = {"publishers_remove": "publishers", "keys_remove": "keys"}
 _TRUST_ID = {"publishers": "publisherId", "keys": "keyId"}
 
 
@@ -200,14 +199,18 @@ def _merge_trust_doc(current: dict, incoming: dict) -> dict:
     their current value), the keyed ``publishers``/``keys`` collections
     upsert per ``publisherId``/``keyId``, other lists union-add, scalars
     take the writer's value (an intentional revert to an older value is a
-    legitimate write). ``*_remove`` marker keys are ops, not content, and
-    are applied by the caller — they never persist into the document.
-    Keys absent from ``incoming`` always preserve the current value: an
-    omitted field or collection is never deleted, and ``[]`` never clears.
+    legitimate write). ``<field>_remove`` marker keys are ops, not content:
+    they are consumed here and never persist into the document — removing
+    list entries is possible only through them, at ANY depth (a publisher
+    row's ``keyIds_remove`` works the same as a top-level
+    ``publishers_remove``). Keys absent from ``incoming`` always preserve
+    the current value: an omitted field or collection is never deleted,
+    and ``[]`` never clears — INCLUDING inside a keyed row (CONTROL R12:
+    nested ``allowedKinds:[]`` must not wipe the stored list).
     """
     merged = dict(current)
     for k, v in incoming.items():
-        if k in _TRUST_REMOVE:
+        if k.endswith("_remove"):
             continue
         cv = merged.get(k)
         if k in _TRUST_KEYED and isinstance(v, list) and isinstance(cv, list):
@@ -218,13 +221,38 @@ def _merge_trust_doc(current: dict, incoming: dict) -> dict:
             merged[k] = _union_list(cv, v)
         elif v != [] and v != {}:
             merged[k] = v
+    # Explicit removals at THIS level: ``<list field>_remove`` drops the
+    # named entries. Ids already absent are a no-op (idempotent), never an
+    # error — the requested end-state is already reached. Ops fire after
+    # the merges above, so a delta that both upserts and removes the same
+    # entry resolves deterministically to removed.
+    for k, v in incoming.items():
+        if not k.endswith("_remove") or not isinstance(v, list) or not v:
+            continue
+        target = k[: -len("_remove")]
+        entries = merged.get(target)
+        if not isinstance(entries, list):
+            continue
+        id_field = _TRUST_ID.get(target)
+        if id_field is not None:
+            drop = set(v)
+            merged[target] = [
+                e for e in entries
+                if (e.get(id_field) not in drop
+                    if isinstance(e, dict) else e not in v)
+            ]
+        else:
+            merged[target] = [e for e in entries if e not in v]
     return merged
 
 
 def _merge_keyed(current: list, incoming: list, id_field: str) -> list:
     """Upsert ``incoming`` entries into ``current`` keyed by ``id_field`` —
-    an existing id field-merges (present fields win), a new id appends.
-    Removal is never implicit; only ``*_remove`` ops delete entries."""
+    an existing id merges FIELD-WISE with the same sparse-delta semantics
+    as the document (nested lists union-add, ``[]`` preserves, dicts
+    recurse, ``<field>_remove`` removes nested entries explicitly); a new
+    id appends. Removal is never implicit; only ``*_remove`` ops delete
+    entries or nested list items."""
     out = [dict(e) if isinstance(e, dict) else e for e in current]
     idx = {e.get(id_field): i for i, e in enumerate(out) if isinstance(e, dict)}
     for entry in incoming:
@@ -234,32 +262,12 @@ def _merge_keyed(current: list, incoming: list, id_field: str) -> list:
             continue
         eid = entry.get(id_field)
         if eid in idx:
-            out[idx[eid]] = {**out[idx[eid]], **entry}
+            out[idx[eid]] = _merge_trust_doc(out[idx[eid]], entry)
         else:
             idx[eid] = len(out)
-            out.append(dict(entry))
-    return out
-
-
-def _apply_remove(merged: dict, incoming: dict) -> dict:
-    """Apply the explicit ``*_remove`` ops: delete the named ids from the
-    keyed collection. Ids already absent are a no-op (idempotent), never
-    an error — the requested end-state is already reached."""
-    out = dict(merged)
-    for op, coll in _TRUST_REMOVE.items():
-        remove_ids = incoming.get(op)
-        if not isinstance(remove_ids, list) or not remove_ids:
-            continue
-        entries = out.get(coll)
-        if not isinstance(entries, list):
-            continue
-        id_field = _TRUST_ID[coll]
-        drop = set(remove_ids)
-        out[coll] = [
-            e for e in entries
-            if (e.get(id_field) not in drop
-                if isinstance(e, dict) else e not in drop)
-        ]
+            # A brand-new row drops *_remove ops — there is nothing to remove
+            # yet — so they are consumed, never persisted into the document.
+            out.append({k: v for k, v in entry.items() if not k.endswith("_remove")})
     return out
 
 
@@ -367,10 +375,7 @@ def set_value(
             # stored one — so the writer's base is the current document
             # itself. No history lookup, no inferred base.
             current_doc = current_raw if isinstance(current_raw, str) and current_raw.strip() else "{}"
-            merged_doc = _apply_remove(
-                _merge_trust_doc(json.loads(current_doc), incoming_doc),
-                incoming_doc,
-            )
+            merged_doc = _merge_trust_doc(json.loads(current_doc), incoming_doc)
             merged = validate_tenant_scope(
                 tenant, key, spec.validate(json.dumps(merged_doc))
             )

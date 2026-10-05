@@ -204,6 +204,7 @@ class FinancialsData(BaseModel):
 
 
 class CompanyProfileResponse(BaseModel):
+    version: int
     name: str
     industry: str
     stage: str
@@ -246,6 +247,11 @@ class CompanyProfileUpdateRequest(BaseModel):
     # out by name. `vendors=[]` is a no-op, not a clear.
     vendors_remove: list[str] | None = None
     tickers_remove: list[str] | None = None
+    # Durable CAS (CONTROL R12): required by the PATCH route — 422 when
+    # absent, 409 when stale. Optional at the model level because
+    # OnboardCommitRequest reuses this model for the one-time bootstrap
+    # write, which has no prior version to fence against.
+    expected_version: int | None = None
 
     _check_arr_ccy = field_validator("annual_revenue_arr_currency")(_iso_currency)
 

@@ -542,7 +542,7 @@ def test_pd1_company_profile_vendors(tmp_path: Path, monkeypatch: pytest.MonkeyP
     import asyncio
 
     from openexecutive.api.routes.company_profile import update_company_profile
-    asyncio.run(update_company_profile(CompanyProfileUpdateRequest(vendors=["patru"])))
+    asyncio.run(update_company_profile(CompanyProfileUpdateRequest(vendors=["patru"], expected_version=1)))
     loaded = CompanyProfile.load_from_yaml(path)
     _note("PD-1 company.vendors", 3, len(loaded.vendors), 4)
 
@@ -554,7 +554,7 @@ def test_pd3_company_profile_empty_vendors(tmp_path: Path, monkeypatch: pytest.M
     import asyncio
 
     from openexecutive.api.routes.company_profile import update_company_profile
-    asyncio.run(update_company_profile(CompanyProfileUpdateRequest(vendors=[])))
+    asyncio.run(update_company_profile(CompanyProfileUpdateRequest(vendors=[], expected_version=1)))
     loaded = CompanyProfile.load_from_yaml(path)
     _note("PD-3 company.vendors []", 3, len(loaded.vendors), 3)
 
@@ -568,7 +568,7 @@ def test_pd4_company_profile_partial_financials(tmp_path: Path, monkeypatch: pyt
     from openexecutive.api.models import FinancialsData
     from openexecutive.api.routes.company_profile import update_company_profile
     asyncio.run(update_company_profile(CompanyProfileUpdateRequest(
-        financials=FinancialsData(runway_months=12),
+        financials=FinancialsData(runway_months=12), expected_version=1,
     )))
     loaded = CompanyProfile.load_from_yaml(path)
     fin = loaded.financials
@@ -590,7 +590,9 @@ def test_pd_company_profile_omitted_vendors_stay(tmp_path: Path, monkeypatch: py
     import asyncio
 
     from openexecutive.api.routes.company_profile import update_company_profile
-    asyncio.run(update_company_profile(CompanyProfileUpdateRequest(industry="alt")))
+    asyncio.run(update_company_profile(
+        CompanyProfileUpdateRequest(industry="alt", expected_version=1)
+    ))
     loaded = CompanyProfile.load_from_yaml(path)
     assert loaded.industry == "alt"
     assert loaded.vendors == ["unu", "doi", "trei"]

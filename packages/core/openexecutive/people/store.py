@@ -18,6 +18,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import get_args
 
 from openexecutive.people.models import (
     AuthorityScope,
@@ -296,6 +297,14 @@ def upsert_person(
     db_path: Path | None = None,
 ) -> int:
     """Insert or update a Person row. Returns the person_id."""
+    # Validate against the Literal — a bogus channel would land in the row
+    # and break every subsequent Person read.
+    if preferred_channel not in get_args(PreferredChannel):
+        raise ValueError(
+            f"preferred_channel invalid: {preferred_channel!r} "
+            f"(permise: {sorted(get_args(PreferredChannel))})"
+        )
+    channel = preferred_channel
     now = _now()
     dept_json = json.dumps(department_slugs or [])
     leave_str = on_leave_until.isoformat() if on_leave_until else None
@@ -316,7 +325,7 @@ def upsert_person(
                 (
                     full_name, role, int(is_principal), dept_json,
                     email, slack_user_id, telegram_chat_id, discord_user_id,
-                    preferred_channel,
+                    channel,
                     response_sla_hours, leave_str, reports_to_person_id,
                     now, person_id,
                 ),
@@ -335,12 +344,26 @@ def upsert_person(
             (
                 full_name, role, int(is_principal), dept_json,
                 email, slack_user_id, telegram_chat_id, discord_user_id,
-                preferred_channel,
+                channel,
                 response_sla_hours, leave_str, reports_to_person_id,
                 now, now,
             ),
         )
         return int(cursor.lastrowid or 0)
+
+
+def _replace_authority_scope(
+    conn: sqlite3.Connection, person_id: int, scopes: list[AuthorityScope]
+) -> None:
+    conn.execute(
+        "DELETE FROM person_authority_scope WHERE person_id = ?", (person_id,)
+    )
+    for scope in scopes:
+        conn.execute(
+            "INSERT OR IGNORE INTO person_authority_scope (person_id, scope_token)"
+            " VALUES (?, ?)",
+            (person_id, scope.value),
+        )
 
 
 def set_authority_scope(
@@ -350,15 +373,28 @@ def set_authority_scope(
 ) -> None:
     """Replace the full authority scope list for a person."""
     with _get_conn(db_path) as conn:
+        _replace_authority_scope(conn, person_id, scopes)
+
+
+def _replace_availability(
+    conn: sqlite3.Connection, person_id: int, windows: list[AvailabilityWindow]
+) -> None:
+    conn.execute(
+        "DELETE FROM person_availability WHERE person_id = ?", (person_id,)
+    )
+    for win in windows:
         conn.execute(
-            "DELETE FROM person_authority_scope WHERE person_id = ?", (person_id,)
+            "INSERT INTO person_availability"
+            " (person_id, weekdays_json, start_local, end_local, timezone)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (
+                person_id,
+                json.dumps(win.weekdays),
+                win.start_local,
+                win.end_local,
+                win.timezone,
+            ),
         )
-        for scope in scopes:
-            conn.execute(
-                "INSERT OR IGNORE INTO person_authority_scope (person_id, scope_token)"
-                " VALUES (?, ?)",
-                (person_id, scope.value),
-            )
 
 
 def set_availability(
@@ -368,22 +404,7 @@ def set_availability(
 ) -> None:
     """Replace the full availability window list for a person."""
     with _get_conn(db_path) as conn:
-        conn.execute(
-            "DELETE FROM person_availability WHERE person_id = ?", (person_id,)
-        )
-        for win in windows:
-            conn.execute(
-                "INSERT INTO person_availability"
-                " (person_id, weekdays_json, start_local, end_local, timezone)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (
-                    person_id,
-                    json.dumps(win.weekdays),
-                    win.start_local,
-                    win.end_local,
-                    win.timezone,
-                ),
-            )
+        _replace_availability(conn, person_id, windows)
 
 
 def get_person(person_id: int, db_path: Path | None = None) -> Person | None:
@@ -597,15 +618,25 @@ def update_person(
     response_sla_hours: int | None = None,
     on_leave_until: date | None = None,
     clear_on_leave: bool = False,
+    clear_email: bool = False,
+    clear_slack_user_id: bool = False,
+    clear_telegram_chat_id: bool = False,
+    clear_discord_user_id: bool = False,
+    clear_reports_to: bool = False,
     reports_to_person_id: int | None = None,
     department_slugs: list[str] | None = None,
     department_slugs_remove: list[str] | None = None,
+    authority_scope: list[AuthorityScope] | None = None,
+    availability: list[AvailabilityWindow] | None = None,
     expected_version: int | None = None,
     db_path: Path | None = None,
 ) -> bool:
     """Partial update. Returns True if a row was modified.
 
-    Pass `clear_on_leave=True` to explicitly set on_leave_until to NULL.
+    Nullable fields clear ONLY through an explicit ``clear_*`` flag
+    (``clear_on_leave``, ``clear_email``, …) — passing ``None`` never
+    clears, and clearing an email severs the roster admission derived
+    from it on the person's very next request (CONTROL R12).
 
     ``department_slugs`` is a DELTA: entries are union-added onto the
     existing list (BUGHUNT-02 P0-7 — a partial PATCH must not silently
@@ -620,15 +651,28 @@ def update_person(
         fields.append(("full_name", full_name))
     if role is not None:
         fields.append(("role", role))
-    if email is not None:
+    if clear_email:
+        fields.append(("email", None))
+    elif email is not None:
         fields.append(("email", email))
-    if slack_user_id is not None:
+    if clear_slack_user_id:
+        fields.append(("slack_user_id", None))
+    elif slack_user_id is not None:
         fields.append(("slack_user_id", slack_user_id))
-    if telegram_chat_id is not None:
+    if clear_telegram_chat_id:
+        fields.append(("telegram_chat_id", None))
+    elif telegram_chat_id is not None:
         fields.append(("telegram_chat_id", telegram_chat_id))
-    if discord_user_id is not None:
+    if clear_discord_user_id:
+        fields.append(("discord_user_id", None))
+    elif discord_user_id is not None:
         fields.append(("discord_user_id", discord_user_id))
     if preferred_channel is not None:
+        if preferred_channel not in get_args(PreferredChannel):
+            raise ValueError(
+                f"preferred_channel invalid: {preferred_channel!r} "
+                f"(permise: {sorted(get_args(PreferredChannel))})"
+            )
         fields.append(("preferred_channel", preferred_channel))
     if response_sla_hours is not None:
         fields.append(("response_sla_hours", response_sla_hours))
@@ -636,34 +680,19 @@ def update_person(
         fields.append(("on_leave_until", None))
     elif on_leave_until is not None:
         fields.append(("on_leave_until", on_leave_until.isoformat()))
-    if reports_to_person_id is not None:
+    if clear_reports_to:
+        fields.append(("reports_to_person_id", None))
+    elif reports_to_person_id is not None:
         fields.append(("reports_to_person_id", reports_to_person_id))
-    if department_slugs is not None or department_slugs_remove is not None:
-        with _get_conn(db_path) as conn:
-            row = conn.execute(
-                "SELECT department_slugs_json FROM people WHERE id = ?",
-                (person_id,),
-            ).fetchone()
-        try:
-            current_slugs: list[str] = (
-                json.loads(row["department_slugs_json"]) if row else []
-            ) or []
-        except (ValueError, TypeError):
-            current_slugs = []
-        merged = list(current_slugs)
-        for slug in department_slugs or []:
-            if slug not in merged:
-                merged.append(slug)
-        for slug in department_slugs_remove or []:
-            if slug in merged:
-                merged.remove(slug)
-        fields.append(("department_slugs_json", json.dumps(merged)))
-    if not fields:
+    if not fields and authority_scope is None and availability is None \
+            and department_slugs is None and department_slugs_remove is None:
         return get_person(person_id, db_path) is not None
-    fields.append(("updated_at", _now()))
-    set_clause = ", ".join(f"{n} = ?" for n, _ in fields)
-    values = [v for _, v in fields] + [person_id]
     with _get_conn(db_path) as conn:
+        # BEGIN IMMEDIATE: the CAS read, the department-slug merge read and
+        # every write below must be one serializable unit — a concurrent
+        # commit slipping between them would defeat the version check
+        # (CONTROL R12).
+        conn.execute("BEGIN IMMEDIATE")
         if expected_version is not None:
             row = conn.execute(
                 "SELECT version FROM people WHERE id = ?", (person_id,)
@@ -676,10 +705,45 @@ def update_person(
                     f"expected_version={expected_version} dar versiunea curentă "
                     f"este {current_version}"
                 )
-        set_clause += ", version = version + 1"
-        cursor = conn.execute(
-            f"UPDATE people SET {set_clause} WHERE id = ?", values
+        if department_slugs is not None or department_slugs_remove is not None:
+            row = conn.execute(
+                "SELECT department_slugs_json FROM people WHERE id = ?",
+                (person_id,),
+            ).fetchone()
+            try:
+                current_slugs: list[str] = (
+                    json.loads(row["department_slugs_json"]) if row else []
+                ) or []
+            except (ValueError, TypeError):
+                current_slugs = []
+            merged = list(current_slugs)
+            for slug in department_slugs or []:
+                if slug not in merged:
+                    merged.append(slug)
+            for slug in department_slugs_remove or []:
+                if slug in merged:
+                    merged.remove(slug)
+            fields.append(("department_slugs_json", json.dumps(merged)))
+        if fields:
+            set_clause = ", ".join(f"{n} = ?" for n, _ in fields)
+            values = [v for _, v in fields] + [person_id]
+            cursor = conn.execute(
+                f"UPDATE people SET {set_clause} WHERE id = ?", values
+            )
+            if cursor.rowcount == 0:
+                return False
+        if authority_scope is not None:
+            _replace_authority_scope(conn, person_id, authority_scope)
+        if availability is not None:
+            _replace_availability(conn, person_id, availability)
+        # One bump covers every write in this transaction — a reader's
+        # version can never point at pre-mutation state, and the CAS chain
+        # stays honest for scope/availability-only updates too.
+        bump = conn.execute(
+            "UPDATE people SET version = version + 1, updated_at = ? WHERE id = ?",
+            (_now(), person_id),
         )
-        if cursor.rowcount > 0:
-            _mark_roster_administered(conn)
-        return cursor.rowcount > 0
+        if bump.rowcount == 0:
+            return False
+        _mark_roster_administered(conn)
+        return True

@@ -71,7 +71,9 @@ def test_profile_patch_viewer_403_and_admin_200(
     assert CompanyProfile.load_from_yaml(path).vendors == ["unu", "doi", "trei"]
 
     ok = client.patch(
-        "/company-profile", json={"vendors": ["patru"]}, headers=ADMIN
+        "/company-profile",
+        json={"vendors": ["patru"], "expected_version": 1},
+        headers=ADMIN,
     )
     assert ok.status_code == 200, ok.text
     assert CompanyProfile.load_from_yaml(path).vendors == ["unu", "doi", "trei", "patru"]

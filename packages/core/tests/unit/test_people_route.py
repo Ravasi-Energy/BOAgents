@@ -95,7 +95,7 @@ def test_patch_updates_fields(client: TestClient) -> None:
     create = client.post("/people", json={"full_name": "Old Name", "role": "CFO"})
     pid = create.json()["id"]
 
-    resp = client.patch(f"/people/{pid}", json={"full_name": "Sarah Chen", "email": "s@co.com"})
+    resp = client.patch(f"/people/{pid}", json={"full_name": "Sarah Chen", "email": "s@co.com", "expected_version": create.json()["version"]})
     assert resp.status_code == 200
     assert resp.json()["full_name"] == "Sarah Chen"
     assert resp.json()["email"] == "s@co.com"
@@ -108,7 +108,8 @@ def test_patch_authority_scope(client: TestClient) -> None:
 
     resp = client.patch(
         f"/people/{pid}",
-        json={"authority_scope": ["spend_gt_10k", "board_comms"]},
+        json={"authority_scope": ["spend_gt_10k", "board_comms"],
+              "expected_version": create.json()["version"]},
     )
     assert resp.status_code == 200
     scopes = set(resp.json()["authority_scope"])
@@ -117,13 +118,13 @@ def test_patch_authority_scope(client: TestClient) -> None:
 
 
 def test_patch_unknown_person_404(client: TestClient) -> None:
-    assert client.patch("/people/9999", json={"role": "X"}).status_code == 404
+    assert client.patch("/people/9999", json={"role": "X", "expected_version": 1}).status_code == 404
 
 
 def test_patch_empty_body_noop(client: TestClient) -> None:
     create = client.post("/people", json={"full_name": "Alex"})
     pid = create.json()["id"]
-    resp = client.patch(f"/people/{pid}", json={})
+    resp = client.patch(f"/people/{pid}", json={"expected_version": create.json()["version"]})
     assert resp.status_code == 200
     assert resp.json()["full_name"] == "Alex"
 

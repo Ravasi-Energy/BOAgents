@@ -1355,7 +1355,16 @@ people:
     GET /people/by-scope/{token} — e.g. "ceo", "head-of-marketing",
     "department:engineering". The Executive uses this through the
     `lookup_person` tool when a user asks "tell the head of X".
-  api: /people — CRUD plus by-scope lookup and archive.
+  api: |
+    /people — CRUD plus by-scope lookup and archive. PATCH /people/{id} is
+    durable CAS: `expected_version` is required (422 absent, 409 stale) and
+    the row's `version` bumps once per mutating write — including
+    scope/availability-only patches, which ride the same BEGIN IMMEDIATE
+    transaction. Nullable contact fields (email, chat ids, reports_to,
+    on_leave_until) clear ONLY via `clear_*` flags — a JSON null is refused
+    as ambiguous (422). Every mutation emits a `people_person_updated`
+    audit row. `roster_meta.administered` (people.store) marks the roster
+    authoritative for the auth gate.
   executive_write_access: |
     The Executive can mutate the roster directly without going through the
     UI via the `list_people` / `upsert_person` / `archive_person` /

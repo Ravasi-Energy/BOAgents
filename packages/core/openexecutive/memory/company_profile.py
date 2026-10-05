@@ -75,6 +75,11 @@ class Financials(BaseModel):
 class CompanyProfile(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
+    # Durable CAS counter (CONTROL R12): persisted inside profile.yaml, so
+    # it survives restarts; every PATCH /company-profile write bumps it and
+    # the writer must declare the version they read via expected_version.
+    # Older files without the field migrate to version 1.
+    version: int = 1
     name: str = ""
     industry: str = ""
     stage: str = ""

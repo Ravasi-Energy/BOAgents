@@ -52,7 +52,33 @@ async def update_company_profile(
     if profile.is_empty():
         raise HTTPException(status_code=404, detail="No company profile found. Complete onboarding first.")
 
+    # Durable CAS (CONTROL R12): the writer must declare the version it
+    # actually read; a stale write is refused before any effect — the
+    # client reloads and rebases explicitly. The counter persists in
+    # profile.yaml, so it survives restarts.
+    if body.expected_version is None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "expected_version_required",
+                "message": "PATCH /company-profile requires expected_version "
+                "pinned to the version the client read.",
+                "current_version": profile.version,
+            },
+        )
+    if body.expected_version != profile.version:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "version_conflict",
+                "message": f"expected_version={body.expected_version} dar "
+                f"versiunea curentă este {profile.version}",
+                "current_version": profile.version,
+            },
+        )
+
     update_data = body.model_dump(exclude_unset=True)
+    update_data.pop("expected_version", None)
     # Convert nested Pydantic models to dicts so the merge sees plain data
     update_data = {
         k: v.model_dump(exclude_unset=True) if hasattr(v, "model_dump") else v
@@ -82,6 +108,7 @@ async def update_company_profile(
                     current.remove(item)
             merged[list_key] = current
 
+    merged["version"] = profile.version + 1
     validated = CompanyProfile.model_validate(merged)
     validated.save_to_yaml(settings.company_profile_path)
 

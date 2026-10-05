@@ -44,8 +44,9 @@ export default function CompanyProfilePage() {
       setSaving(true);
       try {
         if(!profile)throw Error("Profilul citit lipsește.");
+        if(!Number.isSafeInteger(profile.version)||profile.version<1)throw Error("Versiunea citită lipsește; reîncarcă profilul.");
         const delta=profileDelta(patch as unknown as Record<string, unknown>, profile as unknown as Record<string, unknown>);
-        const updated = await updateCompanyProfile(delta);
+        const updated = await updateCompanyProfile({...delta, expected_version: profile.version});
         setProfile(updated);
       } finally {
         setSaving(false);

@@ -123,10 +123,16 @@ def _merge_doc(current: Any, incoming: Any) -> Any:
     touched by the writer and is applied — dicts recurse (omitted sub-keys
     keep their current value), lists union-add, scalars take the writer's
     value (an intentional revert to an older value is a legitimate write).
-    ``[]``/``{}`` and absent keys always preserve the current value."""
+    ``[]``/``{}`` and absent keys always preserve the current value.
+    ``<field>_remove`` ops are consumed at ANY dict depth — they drop the
+    named entries from a same-level list and never persist (CONTROL R12:
+    the no-implicit-clear contract applies to nested lists too, e.g. a
+    predicate's ``in: []`` can never wipe the stored list)."""
     if isinstance(incoming, dict) and isinstance(current, dict):
         merged = dict(current)
         for k, v in incoming.items():
+            if k.endswith("_remove"):
+                continue
             cv = merged.get(k, _MISSING)
             if isinstance(v, dict) and isinstance(cv, dict):
                 merged[k] = _merge_doc(cv, v)
@@ -134,6 +140,14 @@ def _merge_doc(current: Any, incoming: Any) -> Any:
                 merged[k] = _union_list(cv, v) if v else cv
             elif v != [] and v != {}:
                 merged[k] = v
+        for k, v in incoming.items():
+            if not k.endswith("_remove") or not isinstance(v, list) or not v:
+                continue
+            entries = merged.get(k[: -len("_remove")])
+            if isinstance(entries, list):
+                merged[k[: -len("_remove")]] = [
+                    e for e in entries if e not in v
+                ]
         return merged
     if isinstance(incoming, list) and isinstance(current, list):
         return _union_list(current, incoming) if incoming else list(current)
@@ -168,7 +182,10 @@ def _merge_steps(current: Any, incoming: Any) -> list:
             out[idx[sid]] = _merge_doc(out[idx[sid]], step)
         else:
             idx[sid] = len(out)
-            out.append(dict(step))
+            # A brand-new step drops *_remove ops — nothing exists to remove.
+            out.append(
+                {k: v for k, v in step.items() if not k.endswith("_remove")}
+            )
     return out
 
 

@@ -356,7 +356,7 @@ export async function updateCompanyProfile(patch: Partial<CompanyProfile> | Reco
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(patch),
   });
-  if (!res.ok) throw new Error("Failed to update profile");
+  if (!res.ok) throw Object.assign(new Error(res.status === 409 ? "Conflict 409: draftul este păstrat. Reîncarcă baza explicit." : "Failed to update profile"), {status: res.status});
   return res.json();
 }
 
@@ -2307,7 +2307,7 @@ export async function createPerson(body: PersonCreate): Promise<Person> {
 }
 
 export interface PersonPatch {
-  expected_version?: number;
+  expected_version: number;
   full_name?: string;
   role?: string;
   email?: string | null;
@@ -2318,6 +2318,11 @@ export interface PersonPatch {
   response_sla_hours?: number;
   on_leave_until?: string | null;
   clear_on_leave?: boolean;
+  clear_email?: boolean;
+  clear_slack_user_id?: boolean;
+  clear_telegram_chat_id?: boolean;
+  clear_discord_user_id?: boolean;
+  clear_reports_to?: boolean;
   department_slugs?: string[];
   authority_scope?: string[];
   availability?: AvailabilityWindow[];

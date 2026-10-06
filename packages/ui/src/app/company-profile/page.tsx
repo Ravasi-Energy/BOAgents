@@ -29,6 +29,16 @@ export default function CompanyProfilePage() {
   const [saving, setSaving] = useState(false);
   const [pending, setPending] = useState<PendingValues | null>(null);
   const seqRef = useRef(0);
+  const [writeVersion, setWriteVersion] = useState<number | null>(null);
+  const [conflict, setConflict] = useState("");
+  const rebase = async () => {
+    try {
+      const fresh = await getCompanyProfile();
+      if (!Number.isSafeInteger(fresh.version) || fresh.version < 1) throw Error("Versiunea citită lipsește.");
+      setWriteVersion(fresh.version);
+      setConflict("Baza curentă citită; editurile sunt păstrate. Salvează explicit.");
+    } catch { setConflict("Baza nu a putut fi citită; drafturile sunt păstrate."); }
+  };
 
   useEffect(() => {
     getCompanyProfile()
@@ -46,13 +56,21 @@ export default function CompanyProfilePage() {
         if(!profile)throw Error("Profilul citit lipsește.");
         if(!Number.isSafeInteger(profile.version)||profile.version<1)throw Error("Versiunea citită lipsește; reîncarcă profilul.");
         const delta=profileDelta(patch as unknown as Record<string, unknown>, profile as unknown as Record<string, unknown>);
-        const updated = await updateCompanyProfile({...delta, expected_version: profile.version});
+        const updated = await updateCompanyProfile({...delta, expected_version: writeVersion ?? profile.version});
         setProfile(updated);
+        setWriteVersion(null);
+        setConflict("");
+      } catch (error) {
+        if (error instanceof Error && "status" in error && error.status === 409) {
+          setWriteVersion(null);
+          setConflict("Conflict 409: drafturile sunt păstrate. Reîncarcă baza explicit.");
+        }
+        throw error;
       } finally {
         setSaving(false);
       }
     },
-    [profile]
+    [profile, writeVersion]
   );
 
   // Register with Ask OE once the profile is loaded. Field values are the
@@ -152,6 +170,7 @@ export default function CompanyProfilePage() {
                 </Link>
               </div>
 
+              {conflict && <div role="alert"><p>{conflict}</p><button type="button" disabled={saving} onClick={rebase}>Reîncarcă baza și păstrează editurile</button></div>}
               <ProfileSections persisted profile={profile} saving={saving} onSave={save} pending={pending} />
             </>
           )}

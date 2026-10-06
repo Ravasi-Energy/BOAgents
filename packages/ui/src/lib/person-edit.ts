@@ -28,7 +28,7 @@ export function personPatch(form: PersonEdit, base: Person): PersonPatch {
       const hours = Number(value); if (!Number.isInteger(hours) || hours < 1) throw new Error('SLA must be a positive integer.');
       patch.response_sla_hours = hours;
     } else if (['email','slack_user_id','telegram_chat_id','discord_user_id'].includes(key) && typeof value === 'string' && !value.trim()) {
-      throw new Error('Ștergerea acestui contact nu este suportată de contractul serverului; draftul este păstrat.');
+      Object.assign(patch, {['clear_' + key]: true});
     } else if (key === 'on_leave_until' && !value) patch.clear_on_leave = true;
     else if (typeof value === 'string') Object.assign(patch, {[key]: ['full_name','role'].includes(key) ? value.trim() : value.trim() || null});
     else Object.assign(patch, {[key]: value});

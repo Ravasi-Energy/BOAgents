@@ -24,12 +24,6 @@ export function trustDelta(draft: Doc, base: Doc): Doc {
     const changes=(draft[key] as Doc[]).flatMap(row=>{
       const old=previous.find(p=>p[id]===row[id]);
       if(!old)return [row];
-      // The pinned backend shallow-merges keyed rows: nested lists would
-      // replace instead of union-add. Do not publish a misleading safe delta.
-      for(const [field,value] of Object.entries(row)) {
-        if(Array.isArray(value)&&Array.isArray(old[field])&&!equal(value,old[field]))
-          throw new P0EditError('Modificarea acestei liste nu este disponibilă momentan. Draftul este păstrat.');
-      }
       const delta=sparseDelta(row,old);
       return Object.keys(delta).length?[{[id]:row[id],...delta}]:[];
     });

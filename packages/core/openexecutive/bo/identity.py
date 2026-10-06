@@ -55,6 +55,37 @@ _CAP_MIN_ROLE: dict[str, Role] = {
     "execution:read": "viewer",
     "execution:write": "admin",
     "execution:operate": "operator",
+    # Client-company slots swap the entire live company context (docs, DB,
+    # MCP tools, active identity). Reads are viewer-safe; every mutation —
+    # create, intake-generate, save, activate, meta patch, delete — is
+    # admin-only because each one changes which company's data the box
+    # serves or destroys a slot outright.
+    "clients:read": "viewer",
+    "clients:write": "admin",
+    # Fixture ops are the same blast radius as client slots: load/unload/
+    # reset/snapshot swap or wipe the live company context, generate calls
+    # the LLM, create/delete mutate the catalog. Reads stay viewer-safe;
+    # every mutation is admin-only (F-1, REM-AUDIT-18).
+    "fixtures:read": "viewer",
+    "fixtures:write": "admin",
+    # Legacy host-app surfaces brought under the same role gate for
+    # BUGHUNT-02 (P0-8/9/10): every mutation is admin-only; reads stay
+    # viewer-reachable for an authenticated caller.
+    "people:read": "viewer",
+    "people:write": "admin",
+    "profile:read": "viewer",
+    "profile:write": "admin",
+    "departments:read": "viewer",
+    "departments:write": "admin",
+    "documents:read": "viewer",
+    "documents:write": "admin",
+    "onboarding:read": "viewer",
+    "onboarding:write": "admin",
+    # Roster recovery resets the durable `administered` flag, re-permitting
+    # the UI's ALLOWED_EMAILS bootstrap. It exists for lockout — the actor
+    # is the operator holding the shared secret (is_service → operator) or a
+    # delegated admin; a viewer can never reset roster authority (R4).
+    "auth:recover": "operator",
 }
 
 
@@ -171,12 +202,32 @@ def resolve_identity(request: Request) -> Identity:
     if _is_public_deployment():
         raise UnauthenticatedError("no caller identity")
 
-    # Local dev fallback — only reachable when the shared-secret gate is off
-    # AND the deployment is not public. Documented in .env.example; an
-    # operator who wants admin on a locked-down install uses BO_ADMIN_EMAILS.
+    if _auth_material_configured():
+        # Auth is configured but the request carried none of it — fail
+        # closed rather than silently promoting to the dev identity.
+        raise UnauthenticatedError("no caller identity")
+
+    # Local dev fallback — only reachable when no auth material is
+    # configured at all AND the deployment is not public. Documented in
+    # .env.example; an operator who wants admin on a locked-down install
+    # uses BO_ADMIN_EMAILS.
     return Identity(
         actor=_DEV_ACTOR, tenant=tenant, role="admin",
         is_service=False, auth_source="dev",
+    )
+
+
+def _auth_material_configured() -> bool:
+    """True when any server-side auth secret is provisioned.
+
+    The dev fallback below must not apply on an installation that *has* an
+    auth story: there, an unauthenticated request is a denial, not a dev
+    convenience (BUGHUNT-02 P0-8/9/10 — headerless mutations would otherwise
+    inherit a synthetic admin).
+    """
+    return bool(
+        os.environ.get("BACKEND_PROXY_SECRET", "").strip()
+        or os.environ.get("BACKEND_SHARED_SECRET", "").strip()
     )
 
 
@@ -185,3 +236,28 @@ def require(identity: Identity, capability: str) -> None:
     minimum = _CAP_MIN_ROLE[capability]
     if _ROLE_RANK[identity.role] < _ROLE_RANK[minimum]:
         raise ForbiddenError(f"{capability} requires role {minimum}")
+
+
+def require_http(request: Request, capability: str) -> Identity:
+    """``resolve_identity`` + ``require`` as a plain FastAPI dependency.
+
+    Used by host-app routes mounted on apps that do NOT register the BO
+    exception handlers — every failure surfaces as HTTP 403 (fail closed;
+    the response deliberately does not distinguish "no identity" from
+    "insufficient role").
+    """
+    from fastapi import HTTPException
+
+    try:
+        identity = resolve_identity(request)
+        require(identity, capability)
+    except IdentityError as exc:
+        raise HTTPException(status_code=403, detail="forbidden") from exc
+    return identity
+
+
+def is_local_caller(identity: Identity | None) -> bool:
+    """True when ``identity`` is absent — i.e. the handler was invoked
+    in-process rather than through HTTP (``Depends`` placeholders also
+    count). In-process callers are trusted code, not requests."""
+    return not isinstance(identity, Identity)

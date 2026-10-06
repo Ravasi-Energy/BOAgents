@@ -73,7 +73,8 @@ def _simulate_run(transport: BufferedTransport) -> dict:  # noqa: ANN001
         "name": "hb", "kind": "BOT",
         "content": HEARTBEAT_STALE["content"],
     })
-    service.publish("tenant-a", "ops@corp.dev", definition["id"])
+    service.publish("tenant-a", "ops@corp.dev", definition["id"],
+                    expected_version=definition["draft_version"])
     return service.simulate("tenant-a", "ops@corp.dev", definition["id"],
                             input_context={
                                 "service": {"name": "svc-x",

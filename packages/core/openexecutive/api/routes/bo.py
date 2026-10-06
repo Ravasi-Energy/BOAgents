@@ -172,6 +172,10 @@ def pilot_telemetry_replay(run_id: str, ident: BoIdentity) -> Any:
 class _SettingPatch(BaseModel):
     value: Any
     expected_version: int = Field(ge=0)
+    # Explicit removal op for csv_union keys (CONTROL R2): naming an item
+    # here is the ONLY way to delete it — omission from ``value`` never
+    # removes, ``""`` is a no-op, never a wipe.
+    remove: list[str] | None = Field(default=None, max_length=64)
 
 
 class _BotCreate(BaseModel):
@@ -186,6 +190,17 @@ class _BotPatch(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=500)
     content: dict[str, Any] | None = None
+    # Explicit removal ops (CONTROL R2): a step omitted from ``content.steps``
+    # is preserved, never deleted — deletion requires naming the stable id.
+    steps_remove: list[str] | None = Field(default=None, max_length=64)
+    capability_refs_remove: list[str] | None = Field(default=None, max_length=64)
+    policy_refs_remove: list[str] | None = Field(default=None, max_length=64)
+
+
+class _BotPublish(BaseModel):
+    # Mandatory CAS (CONTROL R2): the version the reviewer actually read —
+    # there is no "publish whatever is current" fallback.
+    expected_version: int = Field(ge=1)
 
 
 class _SimulateRequest(BaseModel):
@@ -216,6 +231,7 @@ def put_setting(key: str, body: _SettingPatch,
     record = settings_store.set_value(
         ident.tenant, key, body.value,
         expected_version=body.expected_version, actor=ident.actor,
+        remove=body.remove,
     )
     _config_applied(ident, key, record)
     return {
@@ -309,9 +325,13 @@ def patch_bot(def_id: str, body: _BotPatch,
 
 @router.post("/bots/{def_id}/publish")
 def publish_bot(def_id: str,
-                ident: BoIdentity) -> Any:
+                ident: BoIdentity,
+                body: _BotPublish) -> Any:
     bo_identity.require(ident, "bots:write")
-    definition = bot_service.publish(ident.tenant, ident.actor, def_id)
+    definition = bot_service.publish(
+        ident.tenant, ident.actor, def_id,
+        expected_version=body.expected_version,
+    )
     return {"bot": definition, "result": "APPLIED",
             "active_version_no": definition["active_version_no"]}
 
@@ -477,6 +497,10 @@ class _CatalogEntryBody(BaseModel):
 
 class _CatalogEntryPatch(_CatalogEntryBody):
     expected_version: int = Field(ge=1)
+    # Explicit removal ops (CONTROL R2): omission of capabilities/regions
+    # never deletes; only these named lists do — keyed by stable value.
+    capabilities_remove: list[str] | None = Field(default=None, max_length=16)
+    regions_remove: list[str] | None = Field(default=None, max_length=16)
 
 
 def _entry_json(entry: Any) -> dict[str, Any]:

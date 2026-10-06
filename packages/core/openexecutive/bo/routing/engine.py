@@ -104,6 +104,12 @@ class Decision:
                     "estimated_cost": (
                         str(c.estimated_cost) if c.estimated_cost is not None else None
                     ),
+                    # Unit and currency from the source Cost record, additive
+                    # next to the legacy bare decimal. The estimate is per
+                    # CALL (per-1M-token prices scaled by measured usage);
+                    # currency=None stays None — never assumed.
+                    "estimated_cost_currency": c.entry.cost.currency,
+                    "estimated_cost_unit": "per_call",
                     "score": c.score,
                 }
                 for c in self.candidates
@@ -182,6 +188,20 @@ def recommend(
             if est is None:
                 outcomes.append(
                     CandidateOutcome(entry, False, "COST_DATA_MISSING", None, None)
+                )
+                continue
+            # BUGHUNT-02 C8: comparing amounts across currencies silently
+            # misroutes (10 EUR ≯ 0.05 USD numerically false, but a EUR
+            # amount is not a USD amount). A policy cap carries a currency;
+            # an entry priced in any other currency cannot be compared and
+            # is refused rather than silently allowed.
+            if (
+                policy.cost_currency is not None
+                and entry.cost is not None
+                and entry.cost.currency != policy.cost_currency
+            ):
+                outcomes.append(
+                    CandidateOutcome(entry, False, "CURRENCY_MISMATCH", est, None)
                 )
                 continue
             if est > policy.max_estimated_cost:

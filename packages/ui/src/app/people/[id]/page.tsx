@@ -4,12 +4,15 @@ import { useParams, useRouter } from "next/navigation";
 import { type ReactNode, useEffect, useState } from "react";
 
 import {
+  PersonUpdateError,
   archivePerson,
   getPerson,
   updatePerson,
   type AvailabilityWindow,
   type Person,
 } from "@/lib/api";
+
+import { personEdit, personPatch, rebasePersonEdit } from "@/lib/person-edit";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -163,6 +166,8 @@ export default function PersonDetailPage() {
   const [archiving, setArchiving] = useState(false);
   const [saveErr, setSaveErr] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const [conflict, setConflict] = useState(false);
+  const [rebaseMessage, setRebaseMessage] = useState("");
 
   // Edit-mode disclosure panels
   const [showContact, setShowContact] = useState(false);
@@ -202,19 +207,9 @@ export default function PersonDetailPage() {
   }, [personId]);
 
   function resetForm(p: Person) {
-    setForm({
-      full_name: p.full_name,
-      role: p.role,
-      email: p.email ?? "",
-      slack_user_id: p.slack_user_id ?? "",
-      telegram_chat_id: p.telegram_chat_id ?? "",
-      discord_user_id: p.discord_user_id ?? "",
-      preferred_channel: p.preferred_channel,
-      response_sla_hours: String(p.response_sla_hours),
-      on_leave_until: p.on_leave_until ?? "",
-      authority_scope: [...p.authority_scope],
-      availability: p.availability.map((w) => ({ ...w, weekdays: [...w.weekdays] })),
-    });
+    setForm(personEdit(p));
+    setConflict(false);
+    setRebaseMessage("");
   }
 
   function toggleScope(val: string) {
@@ -260,29 +255,32 @@ export default function PersonDetailPage() {
     setSaving(true);
     setSaveErr(null);
     try {
-      const slaNum = Number(form.response_sla_hours);
-      const updated = await updatePerson(personId, {
-        full_name: trimmedName,
-        role: form.role.trim(),
-        email: form.email.trim() || null,
-        slack_user_id: form.slack_user_id.trim() || null,
-        telegram_chat_id: form.telegram_chat_id.trim() || null,
-        discord_user_id: form.discord_user_id.trim() || null,
-        preferred_channel: form.preferred_channel,
-        response_sla_hours: slaNum >= 1 ? slaNum : 24,
-        on_leave_until: form.on_leave_until || null,
-        authority_scope: form.authority_scope,
-        availability: form.availability,
-      });
+      if (!person || conflict) throw new Error("Reîncarcă explicit persoana înainte de salvare.");
+      const updated = await updatePerson(personId, personPatch(form, person));
       setPerson(updated);
       setEditing(false);
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
     } catch (e) {
+      if (e instanceof PersonUpdateError && e.status === 409) setConflict(true);
       setSaveErr(e instanceof Error ? e.message : "Save failed");
     } finally {
       setSaving(false);
     }
+  }
+
+  async function reloadKeepDraft() {
+    if (!person || saving) return;
+    setSaving(true);
+    try {
+      const fresh = await getPerson(personId);
+      setForm(rebasePersonEdit(form, person, fresh));
+      setPerson(fresh);
+      setConflict(false);
+      setSaveErr(null);
+      setRebaseMessage("Versiunea curentă a fost citită; editura locală a fost păstrată. Verifică și salvează explicit.");
+    } catch (e) { setSaveErr(e instanceof Error ? e.message : "Reload failed; draft preserved"); }
+    finally { setSaving(false); }
   }
 
   async function doArchive() {
@@ -310,7 +308,12 @@ export default function PersonDetailPage() {
           )}
 
           {person && (
-            <>
+            <fieldset disabled={saving} className="min-w-0 w-full border-0 p-0">
+              {conflict && <div role="alert">
+                Conflict 409: draftul este păstrat. Salvarea este blocată până la reîncărcarea explicită.
+                <button type="button" onClick={reloadKeepDraft} disabled={saving}>Reîncarcă și păstrează editura</button>
+              </div>}
+              {rebaseMessage && <p role="status">{rebaseMessage}</p>}
               {/* Header */}
               <div className="flex items-start gap-3 mb-6">
                 <div className="w-10 h-10 rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center flex-shrink-0">
@@ -341,7 +344,7 @@ export default function PersonDetailPage() {
                   {editing ? (
                     <>
                       <button
-                        disabled={saving || !form.full_name.trim()}
+                        disabled={saving || conflict || !form.full_name.trim()}
                         onClick={save}
                         className="px-3 py-1.5 text-xs rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50"
                       >
@@ -387,7 +390,7 @@ export default function PersonDetailPage() {
                         <input
                           value={form.full_name}
                           onChange={(e) => setForm((f) => ({ ...f, full_name: e.target.value }))}
-                          className="px-2 py-1.5 rounded-lg bg-surface-input border border-line text-sm focus:outline-none focus:border-indigo-500"
+                          className="min-w-0 w-full px-2 py-1.5 rounded-lg bg-surface-input border border-line text-sm focus:outline-none focus:border-indigo-500"
                         />
                       </label>
                       <label className="text-xs text-fg-muted flex flex-col gap-1">
@@ -395,7 +398,7 @@ export default function PersonDetailPage() {
                         <input
                           value={form.role}
                           onChange={(e) => setForm((f) => ({ ...f, role: e.target.value }))}
-                          className="px-2 py-1.5 rounded-lg bg-surface-input border border-line text-sm focus:outline-none focus:border-indigo-500"
+                          className="min-w-0 w-full px-2 py-1.5 rounded-lg bg-surface-input border border-line text-sm focus:outline-none focus:border-indigo-500"
                         />
                       </label>
                     </div>
@@ -413,7 +416,7 @@ export default function PersonDetailPage() {
                             <select
                               value={form.preferred_channel}
                               onChange={(e) => setForm((f) => ({ ...f, preferred_channel: e.target.value }))}
-                              className="px-2 py-1.5 rounded-lg bg-surface-input border border-line text-sm focus:outline-none focus:border-indigo-500"
+                              className="min-w-0 w-full px-2 py-1.5 rounded-lg bg-surface-input border border-line text-sm focus:outline-none focus:border-indigo-500"
                             >
                               {CHANNELS.map((c) => (
                                 <option key={c} value={c}>{c}</option>
@@ -433,7 +436,7 @@ export default function PersonDetailPage() {
                                 min={1}
                                 value={form.response_sla_hours}
                                 onChange={(e) => setForm((f) => ({ ...f, response_sla_hours: e.target.value }))}
-                                className="flex-1 px-2 py-1.5 rounded-lg bg-surface-input border border-line text-sm focus:outline-none focus:border-indigo-500"
+                                className="min-w-0 flex-1 px-2 py-1.5 rounded-lg bg-surface-input border border-line text-sm focus:outline-none focus:border-indigo-500"
                               />
                               <span className="text-xs text-fg-muted flex-shrink-0">hours</span>
                             </div>
@@ -450,7 +453,7 @@ export default function PersonDetailPage() {
                           type="email"
                           value={form.email}
                           onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
-                          className="px-2 py-1.5 rounded-lg bg-surface-input border border-line text-sm focus:outline-none focus:border-indigo-500"
+                          className="min-w-0 w-full px-2 py-1.5 rounded-lg bg-surface-input border border-line text-sm focus:outline-none focus:border-indigo-500"
                         />
                       </label>
 
@@ -459,7 +462,7 @@ export default function PersonDetailPage() {
                         <input
                           value={form.slack_user_id}
                           onChange={(e) => setForm((f) => ({ ...f, slack_user_id: e.target.value }))}
-                          className="px-2 py-1.5 rounded-lg bg-surface-input border border-line text-sm focus:outline-none focus:border-indigo-500"
+                          className="min-w-0 w-full px-2 py-1.5 rounded-lg bg-surface-input border border-line text-sm focus:outline-none focus:border-indigo-500"
                           placeholder="U01ABC123"
                         />
                       </label>
@@ -469,7 +472,7 @@ export default function PersonDetailPage() {
                         <input
                           value={form.discord_user_id}
                           onChange={(e) => setForm((f) => ({ ...f, discord_user_id: e.target.value }))}
-                          className="px-2 py-1.5 rounded-lg bg-surface-input border border-line text-sm focus:outline-none focus:border-indigo-500"
+                          className="min-w-0 w-full px-2 py-1.5 rounded-lg bg-surface-input border border-line text-sm focus:outline-none focus:border-indigo-500"
                           placeholder="123456789012345678"
                         />
                         <span className="text-[10px] text-fg-muted">
@@ -482,7 +485,7 @@ export default function PersonDetailPage() {
                         <input
                           value={form.telegram_chat_id}
                           onChange={(e) => setForm((f) => ({ ...f, telegram_chat_id: e.target.value }))}
-                          className="px-2 py-1.5 rounded-lg bg-surface-input border border-line text-sm focus:outline-none focus:border-indigo-500"
+                          className="min-w-0 w-full px-2 py-1.5 rounded-lg bg-surface-input border border-line text-sm focus:outline-none focus:border-indigo-500"
                           placeholder="123456789"
                         />
                       </label>
@@ -500,7 +503,7 @@ export default function PersonDetailPage() {
                           type="date"
                           value={form.on_leave_until}
                           onChange={(e) => setForm((f) => ({ ...f, on_leave_until: e.target.value }))}
-                          className="px-2 py-1.5 rounded-lg bg-surface-input border border-line text-sm focus:outline-none focus:border-indigo-500"
+                          className="min-w-0 w-full px-2 py-1.5 rounded-lg bg-surface-input border border-line text-sm focus:outline-none focus:border-indigo-500"
                         />
                       </label>
                     </DisclosureSection>
@@ -518,7 +521,7 @@ export default function PersonDetailPage() {
                     ].map(([label, value]) => (
                       <div key={label} className="flex items-start gap-3 py-2">
                         <div className="w-40 flex-shrink-0 text-xs text-fg-muted pt-0.5">{label}</div>
-                        <div className="text-sm text-fg">{value}</div>
+                        <div className="min-w-0 flex-1 break-words text-sm text-fg [overflow-wrap:anywhere]">{value}</div>
                       </div>
                     ))}
                   </div>
@@ -661,7 +664,7 @@ export default function PersonDetailPage() {
                   </button>
                 </section>
               )}
-            </>
+            </fieldset>
           )}
         </div>
       </main>

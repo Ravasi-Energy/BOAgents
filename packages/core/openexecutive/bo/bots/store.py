@@ -115,6 +115,17 @@ def initialize_db(db_path: Path | None = None) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_bo_bot_step_runs_run
                 ON bo_bot_step_runs(run_id, idx);
+
+            -- Draft-content snapshots keyed by the definitions' CAS counter —
+            -- append-only audit/rebase trail; never read to infer a writer's
+            -- base (CONTROL R2: the client's declared expected_version is the
+            -- only base, enforced by the strict CAS).
+            CREATE TABLE IF NOT EXISTS bo_bot_draft_history (
+                definition_id TEXT NOT NULL,
+                draft_version INTEGER NOT NULL,
+                content_json TEXT NOT NULL,
+                PRIMARY KEY (definition_id, draft_version)
+            );
             """
         )
 
@@ -170,6 +181,11 @@ def create_definition(
             """,
             (ver_id, def_id, schema_version, content_hash, draft_content_json,
              owner, now),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO bo_bot_draft_history "
+            "(definition_id, draft_version, content_json) VALUES (?, ?, ?)",
+            (def_id, 1, draft_content_json),
         )
     return get_definition(tenant, def_id, db_path=db_path)
 
@@ -241,14 +257,55 @@ def update_draft(
             "WHERE id = ? AND tenant = ?",
             (current + 1, now, def_id, tenant),
         )
+        if draft_content_json is not None:
+            conn.execute(
+                "INSERT OR IGNORE INTO bo_bot_draft_history "
+                "(definition_id, draft_version, content_json) VALUES (?, ?, ?)",
+                (def_id, current + 1, draft_content_json),
+            )
     return get_definition(tenant, def_id, db_path=db_path)
 
 
+def get_draft_history(
+    tenant: str, def_id: str, draft_version: int, db_path: Path | None = None
+) -> dict[str, Any] | None:
+    """The draft content snapshot recorded at ``draft_version`` — audit and
+    rebase aid only; the write path never consults it to infer a base
+    (CONTROL R2)."""
+    get_definition(tenant, def_id, db_path=db_path)
+    with get_conn(db_path) as conn:
+        row = conn.execute(
+            "SELECT content_json FROM bo_bot_draft_history "
+            "WHERE definition_id = ? AND draft_version = ?",
+            (def_id, draft_version),
+        ).fetchone()
+    return None if row is None else json.loads(row["content_json"])
+
+
 def publish(tenant: str, def_id: str, *, actor: str,
+            expected_version: int,
             db_path: Path | None = None) -> dict[str, Any]:
-    """Publish the current draft: version becomes immutable + active."""
+    """Publish the current draft: version becomes immutable + active.
+
+    ``expected_version`` is MANDATORY (BUGHUNT-02 C3, CONTROL R2): it pins
+    the ``draft_version`` the caller actually reviewed — there is no
+    "publish whatever is current" fallback. Publishing a draft that was
+    edited after review is a ConflictError (409), so a reviewer can't
+    unknowingly publish unreviewed content."""
     with get_conn(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT draft_version FROM bo_bot_definitions "
+            "WHERE id = ? AND tenant = ?",
+            (def_id, tenant),
+        ).fetchone()
+        if row is None:
+            raise NotFoundError(def_id)
+        current = int(row["draft_version"])
+        if expected_version != current:
+            raise ConflictError(
+                f"expected_version={expected_version} dar versiunea curentă este {current}"
+            )
         draft_row = conn.execute(
             "SELECT id, version_no FROM bo_bot_versions "
             "WHERE definition_id = ? AND status = 'draft' "

@@ -72,6 +72,7 @@ def initialize_db(db_path: Path | None = None) -> None:
                 industry TEXT NOT NULL DEFAULT '',
                 stage TEXT NOT NULL DEFAULT '',
                 arr REAL,
+                arr_currency TEXT,
                 headcount INTEGER,
                 founding_year INTEGER,
                 mission TEXT NOT NULL DEFAULT '',
@@ -85,6 +86,18 @@ def initialize_db(db_path: Path | None = None) -> None:
                 ON generated_fixtures(archived);
             """
         )
+        # Additive migration for DBs created before arr_currency existed:
+        # CREATE TABLE IF NOT EXISTS leaves pre-existing schemas untouched,
+        # so the column is added separately. Idempotent — PRAGMA-driven,
+        # never drops or rewrites rows; rows keep NULL (currency unknown).
+        cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(generated_fixtures)")
+        }
+        if "arr_currency" not in cols:
+            conn.execute(
+                "ALTER TABLE generated_fixtures ADD COLUMN arr_currency TEXT"
+            )
 
 
 def fixture_name_exists(name: str, db_path: Path | None = None) -> bool:
@@ -122,6 +135,7 @@ def insert_fixture(
     industry: str = "",
     stage: str = "",
     arr: float | None = None,
+    arr_currency: str | None = None,
     headcount: int | None = None,
     founding_year: int | None = None,
     mission: str = "",
@@ -143,9 +157,9 @@ def insert_fixture(
                 name, display_name, scenario_description,
                 profile_yaml, people_yaml, departments_yaml,
                 memory_json, docs_json, dept_summary_json, people_summary_json,
-                industry, stage, arr, headcount, founding_year, mission,
-                doc_count, scenario_count, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                industry, stage, arr, arr_currency, headcount, founding_year,
+                mission, doc_count, scenario_count, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 name,
@@ -161,6 +175,7 @@ def insert_fixture(
                 industry,
                 stage,
                 arr,
+                arr_currency,
                 headcount,
                 founding_year,
                 mission,
@@ -197,8 +212,8 @@ def list_fixtures(db_path: Path | None = None) -> list[dict[str, Any]]:
     with _get_conn(db_path) as conn:
         rows = conn.execute(
             """
-            SELECT name, display_name, industry, stage, arr, headcount,
-                   founding_year, mission, doc_count, scenario_count,
+            SELECT name, display_name, industry, stage, arr, arr_currency,
+                   headcount, founding_year, mission, doc_count, scenario_count,
                    dept_summary_json, people_summary_json
             FROM generated_fixtures
             WHERE archived = 0

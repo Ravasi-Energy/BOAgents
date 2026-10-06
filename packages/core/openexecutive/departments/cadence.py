@@ -1,7 +1,8 @@
 """Department cadence scheduler helpers.
 
 A *cadence* is a recurring proactive action tied to a department — e.g.
-``"daily@09:00"`` fires a check-in workflow every day at 09:00 UTC.
+``"daily@09:00"`` fires a check-in workflow every day at 09:00 in the
+tenant's display timezone (``bo.ui.timezone``).
 
 Phase 5 surfaces two public entry points:
 
@@ -13,12 +14,12 @@ Phase 5 surfaces two public entry points:
 Cadence specs are stored on the ``DepartmentConfig.cadences`` dict under
 the key ``"check_in"``.  Three formats are supported:
 
-* ``"daily@HH:MM"``            — fires every day at HH:MM UTC
+* ``"daily@HH:MM"``            — fires every day at HH:MM local tenant time
 * ``"weekly@DOW@HH:MM"``       — fires every week on DOW (3-letter,
-  or ``"weekly@DOW-HH:MM"``      e.g. ``thu``) at HH:MM UTC;
+  or ``"weekly@DOW-HH:MM"``      e.g. ``thu``) at HH:MM local;
                                   either ``@`` or ``-`` may separate DOW from time
 * ``"quarterly@DD-HH:MM"``     — fires on day DD of each quarter-start
-                                  month (Jan/Apr/Jul/Oct) at HH:MM UTC
+                                  month (Jan/Apr/Jul/Oct) at HH:MM local
 
 Anything else is treated as unknown and silently skipped with a warning.
 """
@@ -28,6 +29,7 @@ import logging
 import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -42,23 +44,48 @@ _QUARTERLY_RE = re.compile(r"^quarterly@(\d{2})-(\d{2}):(\d{2})$")
 _QUARTER_START_MONTHS = [1, 4, 7, 10]
 
 
+def _tenant_tz() -> Any:
+    """The tenant's display timezone (``bo.ui.timezone``).
+
+    BUGHUNT-02 C9: cadence wall-clock times are local to the tenant — a
+    "daily@23:30" check-in means 23:30 in Bucharest, not 23:30 UTC. The
+    returned datetime is still stored UTC; only the schedule anchor is local.
+    """
+    import os
+
+    from openexecutive.bo.settings import store as _bo_settings
+
+    tenant = os.environ.get("BO_TENANT_ID", "local").strip().lower()
+    return _bo_settings.ui_timezone(tenant)
+
+
 def _parse_cadence_spec(spec: str, after: datetime) -> datetime | None:
     """Return the next occurrence of ``spec`` that is strictly *after* ``after``.
 
     Returns ``None`` for unrecognised specs.  ``after`` is treated as UTC;
-    the returned datetime is always UTC-aware.
+    spec times are wall-clock in the tenant's display timezone (``_tenant_tz``)
+    — the returned datetime is always UTC-aware. Working in *naive local*
+    time (rather than adding timedeltas on an aware dt) keeps wall-clock
+    candidates correct across DST folds.
     """
     if after.tzinfo is None:
         after = after.replace(tzinfo=UTC)
+    local_tz = _tenant_tz()
     after_utc = after.astimezone(UTC)
+    # Naive local wall clock — candidates are built naive then re-attached
+    # to the zone so a DST transition can't shift the local HH:MM.
+    after_local = after_utc.astimezone(local_tz).replace(tzinfo=None)
+
+    def _utc(naive_local: datetime) -> datetime:
+        return naive_local.replace(tzinfo=local_tz).astimezone(UTC)
 
     daily_m = _DAILY_RE.match(spec)
     if daily_m:
         hour, minute = int(daily_m.group(1)), int(daily_m.group(2))
-        candidate = after_utc.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if candidate <= after_utc:
+        candidate = after_local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if candidate <= after_local:
             candidate += timedelta(days=1)
-        return candidate
+        return _utc(candidate)
 
     weekly_m = _WEEKLY_RE.match(spec)
     if weekly_m:
@@ -68,32 +95,32 @@ def _parse_cadence_spec(spec: str, after: datetime) -> datetime | None:
         if target_dow is None:
             logger.warning("cadence: unknown DOW token %r in spec %r", dow_str, spec)
             return None
-        candidate = after_utc.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        days_ahead = (target_dow - after_utc.weekday()) % 7
+        candidate = after_local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        days_ahead = (target_dow - after_local.weekday()) % 7
         candidate += timedelta(days=days_ahead)
-        if candidate <= after_utc:
+        if candidate <= after_local:
             candidate += timedelta(weeks=1)
-        return candidate
+        return _utc(candidate)
 
     quarterly_m = _QUARTERLY_RE.match(spec)
     if quarterly_m:
         day = int(quarterly_m.group(1))
         hour, minute = int(quarterly_m.group(2)), int(quarterly_m.group(3))
         # Walk forward through up to 5 quarter-start months until we find a
-        # valid date that is strictly after `after_utc`.
-        year = after_utc.year
-        start_q = (after_utc.month - 1) // 3  # 0-based index of current quarter
+        # valid date that is strictly after `after_local`.
+        year = after_local.year
+        start_q = (after_local.month - 1) // 3  # 0-based index of current quarter
         for offset in range(5):
             q_idx = (start_q + offset) % 4
             q_year = year + (start_q + offset) // 4
             q_month = _QUARTER_START_MONTHS[q_idx]
             try:
-                candidate = datetime(q_year, q_month, day, hour, minute, 0, tzinfo=UTC)
+                candidate = datetime(q_year, q_month, day, hour, minute, 0)
             except ValueError:
                 # day out of range for this month (e.g. day=31 in a 30-day month)
                 continue
-            if candidate > after_utc:
-                return candidate
+            if candidate > after_local:
+                return _utc(candidate)
         logger.warning("cadence: could not compute next quarterly occurrence for %r", spec)
         return None
 

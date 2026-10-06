@@ -93,5 +93,6 @@ class Person(BaseModel):
     on_leave_until: date | None = None
     reports_to_person_id: int | None = None
     archived: bool = False
+    version: int = 1
     created_at: str = ""
     updated_at: str = ""

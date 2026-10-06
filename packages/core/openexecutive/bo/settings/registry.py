@@ -18,6 +18,15 @@ from typing import Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 SettingType = Literal["text", "enum", "integer", "timezone", "boolean"]
+
+# How a PUT's value combines with the stored one (BUGHUNT-02 P0-1/2):
+#   replace    — the payload IS the new value (default, unchanged)
+#   csv_union  — payload items union-add onto the stored CSV; "" is a no-op
+#   json_merge — payload sparse-merges into the stored JSON doc: fields the
+#                writer sent are applied, omitted fields preserve, keyed
+#                collections upsert, "" is refused, removal only via
+#                explicit *_remove ops (CONTROL R2 — no inferred base)
+MergeStrategy = Literal["replace", "csv_union", "json_merge"]
 ApplyMode = Literal["IMMEDIATE", "NEW_RUN", "RESTART", "MIGRATION"]
 Scope = Literal["tenant"]
 
@@ -238,6 +247,7 @@ class SettingSpec:
     effect_ro: str
     acceptance_ro: str
     validate: Callable[[Any], Any] = field(compare=False)
+    merge: MergeStrategy = "replace"
 
     def to_meta(self) -> dict[str, Any]:
         """Public metadata for the settings UI — never includes the value."""
@@ -404,6 +414,7 @@ REGISTRY: dict[str, SettingSpec] = {
         effect_ro="Se aplică la următorul import; părțile revocate nu mai verifică.",
         acceptance_ro="JSON invalid sau registru malformat este respins la salvare.",
         validate=lambda v: _validate_trust_store(v),
+        merge="json_merge",
     ),
     "bo.packages.rollback_requires_approval": SettingSpec(
         key="bo.packages.rollback_requires_approval",
@@ -422,6 +433,101 @@ REGISTRY: dict[str, SettingSpec] = {
         effect_ro="Aplicat la fiecare import; dezactivarea permite downgrade fără aprobare.",
         acceptance_ro="Fără aprobare activă legată de tenant/digest/versiuni → ROLLBACK_UNAUTHORIZED.",
         validate=lambda v: _validate_bool(v, label="Aprobare downgrade"),
+    ),
+    "bo.mail.poll.max_pages_per_cycle": SettingSpec(
+        key="bo.mail.poll.max_pages_per_cycle",
+        type="integer",
+        default=10,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="mail",
+        label_ro="Pagini maxime per ciclu de poștă",
+        label_en="Max search pages per mail cycle",
+        help_ro="Câte pagini de rezultate necitite parcurge pollerul într-un ciclu. Mesajele de dincolo de limită se preiau la ciclul următor.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Se aplică la următorul ciclu de polling; niciodată 0 sau nelimitat.",
+        acceptance_ro="Valori în afara 1–50 sunt respinse; la cap atins, restul se procesează la ciclul următor.",
+        validate=lambda v: _validate_int(
+            v, minimum=1, maximum=50, label="Paginile maxime"),
+    ),
+    "bo.mail.processing.max_attempts": SettingSpec(
+        key="bo.mail.processing.max_attempts",
+        type="integer",
+        default=3,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="mail",
+        label_ro="Tentative maxime per email",
+        label_en="Max processing attempts per email",
+        help_ro="Câte tentative de procesare primește un email înainte de a fi lăsat necitit pentru revizuire umană. Eșecul nu consumă mesajul.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Se aplică la următorul ciclu; contorul e în jurnalul de audit — supraviețuiește restarturilor.",
+        acceptance_ro="Valori în afara 1–10 sunt respinse; limita nu poate fi dezactivată.",
+        validate=lambda v: _validate_int(
+            v, minimum=1, maximum=10, label="Tentativele maxime"),
+    ),
+    "bo.mail.scope.bound_mailbox": SettingSpec(
+        key="bo.mail.scope.bound_mailbox",
+        type="text",
+        default="",
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="mail",
+        label_ro="Căsuță de e-mail atestată pentru jurnal",
+        label_en="Attested mailbox for this journal",
+        help_ro="Atestare explicită că adresa EXEC_EMAIL_ADDRESS configurată este căsuța pe care acest jurnal de procesare o deservește. Obligatorie când jurnalul poartă evidență veche fără scope sau când adresa configurată s-a schimbat — fără ea mesajele ambigue rămân necitite. Valoarea este consumată (ștearsă) la prima utilizare — o singură tranziție per atestare.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Se aplică la următorul ciclu de polling; markerii ambigui nu se adoptă retroactiv niciodată.",
+        acceptance_ro="Gol = neatostat; o valoare care nu coincide cu adresa configurată nu leagă nimic.",
+        validate=lambda v: _validate_text(
+            v, min_len=0, max_len=254, label="Căsuța atestată"),
+    ),
+    "bo.turns.lease_seconds": SettingSpec(
+        key="bo.turns.lease_seconds",
+        type="integer",
+        default=900,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="exec",
+        label_ro="Lease turn Executive (s)",
+        label_en="Executive turn lease (s)",
+        help_ro="Durata maximă în care un turn Executive admis poate rămâne activ înainte ca bariera turn/switch să-l marcheze incert. Un lease expirat NU înseamnă lipsă de efect — blochează switchul până la reconciliere. Coordoarele trăiesc în bo_agents.db, care nu este swapuit per client.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Se aplică la următoarea admitere de turn.",
+        acceptance_ro="Valori în afara 60–3600 sunt respinse; bariera nu poate fi dezactivată.",
+        validate=lambda v: _validate_int(
+            v, minimum=60, maximum=3600, label="Lease turn"),
+    ),
+    "bo.switch.max_wait_seconds": SettingSpec(
+        key="bo.switch.max_wait_seconds",
+        type="integer",
+        default=20,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="exec",
+        label_ro="Așteptare switch peste turn (s)",
+        label_en="Bounded switch wait over a turn (s)",
+        help_ro="Cât așteaptă o operație de switch/restore/reset după turnurile Executive active înainte de a refuza cu motiv și ID. Turnurile incerte nu sunt așteptate — ele blochează până la reconciliere operator.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Se aplică la următoarea operație de switch.",
+        acceptance_ro="Valori în afara 0–120 sunt respinse; nu există mod fără barieră.",
+        validate=lambda v: _validate_int(
+            v, minimum=0, maximum=120, label="Așteptare switch"),
     ),
     "bo.router.observe_enabled": SettingSpec(
         key="bo.router.observe_enabled",
@@ -458,6 +564,7 @@ REGISTRY: dict[str, SettingSpec] = {
         effect_ro="Se aplică la următoarea observație; candidații în afara listei → PROVIDER_DENIED.",
         acceptance_ro="CSV invalid sau cu spații/@ este respins la salvare.",
         validate=lambda v: _validate_csv(v, label="Provideri permiși"),
+        merge="csv_union",
     ),
     "bo.router.allowed_regions": SettingSpec(
         key="bo.router.allowed_regions",
@@ -476,6 +583,7 @@ REGISTRY: dict[str, SettingSpec] = {
         effect_ro="Candidatul fără regiune comună cu lista → REGION_DENIED.",
         acceptance_ro="CSV invalid este respins la salvare.",
         validate=lambda v: _validate_csv(v, label="Regiuni permise"),
+        merge="csv_union",
     ),
     "bo.router.required_capabilities": SettingSpec(
         key="bo.router.required_capabilities",
@@ -494,6 +602,7 @@ REGISTRY: dict[str, SettingSpec] = {
         effect_ro="Candidatul care nu acoperă lista → CAPABILITY_MISSING.",
         acceptance_ro="CSV invalid este respins la salvare.",
         validate=lambda v: _validate_csv(v, label="Capabilități cerute"),
+        merge="csv_union",
     ),
     "bo.router.min_quality": SettingSpec(
         key="bo.router.min_quality",

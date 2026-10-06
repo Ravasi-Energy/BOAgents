@@ -8,18 +8,37 @@ until a slot is explicitly created.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 from openexecutive.api.intake_uploads import (
     _INTAKE_GEN_CHARS_PER_FILE,
     _INTAKE_MAX_DOC_CHARS,
     _gather_intake_attachments,
 )
+from openexecutive.memory.company_profile import ProfileLockTimeout
 
 router = APIRouter()
+
+
+def _capability(request: Request, capability: str) -> None:
+    """Resolve the caller's BO identity and require ``capability``.
+
+    These routes swap or destroy the entire live company context, so the
+    shared-secret transport gate alone is not enough: an authenticated
+    viewer (proxied session) or operator (x-api-key without caller email)
+    must be refused BEFORE any slot mutation runs. Identity resolution is
+    server-side only — the proxy's caller headers are trusted only with a
+    valid BACKEND_PROXY_SECRET, and the dev fallback stays admin as
+    documented in bo.identity.
+    """
+    from openexecutive.bo import identity as bo_identity
+
+    bo_identity.require(bo_identity.resolve_identity(request), capability)
 
 
 class CreateClientRequest(BaseModel):
@@ -45,6 +64,12 @@ class ClientMetaPatch(BaseModel):
     engagement_start: str | None = Field(default=None, max_length=32)
     renewal_date: str | None = Field(default=None, max_length=32)
     retainer: str | None = Field(default=None, max_length=200)
+    retainer_amount: str | None = Field(default=None, max_length=32)
+    retainer_currency: str | None = Field(default=None, max_length=8)
+    # Action flag, not a stored field: null is dropped from a patch, so a
+    # set retainer pair could never be cleared via API (F19-4). Strict
+    # bool — "true"/1 are refused with 422, not coerced.
+    clear_retainer_money: StrictBool | None = None
     hours_per_week: float | None = None
     primary_contact: str | None = Field(default=None, max_length=200)
     notes: str | None = Field(default=None, max_length=5000)
@@ -64,7 +89,8 @@ def _raise_for(exc: Exception) -> None:
 
 
 @router.get("/clients")
-async def list_clients() -> dict:
+async def list_clients(request: Request) -> dict:
+    _capability(request, "clients:read")
     from openexecutive.cli.fixture_loader import get_fixture_status
     from openexecutive.clients.rotation import rotation_in_progress
     from openexecutive.clients.slots import get_active_client, list_client_slots
@@ -80,8 +106,157 @@ async def list_clients() -> dict:
     }
 
 
+_RECONCILED_BY_RE = re.compile(r"reconciled_by:[^\"'|\s)}\]]+")
+
+
+def _redact_for_viewer(row: dict) -> dict:
+    """Strip operator/owner identity from a barrier row for non-admins
+    (RA15-BO01-08).
+
+    Dropping the ``owner``/``actor`` keys alone leaked the reconciler's
+    identity anyway: ``reconcile_turn`` embeds ``reconciled_by:<actor>``
+    into the lease ``reason``, and ``bo_control_audit.detail`` is a JSON
+    blob whose nested strings repeat it. For non-admin viewers the
+    marker is masked in every string field — including the raw JSON of
+    ``detail`` — and the actor's exact value is scrubbed wherever else
+    it appears. The stored rows keep full evidence; this is view-only
+    redaction. Admins still see everything.
+    """
+    actor = row.get("actor")
+    row = {k: v for k, v in row.items() if k not in ("owner", "actor")}
+    for key, value in row.items():
+        if isinstance(value, str):
+            value = _RECONCILED_BY_RE.sub(
+                "reconciled_by:[redacted]", value
+            )
+            if isinstance(actor, str) and actor:
+                value = value.replace(actor, "[redacted]")
+            row[key] = value
+    return row
+
+
+@router.get("/clients/turn-blockers")
+async def list_turn_blockers(request: Request) -> dict:
+    """Open/uncertain turn leases blocking client switches (RA13-A02-01).
+
+    The admin surface for the durable turn/switch barrier: each entry
+    carries the turn id, kind, per-client ref, owner, status and reason —
+    exactly what a refused activate/restore reports. ``switch_in_progress``
+    tells the UI a switch currently holds the barrier (new turns deferred).
+    The ``owner`` field (pid:nonce) is withheld from non-admin viewers.
+    """
+    from openexecutive.bo import identity as bo_identity
+    from openexecutive.bo import turn_barrier
+
+    ident = bo_identity.resolve_identity(request)
+    bo_identity.require(ident, "clients:read")
+    try:
+        bo_identity.require(ident, "clients:write")
+        can_write = True
+    except bo_identity.ForbiddenError:
+        can_write = False
+    blockers = turn_barrier.blockers()
+    if not can_write:
+        blockers = [_redact_for_viewer(b) for b in blockers]
+    return {
+        "switch_in_progress": turn_barrier.switch_in_progress(),
+        "blockers": blockers,
+    }
+
+
+@router.get("/clients/turn-history")
+async def list_turn_history(
+    request: Request, limit: int = 50
+) -> dict:
+    """Closed/reconciled turn leases, newest first (F-2, REM-AUDIT-18).
+
+    The durable trail that survives switches and restarts — what the
+    operator reviews after a refusal, or to confirm a reconcile landed.
+    ``owner`` and any embedded ``reconciled_by:<actor>`` marker in
+    ``reason`` are withheld from non-admin viewers, same as
+    turn-blockers.
+    """
+    from openexecutive.bo import identity as bo_identity
+    from openexecutive.bo import turn_barrier
+
+    ident = bo_identity.resolve_identity(request)
+    bo_identity.require(ident, "clients:read")
+    try:
+        bo_identity.require(ident, "clients:write")
+        can_write = True
+    except bo_identity.ForbiddenError:
+        can_write = False
+    rows = turn_barrier.recent_turns(limit)
+    if not can_write:
+        rows = [_redact_for_viewer(r) for r in rows]
+    return {"turns": rows}
+
+
+@router.get("/clients/control-audit")
+async def list_control_audit(
+    request: Request, turn_id: str | None = None
+) -> dict:
+    """Durable control-plane audit rows (F-2, REM-AUDIT-18).
+
+    ``bo_control_audit`` is written in the same transaction as the state
+    change it records (e.g. ``turn_reconcile``), so this is the
+    authoritative operator-action trail — it cannot be lost by a journal
+    swap or an I/O error on the episodic audit log. ``resolution``
+    distinguishes provider-verified evidence (``verified``) from human
+    attestation (``attested``). ``actor`` — including its copies inside
+    ``detail`` JSON and ``reconciled_by:`` markers — is withheld from
+    non-admins.
+    """
+    from openexecutive.bo import identity as bo_identity
+    from openexecutive.bo import turn_barrier
+
+    ident = bo_identity.resolve_identity(request)
+    bo_identity.require(ident, "clients:read")
+    try:
+        bo_identity.require(ident, "clients:write")
+        can_write = True
+    except bo_identity.ForbiddenError:
+        can_write = False
+    rows = turn_barrier.control_audit(turn_id)
+    if not can_write:
+        rows = [_redact_for_viewer(r) for r in rows]
+    return {"audit": rows}
+
+
+class ReconcileTurnRequest(BaseModel):
+    resolution: Literal["verified", "attested"]
+
+
+@router.post("/clients/turn-blockers/{turn_id}/reconcile")
+async def reconcile_turn_blocker(
+    turn_id: str, req: ReconcileTurnRequest, request: Request
+) -> dict:
+    """Operator reconciliation of a blocking turn lease (RA13-A02-01).
+
+    ``verified`` — the caller checked the journal/provider evidence for the
+    turn's outcome. ``attested`` — the operator explicitly accepts the
+    decision. Either way the lease closes with the resolution recorded;
+    the row is never deleted, so the trail survives. An ``active`` lease
+    refuses (409): its owner may still complete it — reconcile once it
+    has expired to ``uncertain``."""
+    from openexecutive.bo import identity as bo_identity
+    from openexecutive.bo import turn_barrier
+
+    ident = bo_identity.resolve_identity(request)
+    bo_identity.require(ident, "clients:write")
+    try:
+        return turn_barrier.reconcile_turn(
+            turn_id, resolution=req.resolution, actor=ident.actor
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except turn_barrier.ReconcileRefusedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.post("/clients")
-async def create_client(req: CreateClientRequest) -> dict:
+async def create_client(req: CreateClientRequest, request: Request) -> dict:
+    _capability(request, "clients:write")
     from openexecutive.clients.slots import ClientSlotError, create_client_slot
     from openexecutive.config import get_settings
 
@@ -101,6 +276,7 @@ async def create_client(req: CreateClientRequest) -> dict:
 
 @router.post("/clients/generate")
 async def generate_client(
+    request: Request,
     description: str = Form(""),
     files: list[UploadFile] = File(  # noqa: B008 — FastAPI multipart marker, mirrors chat.py
         default=[]
@@ -116,6 +292,7 @@ async def generate_client(
     activation. Nothing is persisted here — the UI posts the (possibly edited)
     bundle back to ``POST /clients`` with ``source="generated"``.
     """
+    _capability(request, "clients:write")
     from openexecutive.clients.slots import derive_client_slug
     from openexecutive.config import get_settings
     from openexecutive.fixtures.generator import (
@@ -173,8 +350,9 @@ async def generate_client(
 
 
 @router.post("/clients/save")
-async def save_client() -> dict:
+async def save_client(request: Request) -> dict:
     """Checkpoint the active client's live state into its slot."""
+    _capability(request, "clients:write")
     from openexecutive.clients.slots import ClientSlotError, save_active_client
     from openexecutive.config import get_settings
 
@@ -188,6 +366,7 @@ async def save_client() -> dict:
 @router.post("/clients/{slug}/activate")
 async def activate_client(slug: str, request: Request) -> dict:
     """Switch the live company context to this client (saving the current one)."""
+    _capability(request, "clients:write")
     from openexecutive.clients.slots import ClientSlotError, activate_client_slot
     from openexecutive.config import get_settings
 
@@ -198,15 +377,22 @@ async def activate_client(slug: str, request: Request) -> dict:
     except ClientSlotError as exc:
         _raise_for(exc)
         raise
+    except ProfileLockTimeout as exc:
+        # A wedged concurrent profile writer — bounded refusal, never a hang.
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "profile_lock_timeout", "message": str(exc)},
+        ) from exc
 
 
 @router.get("/clients/cockpit")
-async def clients_cockpit() -> dict:
+async def clients_cockpit(request: Request) -> dict:
     """Practice-wide board: one rollup card per client (active first).
 
     Read-only across live DB + parked slot snapshots; one broken slot
     degrades to an error-flagged card rather than failing the board.
     """
+    _capability(request, "clients:read")
     from datetime import UTC, datetime
 
     from openexecutive.clients.cockpit import practice_overview
@@ -220,8 +406,9 @@ async def clients_cockpit() -> dict:
 
 
 @router.patch("/clients/{slug}")
-async def patch_client_meta(slug: str, req: ClientMetaPatch) -> dict:
+async def patch_client_meta(slug: str, req: ClientMetaPatch, request: Request) -> dict:
     """Update a slot's engagement metadata (role, status, renewal, …)."""
+    _capability(request, "clients:write")
     from openexecutive.clients.slots import ClientSlotError, update_client_meta
     from openexecutive.config import get_settings
 
@@ -236,7 +423,8 @@ async def patch_client_meta(slug: str, req: ClientMetaPatch) -> dict:
 
 
 @router.delete("/clients/{slug}")
-async def delete_client(slug: str) -> dict:
+async def delete_client(slug: str, request: Request) -> dict:
+    _capability(request, "clients:write")
     from openexecutive.clients.slots import ClientSlotError, delete_client_slot
     from openexecutive.config import get_settings
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -9,11 +11,50 @@ import pytest
 os.environ.setdefault("ANTHROPIC_API_KEY", "sk-test-not-used")
 os.environ.setdefault("EXEC_EMAIL_ADDRESS", "ceo.test@example.com")
 
+# The durable turn/switch barrier (RA13-A02-01) writes to bo_agents.db,
+# resolved at import time. Without isolation a crashed test leaves an
+# 'uncertain' lease in the shared ./bo_agents.db and later client-slot
+# activations refuse spuriously — per-process temp file keeps runs clean.
+os.environ.setdefault(
+    "BOAGENTS_DB_PATH",
+    os.path.join(tempfile.gettempdir(), f"oe_bo_test_{os.getpid()}.db"),
+)
+
 # Tests run as a local, non-public process. If this leaks in from the developer's
 # shell, create_app() fails closed on the missing BACKEND_SHARED_SECRET and every
 # full-app test errors at construction — the same trap BACKEND_SHARED_SECRET sets
 # (see CLAUDE.md → Testing). Clear it so the suite matches CI either way.
 os.environ.pop("OE_PUBLIC_DEPLOYMENT", None)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_turn_barrier_db(monkeypatch):
+    """Per-test bo_agents.db for the turn barrier (RA13-A02-01).
+
+    The module-level default is a per-process file — fine for barrier
+    *tables*, but turn leases persist between tests and a 'processed'
+    lease from test A would fence the same (mailbox, message_id) in
+    test B. The schema is initialized eagerly: barrier *read* paths are
+    fail-closed on a missing store file, so tests that only read must
+    still see an initialized (empty) store. Tests that pass an explicit
+    ``db_path`` are unaffected.
+
+    The file lives in its own temp dir, NOT the test's ``tmp_path`` —
+    tests that assert exact ``tmp_path`` contents (e.g. company_profile
+    atomicity checks) must not observe it.
+    """
+    import shutil
+
+    from openexecutive.bo import db as bo_db
+    from openexecutive.bo import turn_barrier
+
+    bo_dir = tempfile.mkdtemp(prefix="oe_bo_test_")
+    monkeypatch.setattr(bo_db, "DB_PATH", Path(bo_dir) / "bo_agents.db")
+    turn_barrier.initialize_db()
+    try:
+        yield
+    finally:
+        shutil.rmtree(bo_dir, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)

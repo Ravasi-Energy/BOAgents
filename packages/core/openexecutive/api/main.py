@@ -377,6 +377,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from openexecutive.bo.db import initialize_db as initialize_bo_db
     initialize_bo_db()
 
+    # RA13-A02-01: a crash mid-switch leaves the barrier flag set. Clearing it
+    # at boot is safe — the journal-side transition marker still fences a
+    # half-swapped state; only the admission gate is released. Open turn
+    # leases are NOT cleared: expired ones sweep to 'uncertain' on the next
+    # begin_switch and must be reconciled, never assumed absent.
+    from openexecutive.bo import turn_barrier
+
+    turn_barrier.clear_stale_switch()
+    turn_barrier.seed_open_attempts()
+
     # User-generated company fixtures (DB-backed; persists on the data volume).
     from openexecutive.fixtures.store import initialize_db as initialize_fixtures_db
     initialize_fixtures_db()
@@ -760,10 +770,13 @@ def _is_public_deployment() -> bool:
 
 def _restore_blocked_allowed_path(request: Request) -> bool:
     """Requests allowed while the instance is restore-blocked: health plus the
-    two recovery surfaces (re-activate the recorded client, unload to the
-    user backup). OPTIONS must pass too — this gate wraps CORSMiddleware
-    responses, and a refused preflight would make the UI's recovery buttons
-    unreachable from a browser exactly when they matter."""
+    recovery surfaces (re-activate the recorded client, unload to the
+    user backup, list/reconcile turn blockers). OPTIONS must pass too —
+    this gate wraps CORSMiddleware responses, and a refused preflight
+    would make the UI's recovery buttons unreachable from a browser
+    exactly when they matter. The turn-blocker endpoints must stay open
+    here: ``activate`` and ``unload`` refuse on an uncertain lease, so
+    gating the reconcile surface would wedge the operator completely."""
     # Trailing-slash tolerant — the router's own redirect would 503 without
     # it, e.g. a POST to /fixtures/unload/ dying on the gate instead of
     # reaching the route's 307.
@@ -777,6 +790,12 @@ def _restore_blocked_allowed_path(request: Request) -> bool:
             method == "POST"
             and path.startswith("/clients/")
             and path.endswith("/activate")
+        )
+        or (method == "GET" and path == "/clients/turn-blockers")
+        or (
+            method == "POST"
+            and path.startswith("/clients/turn-blockers/")
+            and path.endswith("/reconcile")
         )
     )
 

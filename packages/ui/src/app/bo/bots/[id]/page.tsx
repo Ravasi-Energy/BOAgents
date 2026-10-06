@@ -4,7 +4,7 @@
 // deterministic simulation panel, run history. Romanian copy per mandate.
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import IconBO from "@/components/bo/IconBO";
 import { BoPage, Field, InlineAlert, Pill, StateBlock } from "@/components/bo/ui";
@@ -19,6 +19,8 @@ import {
   type BoBotDetail,
   type BoRun,
 } from "@/lib/bo";
+
+import { buildBotDelta, rebaseBotDraft, type BotEdit } from "@/lib/bot-delta";
 
 type DetailState =
   | { kind: "loading" }
@@ -53,6 +55,14 @@ export default function BoBotDetailPage() {
     { kind: "ok" | "warn" | "danger"; text: string } | null
   >(null);
 
+  // Keep the actually-read edit version; refetch is not consent to rebase.
+  const editBase = useRef<BotEdit | null>(null);
+  const editVersion = useRef<number | null>(null);
+  const editRevision = useRef(0);
+  const draftDirty = useRef(false);
+  const currentBot = useRef(id);
+  const [conflicted, setConflicted] = useState(false);
+
   // draft editor state
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -62,6 +72,16 @@ export default function BoBotDetailPage() {
   const [inputJson, setInputJson] = useState(SAMPLE_INPUT);
   const [useDraft, setUseDraft] = useState(false);
   const [lastRun, setLastRun] = useState<BoRun | null>(null);
+
+  function editName(value: string) {
+    draftDirty.current = true; editRevision.current += 1; setName(value);
+  }
+  function editDescription(value: string) {
+    draftDirty.current = true; editRevision.current += 1; setDescription(value);
+  }
+  function editContent(value: string) {
+    draftDirty.current = true; editRevision.current += 1; setContentJson(value);
+  }
 
   const load = useCallback(async () => {
     try {
@@ -73,15 +93,24 @@ export default function BoBotDetailPage() {
       } catch {
         role = null; // unknown role → UI stays read-only; server enforces anyway
       }
+      if (currentBot.current !== id) return;
       setState({ kind: "data", detail, runs: runs.runs, role });
-      setName(detail.bot.name);
-      setDescription(detail.bot.description);
-      setContentJson(JSON.stringify(detail.draft?.content ?? {}, null, 2));
+      if (!draftDirty.current) {
+        editVersion.current = detail.bot.draft_version;
+        editBase.current = { name: detail.bot.name, description: detail.bot.description, content: detail.draft?.content ?? {} };
+        setName(detail.bot.name);
+        setDescription(detail.bot.description);
+        setContentJson(JSON.stringify(detail.draft?.content ?? {}, null, 2));
+        setConflicted(false);
+      }
     } catch (err) {
+      if (currentBot.current !== id) return;
       if (err instanceof BoApiError && err.status === 404) {
         setState({ kind: "notfound" });
       } else if (err instanceof BoApiError && err.status === 403) {
         setState({ kind: "forbidden" });
+      } else if (draftDirty.current) {
+        setNotice({ kind: "danger", text: "Reîncărcarea a eșuat. Editura locală și baza citită sunt păstrate." });
       } else {
         setState({ kind: "error" });
       }
@@ -89,11 +118,52 @@ export default function BoBotDetailPage() {
   }, [id]);
 
   useEffect(() => {
+    currentBot.current = id;
+    draftDirty.current = false;
+    editVersion.current = null;
+    editBase.current = null;
+    setConflicted(false);
     void load();
-  }, [load]);
+  }, [id, load]);
+
+  async function discardAndReload() {
+    // Explicit discard only; ordinary refetch never clears unsaved edits.
+    draftDirty.current = false;
+    setConflicted(false);
+    setBusy("save");
+    try { await load(); } finally { setBusy(null); }
+  }
+
+  async function reloadPreservingDraft() {
+    if (!editBase.current) return;
+    setBusy("save");
+    try {
+      const fresh = await getBoBot(id);
+      if (currentBot.current !== id) return;
+      const nextBase = { name: fresh.bot.name, description: fresh.bot.description, content: fresh.draft?.content ?? {} };
+      const next = rebaseBotDraft(editBase.current, { name, description, content: JSON.parse(contentJson) }, nextBase);
+      editBase.current = nextBase;
+      editVersion.current = fresh.bot.draft_version;
+      setName(next.name); setDescription(next.description); setContentJson(JSON.stringify(next.content, null, 2));
+      setConflicted(false);
+      setNotice({ kind: "warn", text: "Versiunea curentă a fost citită. Editurile sunt păstrate; verifică și salvează explicit." });
+      await load();
+    } catch {
+      setNotice({ kind: "danger", text: "Reîncărcarea/rebase a eșuat. Editura și baza citită sunt păstrate." });
+    } finally { setBusy(null); }
+  }
 
   async function saveDraft() {
     if (state.kind !== "data") return;
+    if (state.role !== "admin") {
+      setNotice({ kind: "danger", text: "Editarea cere rol de administrator." });
+      return;
+    }
+    if (editVersion.current === null || conflicted) {
+      setNotice({ kind: "warn", text: "Conflictul trebuie rezolvat explicit. Editura este păstrată." });
+      return;
+    }
+    const revision = editRevision.current;
     setBusy("save");
     setNotice(null);
     let parsed: Record<string, unknown> | undefined;
@@ -105,19 +175,18 @@ export default function BoBotDetailPage() {
       return;
     }
     try {
-      await patchBoBot(id, {
-        expected_version: state.detail.bot.draft_version,
-        name,
-        description,
-        content: parsed,
-      });
-      setNotice({ kind: "ok", text: "Ciorna a fost salvată." });
+      if (!editBase.current) throw Error("Baza editurii nu a fost citită.");
+      const payload = buildBotDelta(editBase.current, { name, description, content: parsed! }, editVersion.current);
+      await patchBoBot(id, payload);
+      if (editRevision.current === revision) draftDirty.current = false;
+      setNotice({ kind: "ok", text: editRevision.current === revision ? "Ciorna a fost salvată." : "Versiunea trimisă a fost salvată. Editurile noi sunt păstrate local și nu au fost încă salvate." });
       await load();
     } catch (err) {
       if (err instanceof BoApiError && err.status === 409) {
+        setConflicted(true);
         setNotice({
           kind: "warn",
-          text: "Ciorna s-a schimbat între timp — reîncarc pentru versiunea curentă.",
+          text: "Conflict: ciorna s-a schimbat între timp. Editura și baza citită sunt păstrate; nicio retrimitere automată.",
         });
         await load();
       } else if (err instanceof BoApiError && err.status === 422) {
@@ -135,11 +204,11 @@ export default function BoBotDetailPage() {
   }
 
   async function publish() {
-    if (state.kind !== "data") return;
+    if (state.kind !== "data" || state.role !== "admin" || draftDirty.current || conflicted || editVersion.current === null) return;
     setBusy("publish");
     setNotice(null);
     try {
-      const res = await publishBoBot(id);
+      const res = await publishBoBot(id, editVersion.current);
       setNotice({
         kind: "ok",
         text: `Publicat — versiunea v${res.active_version_no} este acum activă.`,
@@ -152,6 +221,8 @@ export default function BoBotDetailPage() {
           kind: "danger",
           text: Array.isArray(d) ? d.join(" · ") : "Definiția nu validează.",
         });
+      } else if (err instanceof BoApiError && err.status === 409) {
+        setNotice({ kind: "warn", text: "Conflict de versiune la publicare. Citește și verifică versiunea curentă înainte de publicare." });
       } else {
         setNotice({ kind: "danger", text: "Publicarea a eșuat." });
       }
@@ -256,7 +327,7 @@ export default function BoBotDetailPage() {
             type="button"
             className="bo-btn bo-btn--primary"
             onClick={publish}
-            disabled={!canWrite || busy !== null}
+            disabled={!canWrite || busy !== null || draftDirty.current || conflicted}
             title={!canWrite ? "Publicarea cere rol de administrator" : "Transformă ciorna în versiune activă imuabilă"}
           >
             <IconBO name="check" size={15} />
@@ -292,24 +363,35 @@ export default function BoBotDetailPage() {
           <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
             <Field label="Nume" htmlFor="bbd-name">
               <input id="bbd-name" className="bo-input" value={name}
-                onChange={(e) => setName(e.target.value)} disabled={!canWrite} />
+                onChange={(e) => editName(e.target.value)} disabled={!canWrite || busy !== null} />
             </Field>
             <Field label="Descriere" htmlFor="bbd-desc">
               <input id="bbd-desc" className="bo-input" value={description}
-                onChange={(e) => setDescription(e.target.value)} disabled={!canWrite} />
+                onChange={(e) => editDescription(e.target.value)} disabled={!canWrite || busy !== null} />
             </Field>
             <Field label="Conținut (JSON)" htmlFor="bbd-content">
               <textarea id="bbd-content" className="bo-textarea"
                 style={{ width: "100%", minHeight: 220 }}
-                value={contentJson} onChange={(e) => setContentJson(e.target.value)}
-                disabled={!canWrite} spellCheck={false} />
+                value={contentJson} onChange={(e) => editContent(e.target.value)}
+                disabled={!canWrite || busy !== null} spellCheck={false} />
             </Field>
+            {conflicted ? (
+              <InlineAlert kind="warn">Conflict de versiune. Editura locală este păstrată; refetch-ul nu schimbă baza ei.</InlineAlert>
+            ) : null}
             <div>
+              <button type="button" className="bo-btn" disabled={!canWrite || busy !== null} onClick={reloadPreservingDraft}>
+                Reîncarcă și păstrează editura
+              </button>
               <button type="button" className="bo-btn" onClick={saveDraft}
-                disabled={!canWrite || busy !== null}
+                disabled={!canWrite || busy !== null || conflicted}
                 title={!canWrite ? "Editarea cere rol de administrator" : undefined}>
                 {busy === "save" ? "Se salvează…" : "Salvează ciorna"}
               </button>
+              {conflicted ? (
+                <button type="button" className="bo-btn" disabled={busy !== null} onClick={discardAndReload}>
+                  Renunță la editură și încarcă versiunea curentă
+                </button>
+              ) : null}
             </div>
             {!canWrite ? (
               <p className="bo-hint">Rolul tău permite doar citirea.</p>

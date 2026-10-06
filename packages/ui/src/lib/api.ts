@@ -321,12 +321,16 @@ export async function commitOnboardDraft(
 }
 
 export interface CompanyProfile {
+  /** Durable CAS counter persisted server-side — PATCH must pin it. */
+  version: number;
   name: string;
   industry: string;
   stage: string;
   founding_year: number | null;
   headcount: number | null;
   annual_revenue_arr: number | null;
+  arr_currency?: string | null;
+  annual_revenue_arr_currency?: string | null;
   mission: string;
   vision: string;
   target_customer: { profile: string; pain_points: string[] };
@@ -334,7 +338,7 @@ export interface CompanyProfile {
   org_structure: { departments: string[]; leadership_team: string[] };
   strategic_priorities: { current_year: string[]; north_star_metric: string };
   culture: { values: string[]; operating_principles: string[] };
-  financials: { burn_rate_monthly: number | null; runway_months: number | null; key_metrics: Record<string, unknown> };
+  financials: { burn_rate_monthly: number | null; burn_rate_currency?: string | null; runway_months: number | null; key_metrics: Record<string, unknown> };
   /** External dependencies the research watch policy treats as company data. */
   vendors: string[];
   tickers: string[];
@@ -346,13 +350,13 @@ export async function getCompanyProfile(): Promise<CompanyProfile> {
   return res.json();
 }
 
-export async function updateCompanyProfile(patch: Partial<CompanyProfile>): Promise<CompanyProfile> {
+export async function updateCompanyProfile(patch: Partial<CompanyProfile> | Record<string, unknown>): Promise<CompanyProfile> {
   const res = await fetch(`${API_BASE}/company-profile`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(patch),
   });
-  if (!res.ok) throw new Error("Failed to update profile");
+  if (!res.ok) throw Object.assign(new Error(res.status === 409 ? "Conflict 409: draftul este păstrat. Reîncarcă baza explicit." : "Failed to update profile"), {status: res.status});
   return res.json();
 }
 
@@ -368,7 +372,7 @@ export async function uploadDocument(
     method: "POST",
     body: formData,
   });
-  if (!res.ok) throw new Error("Failed to upload document");
+  if (!res.ok) throw new Error(`Failed to upload document (HTTP ${res.status}); file kept for retry.`);
   return res.json();
 }
 
@@ -426,7 +430,7 @@ export async function getBuiltinFile(
   domain: string,
   filename: string
 ): Promise<BuiltinFileContent> {
-  const res = await fetch(`${API_BASE}/knowledge/builtin/${domain}/${filename}`);
+  const res = await fetch(`${API_BASE}/knowledge/builtin/${encodeURIComponent(domain)}/${encodeURIComponent(filename)}`);
   if (!res.ok) throw new Error("Failed to fetch file content");
   return res.json();
 }
@@ -453,7 +457,7 @@ export async function updateBuiltinFile(
   filename: string,
   content: string
 ): Promise<{ chunks_indexed: number }> {
-  const res = await fetch(`${API_BASE}/knowledge/builtin/${domain}/${filename}`, {
+  const res = await fetch(`${API_BASE}/knowledge/builtin/${encodeURIComponent(domain)}/${encodeURIComponent(filename)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ domain, filename, content }),
@@ -463,7 +467,7 @@ export async function updateBuiltinFile(
 }
 
 export async function deleteBuiltinFile(domain: string, filename: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/knowledge/builtin/${domain}/${filename}`, {
+  const res = await fetch(`${API_BASE}/knowledge/builtin/${encodeURIComponent(domain)}/${encodeURIComponent(filename)}`, {
     method: "DELETE",
   });
   if (!res.ok) throw new Error("Failed to delete file");
@@ -484,7 +488,7 @@ export async function getFailureFile(
   domain: string,
   filename: string
 ): Promise<BuiltinFileContent> {
-  const res = await fetch(`${API_BASE}/knowledge/failures/${domain}/${filename}`);
+  const res = await fetch(`${API_BASE}/knowledge/failures/${encodeURIComponent(domain)}/${encodeURIComponent(filename)}`);
   if (!res.ok) throw new Error("Failed to fetch failure content");
   return res.json();
 }
@@ -511,7 +515,7 @@ export async function updateFailureFile(
   filename: string,
   content: string
 ): Promise<{ chunks_indexed: number }> {
-  const res = await fetch(`${API_BASE}/knowledge/failures/${domain}/${filename}`, {
+  const res = await fetch(`${API_BASE}/knowledge/failures/${encodeURIComponent(domain)}/${encodeURIComponent(filename)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ domain, filename, content }),
@@ -521,7 +525,7 @@ export async function updateFailureFile(
 }
 
 export async function deleteFailureFile(domain: string, filename: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/knowledge/failures/${domain}/${filename}`, {
+  const res = await fetch(`${API_BASE}/knowledge/failures/${encodeURIComponent(domain)}/${encodeURIComponent(filename)}`, {
     method: "DELETE",
   });
   if (!res.ok) throw new Error("Failed to delete failure file");
@@ -1889,6 +1893,7 @@ export interface FixtureSummary {
   industry: string;
   stage: string;
   arr: number | null;
+  arr_currency?: string | null;
   headcount: number | null;
   founding_year: number | null;
   mission: string;
@@ -2000,6 +2005,7 @@ export interface GeneratedFixtureBundle {
     stage?: string;
     headcount?: number | null;
     annual_revenue_arr?: number | null;
+    annual_revenue_arr_currency?: string | null;
     mission?: string;
     [key: string]: unknown;
   };
@@ -2135,7 +2141,7 @@ export async function listDepartments(): Promise<DepartmentState[]> {
 }
 
 export async function getDepartment(slug: string): Promise<DepartmentState> {
-  const res = await fetch(`${API_BASE}/departments/${slug}`);
+  const res = await fetch(`${API_BASE}/departments/${encodeURIComponent(slug)}`);
   if (!res.ok) throw new Error(`Failed to load department: ${res.statusText}`);
   return res.json();
 }
@@ -2155,7 +2161,7 @@ export interface DepartmentPatch {
 }
 
 export async function updateDepartment(slug: string, patch: DepartmentPatch): Promise<DepartmentState> {
-  const res = await fetch(`${API_BASE}/departments/${slug}`, {
+  const res = await fetch(`${API_BASE}/departments/${encodeURIComponent(slug)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(patch),
@@ -2180,7 +2186,7 @@ export async function createDepartment(body: DepartmentCreate): Promise<Departme
 }
 
 export async function deleteDepartment(slug: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/departments/${slug}`, {
+  const res = await fetch(`${API_BASE}/departments/${encodeURIComponent(slug)}`, {
     method: "DELETE",
   });
   if (!res.ok) throw new Error(`Failed to delete department: ${res.statusText}`);
@@ -2196,7 +2202,7 @@ export interface GoalCreate {
 }
 
 export async function createGoal(slug: string, body: GoalCreate): Promise<Goal> {
-  const res = await fetch(`${API_BASE}/departments/${slug}/goals`, {
+  const res = await fetch(`${API_BASE}/departments/${encodeURIComponent(slug)}/goals`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -2215,7 +2221,7 @@ export interface GoalPatch {
 }
 
 export async function updateGoal(slug: string, goalId: number, patch: GoalPatch): Promise<Goal> {
-  const res = await fetch(`${API_BASE}/departments/${slug}/goals/${goalId}`, {
+  const res = await fetch(`${API_BASE}/departments/${encodeURIComponent(slug)}/goals/${goalId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(patch),
@@ -2225,7 +2231,7 @@ export async function updateGoal(slug: string, goalId: number, patch: GoalPatch)
 }
 
 export async function deleteGoal(slug: string, goalId: number): Promise<void> {
-  const res = await fetch(`${API_BASE}/departments/${slug}/goals/${goalId}`, {
+  const res = await fetch(`${API_BASE}/departments/${encodeURIComponent(slug)}/goals/${goalId}`, {
     method: "DELETE",
   });
   if (!res.ok) throw new Error(`Failed to delete Goal: ${res.statusText}`);
@@ -2244,6 +2250,7 @@ export interface AvailabilityWindow {
 
 export interface Person {
   id: number;
+  version: number;
   full_name: string;
   role: string;
   is_principal: boolean;
@@ -2300,6 +2307,7 @@ export async function createPerson(body: PersonCreate): Promise<Person> {
 }
 
 export interface PersonPatch {
+  expected_version: number;
   full_name?: string;
   role?: string;
   email?: string | null;
@@ -2310,9 +2318,19 @@ export interface PersonPatch {
   response_sla_hours?: number;
   on_leave_until?: string | null;
   clear_on_leave?: boolean;
+  clear_email?: boolean;
+  clear_slack_user_id?: boolean;
+  clear_telegram_chat_id?: boolean;
+  clear_discord_user_id?: boolean;
+  clear_reports_to?: boolean;
   department_slugs?: string[];
   authority_scope?: string[];
   availability?: AvailabilityWindow[];
+}
+
+export class PersonUpdateError extends Error {
+  status: number;
+  constructor(status: number) { super(status === 409 ? "Conflict 409: editura este păstrată. Reîncarcă explicit înainte de salvare." : `Failed to update person: HTTP ${status}`); this.status = status; }
 }
 
 export async function updatePerson(id: number, patch: PersonPatch): Promise<Person> {
@@ -2321,7 +2339,7 @@ export async function updatePerson(id: number, patch: PersonPatch): Promise<Pers
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(patch),
   });
-  if (!res.ok) throw new Error(`Failed to update person: ${res.statusText}`);
+  if (!res.ok) throw new PersonUpdateError(res.status);
   return res.json();
 }
 
@@ -2873,6 +2891,8 @@ export interface ClientSlotSummary {
   engagement_start?: string | null;
   renewal_date?: string | null;
   retainer?: string | null;
+  retainer_amount?: string | null;
+  retainer_currency?: string | null;
   hours_per_week?: number | null;
   primary_contact?: string | null;
   notes?: string | null;
@@ -3043,6 +3063,8 @@ export interface ClientMetaPatch {
   engagement_start?: string;
   renewal_date?: string;
   retainer?: string;
+  retainer_amount?: string | null;
+  retainer_currency?: string | null;
   hours_per_week?: number;
   primary_contact?: string;
   notes?: string;
@@ -3060,6 +3082,93 @@ export async function updateClientMeta(
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(err.detail ?? "Failed to update client");
+  }
+  return res.json();
+}
+
+// ── Turn barrier: open blockers, durable history, control audit ────────────
+// Admin recovery surface for the multi-client switch barrier. `owner`/`actor`
+// are present only for admin callers (the API withholds them from viewers).
+
+export interface TurnBlocker {
+  turn_id: string | null;
+  kind?: string;
+  client_slug?: string;
+  status: string;
+  reason?: string | null;
+  owner?: string;
+  lease_expires_at?: string;
+  created_at?: string;
+}
+
+export interface TurnHistoryRow {
+  turn_id: string;
+  kind: string;
+  ref?: string | null;
+  client_slug?: string;
+  mailbox?: string | null;
+  owner?: string;
+  epoch: number;
+  status: string;
+  resolution?: string | null;
+  reason?: string | null;
+  lease_expires_at?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface ControlAuditRow {
+  id: number;
+  action: string;
+  turn_id?: string | null;
+  actor?: string;
+  resolution?: string | null;
+  reason?: string | null;
+  detail?: string | null;
+  created_at: string;
+}
+
+export async function getTurnBlockers(): Promise<{
+  switch_in_progress: boolean;
+  blockers: TurnBlocker[];
+}> {
+  const res = await fetch(`${API_BASE}/clients/turn-blockers`);
+  if (!res.ok) throw new Error("Failed to load turn blockers");
+  return res.json();
+}
+
+export async function getTurnHistory(
+  limit = 50,
+): Promise<{ turns: TurnHistoryRow[] }> {
+  const res = await fetch(`${API_BASE}/clients/turn-history?limit=${limit}`);
+  if (!res.ok) throw new Error("Failed to load turn history");
+  return res.json();
+}
+
+export async function getControlAudit(): Promise<{ audit: ControlAuditRow[] }> {
+  const res = await fetch(`${API_BASE}/clients/control-audit`);
+  if (!res.ok) throw new Error("Failed to load control audit");
+  return res.json();
+}
+
+// `resolution` distinguishes the evidence class: "verified" = the operator
+// checked journal/provider proof of the outcome; "attested" = human
+// attestation only. Both land as a durable bo_control_audit row.
+export async function reconcileTurn(
+  turnId: string,
+  resolution: "verified" | "attested",
+): Promise<{ turn_id: string; status: string; resolution?: string }> {
+  const res = await fetch(
+    `${API_BASE}/clients/turn-blockers/${encodeURIComponent(turnId)}/reconcile`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ resolution }),
+    },
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail ?? "Failed to reconcile turn");
   }
   return res.json();
 }

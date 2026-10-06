@@ -1,10 +1,16 @@
 name: CI
 
+# CI economy: work branches run through PRs; main runs after integration.
 on:
   push:
-    branches: [main, 'bo/**']
+    branches: [main]
+    paths-ignore: ['**/*.md']
   pull_request:
-    branches: [main, 'bo/**']
+    paths-ignore: ['**/*.md']
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ (github.head_ref || github.ref_name) != 'main' }}
 
 permissions:
   contents: read
@@ -13,13 +19,14 @@ jobs:
   python-lint:
     name: Python lint & type check
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install uv
         run: pip install uv
@@ -42,13 +49,14 @@ jobs:
   python-test:
     name: Python tests
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install uv
         run: pip install uv
@@ -62,6 +70,7 @@ jobs:
   ui-typecheck:
     name: UI type check
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
         with:

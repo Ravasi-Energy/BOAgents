@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from typing import Annotated
 
-from fastapi import APIRouter, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile
 
 from openexecutive.api.models import CompanyDocContent, DocumentUploadResponse
+from openexecutive.bo import identity as bo_identity
 
 router = APIRouter()
+
+
+def _admin_ident(request: Request) -> bo_identity.Identity:
+    return bo_identity.require_http(request, "documents:write")
 
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".doc", ".md", ".txt"}
 
@@ -15,6 +21,7 @@ ALLOWED_EXTENSIONS = {".pdf", ".docx", ".doc", ".md", ".txt"}
 @router.post("/documents", response_model=DocumentUploadResponse)
 async def upload_document(
     file: UploadFile,
+    ident: Annotated[bo_identity.Identity, Depends(_admin_ident)],
     # `Form(...)` (not a bare default) so FastAPI reads `domain` from the
     # multipart body the UI sends. A bare `domain: str = "general"` is parsed
     # as a query param, so the form field is dropped and every upload lands
@@ -170,6 +177,7 @@ async def get_document(
 @router.delete("/documents/{filename}")
 async def delete_document(
     filename: str,
+    ident: Annotated[bo_identity.Identity, Depends(_admin_ident)],
     request: Request = None,  # type: ignore[assignment]
 ) -> dict:
     safe = Path(filename).name

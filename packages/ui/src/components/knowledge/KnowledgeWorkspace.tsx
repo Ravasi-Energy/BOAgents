@@ -137,8 +137,8 @@ export default function KnowledgeWorkspace() {
   );
 
   return (
-    <div className="flex h-full">
-      <aside className="w-64 flex-shrink-0 border-r border-line bg-surface/40 px-4 py-5 overflow-y-auto">
+    <div className="flex flex-col md:flex-row h-full">
+      <aside className="w-full md:w-64 max-h-48 md:max-h-none flex-shrink-0 border-b md:border-b-0 md:border-r border-line bg-surface/40 px-4 py-5 overflow-y-auto">
         <input
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
@@ -155,7 +155,7 @@ export default function KnowledgeWorkspace() {
         />
       </aside>
 
-      <main className="flex-1 min-w-0 overflow-y-auto px-8 py-6">
+      <main className="flex-1 min-h-0 min-w-0 overflow-y-auto px-4 md:px-8 py-6">
         {error && (
           <div className="mb-4 text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
             {error}

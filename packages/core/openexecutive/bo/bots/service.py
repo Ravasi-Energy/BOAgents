@@ -105,6 +105,130 @@ def create(tenant: str, actor: str, payload: dict[str, Any],
     return definition
 
 
+_MISSING = object()
+
+# Explicit removal ops — siblings of ``content`` in the update payload, never
+# part of the validated document itself (DefinitionContent is extra="forbid").
+# Deletion by omission is rejected by contract (CONTROL R2): ``steps``
+# upserts by id, a missing step id is preserved, ``[]`` is a no-op.
+_REMOVE_OPS = {
+    "steps_remove": "steps",
+    "capability_refs_remove": "capability_refs",
+    "policy_refs_remove": "policy_refs",
+}
+
+
+def _merge_doc(current: Any, incoming: Any) -> Any:
+    """Sparse delta: every field present in ``incoming`` was deliberately
+    touched by the writer and is applied — dicts recurse (omitted sub-keys
+    keep their current value), lists union-add, scalars take the writer's
+    value (an intentional revert to an older value is a legitimate write).
+    ``[]``/``{}`` and absent keys always preserve the current value.
+    ``<field>_remove`` ops are consumed at ANY dict depth — they drop the
+    named entries from a same-level list and never persist (CONTROL R12:
+    the no-implicit-clear contract applies to nested lists too, e.g. a
+    predicate's ``in: []`` can never wipe the stored list)."""
+    if isinstance(incoming, dict) and isinstance(current, dict):
+        merged = dict(current)
+        for k, v in incoming.items():
+            if k.endswith("_remove"):
+                continue
+            cv = merged.get(k, _MISSING)
+            if isinstance(v, dict) and isinstance(cv, dict):
+                merged[k] = _merge_doc(cv, v)
+            elif isinstance(v, list) and isinstance(cv, list):
+                merged[k] = _union_list(cv, v) if v else cv
+            elif v != [] and v != {}:
+                merged[k] = v
+        for k, v in incoming.items():
+            if not k.endswith("_remove") or not isinstance(v, list) or not v:
+                continue
+            entries = merged.get(k[: -len("_remove")])
+            if isinstance(entries, list):
+                merged[k[: -len("_remove")]] = [
+                    e for e in entries if e not in v
+                ]
+        return merged
+    if isinstance(incoming, list) and isinstance(current, list):
+        return _union_list(current, incoming) if incoming else list(current)
+    return incoming
+
+
+def _union_list(current: list, incoming: list) -> list:
+    out = list(current)
+    for item in incoming:
+        if item not in out:
+            out.append(item)
+    return out
+
+
+def _merge_steps(current: Any, incoming: Any) -> list:
+    """Upsert-by-id merge of the step list (BUGHUNT-02 P0-3, CONTROL R2).
+
+    Every step present in ``incoming`` is one the writer touched: an
+    existing ``id`` field-merges (present fields win), a new id appends.
+    An omitted step id always survives — there is no implicit delete —
+    and ``[]`` is a no-op, never a clear. Removal requires the explicit
+    ``steps_remove`` op."""
+    if not isinstance(incoming, list) or not incoming:
+        return list(current) if isinstance(current, list) else []
+    out = [dict(s) if isinstance(s, dict) else s for s in current]
+    idx = {s.get("id"): i for i, s in enumerate(out) if isinstance(s, dict)}
+    for step in incoming:
+        if not isinstance(step, dict):
+            continue
+        sid = step.get("id")
+        if sid in idx:
+            out[idx[sid]] = _merge_doc(out[idx[sid]], step)
+        else:
+            idx[sid] = len(out)
+            # A brand-new step drops *_remove ops — nothing exists to remove.
+            out.append(
+                {k: v for k, v in step.items() if not k.endswith("_remove")}
+            )
+    return out
+
+
+def _merge_content(current: dict, incoming: dict) -> dict:
+    """Sparse delta merge of draft content. ``steps`` upserts by id (see
+    ``_merge_steps``); every other field follows ``_merge_doc`` — dicts
+    recurse, lists union-add, scalars take the writer's value. Omitted
+    fields always preserve the current value."""
+    merged = dict(current)
+    for key, value in incoming.items():
+        if key == "steps":
+            merged[key] = _merge_steps(merged.get(key, []), value)
+            continue
+        cv = merged.get(key, _MISSING)
+        if isinstance(value, dict) and isinstance(cv, dict):
+            merged[key] = _merge_doc(cv, value)
+        elif isinstance(value, list) and isinstance(cv, list):
+            merged[key] = _union_list(cv, value) if value else cv
+        else:
+            merged[key] = value
+    return merged
+
+
+def _apply_remove_ops(merged: dict, payload: dict[str, Any]) -> dict:
+    """Apply the explicit ``*_remove`` ops from the update payload: drop the
+    named ids/values from the target collection. Entries already absent are
+    a no-op (idempotent) — the requested end-state is already reached."""
+    out = dict(merged)
+    for op, field in _REMOVE_OPS.items():
+        ids = payload.get(op)
+        if not isinstance(ids, list) or not ids:
+            continue
+        entries = out.get(field)
+        if not isinstance(entries, list):
+            continue
+        drop = set(ids)
+        out[field] = [
+            e for e in entries
+            if (e.get("id") not in drop if isinstance(e, dict) else e not in drop)
+        ]
+    return out
+
+
 def update_draft(tenant: str, actor: str, def_id: str, payload: dict[str, Any],
                  db_path: Path | None = None) -> dict[str, Any]:
     expected = payload.get("expected_version")
@@ -112,8 +236,22 @@ def update_draft(tenant: str, actor: str, def_id: str, payload: dict[str, Any],
         raise ValidationFailure(["expected_version: întreg ≥ 1 obligatoriu"])
     canon = None
     hashed = None
-    if payload.get("content") is not None:
-        content = validate_content(payload["content"])
+    incoming = payload.get("content")
+    if incoming is not None or any(payload.get(op) for op in _REMOVE_OPS):
+        if incoming is not None and not isinstance(incoming, dict):
+            raise ValidationFailure(["content: obiect JSON așteptat"])
+        # Sparse delta against the draft the writer actually read — the
+        # strict CAS in store.update_draft proves expected_version is the
+        # current one before any effect lands, so the merge base is always
+        # the live document; a stale writer gets 409 and rebases explicitly
+        # (CONTROL R2 — no base inference, no delete-by-omission).
+        current_doc = store.get_version(
+            tenant, def_id, status="draft", db_path=db_path
+        )["content"]
+        merged_doc = _apply_remove_ops(
+            _merge_content(current_doc, incoming or {}), payload
+        )
+        content = validate_content(merged_doc)
         dumped = content.model_dump(mode="json")
         canon = _canonical(dumped)
         hashed = content_hash(dumped)
@@ -136,10 +274,15 @@ def update_draft(tenant: str, actor: str, def_id: str, payload: dict[str, Any],
 
 
 def publish(tenant: str, actor: str, def_id: str,
+            expected_version: int,
             db_path: Path | None = None) -> dict[str, Any]:
+    if not isinstance(expected_version, int) or isinstance(expected_version, bool) or expected_version < 1:
+        raise ValidationFailure(["expected_version: întreg ≥ 1 obligatoriu"])
     draft = store.get_version(tenant, def_id, status="draft", db_path=db_path)
     validate_content(draft["content"])  # publish-time revalidation
-    definition = store.publish(tenant, def_id, actor=actor, db_path=db_path)
+    definition = store.publish(tenant, def_id, actor=actor,
+                               expected_version=expected_version,
+                               db_path=db_path)
     _audit(tenant, actor, "bo_bot_publish",
            f"{def_id} publicat la v{definition['active_version_no']}",
            {"definition_id": def_id, "active_version_no": definition["active_version_no"]})

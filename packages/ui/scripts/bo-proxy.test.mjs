@@ -1,3 +1,4 @@
+import {backendUrl} from '../src/lib/backend-url.ts';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import fs from 'node:fs';
@@ -9,7 +10,7 @@ function handler(proxySecret, user = { email: 'user@example.invalid' }) {
   const calls = [];
   const exports = {};
   const context = {
-    exports, Headers, Response, URL,
+    exports, Headers, Response, URL, backendUrl,
     process: { env: { BACKEND_SHARED_SECRET: 'service-only', BACKEND_PROXY_SECRET: proxySecret } },
     auth: async () => ({ user }),
     fetch: async (url, init) => {

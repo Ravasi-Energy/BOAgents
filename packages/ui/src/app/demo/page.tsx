@@ -1,4 +1,5 @@
 "use client";
+import { Money } from "@/lib/Money";
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
@@ -20,12 +21,10 @@ import {
 
 const RESET_CONFIRM_TOKEN = "RESET";
 
-function formatARR(arr: number | null): string {
+// Legacy fixture ARR has no currency field. Do not invent USD from its old label.
+function formatARR(arr: number | null, currency?: string | null) {
   if (arr == null) return "—";
-  if (arr >= 1_000_000_000) return `$${(arr / 1_000_000_000).toFixed(1)}B`;
-  if (arr >= 1_000_000) return `$${(arr / 1_000_000).toFixed(0)}M`;
-  if (arr >= 1_000) return `$${(arr / 1_000).toFixed(0)}K`;
-  return `$${arr.toFixed(0)}`;
+  return <Money amount={arr} currency={currency} />;
 }
 
 const STAGE_COLORS: Record<string, string> = {
@@ -576,7 +575,7 @@ export default function DemoPage() {
                     <div className="flex items-center gap-4 text-xs text-fg-muted">
                       <span>
                         <span className="text-fg font-medium">
-                          {formatARR(fx.arr)}
+                          {formatARR(fx.arr, fx.arr_currency)}
                         </span>{" "}
                         ARR
                       </span>

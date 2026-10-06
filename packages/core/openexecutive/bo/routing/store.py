@@ -70,6 +70,20 @@ def initialize_db(db_path: Path | None = None) -> None:
             )
             """
         )
+        # Per-version field snapshot — append-only audit/rebase trail;
+        # update_entry never reads it to infer a writer's base (CONTROL R2:
+        # the strict CAS on the declared expected_version is the contract).
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bo_catalog_history (
+                tenant      TEXT NOT NULL,
+                entry_id    TEXT NOT NULL,
+                version     INTEGER NOT NULL,
+                doc_json    TEXT NOT NULL,
+                PRIMARY KEY (tenant, entry_id, version)
+            )
+            """
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS bo_catalog_meta (
@@ -220,6 +234,127 @@ def initialize_db(db_path: Path | None = None) -> None:
 # Catalog
 # --------------------------------------------------------------------------- #
 
+def _entry_doc_from_row(row: Any) -> dict[str, Any]:
+    """Plain-JSON field doc — the merge/history representation."""
+    quality_raw = row["quality_json"]
+    return {
+        "provider": row["provider"],
+        "model_id": row["model_id"],
+        "model_version": row["model_version"],
+        "state": row["state"],
+        "capabilities": json.loads(row["capabilities"]),
+        "regions": json.loads(row["regions"]),
+        "cost": json.loads(row["cost_json"]),
+        "quality": json.loads(quality_raw) if quality_raw is not None else None,
+        "purpose": row["purpose"],
+        "source": row["source"],
+    }
+
+
+def _entry_doc_from_validated(v: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **v,
+        "capabilities": list(v["capabilities"]),
+        "regions": list(v["regions"]),
+        "cost": v["cost"].to_dict(),
+        "quality": v["quality"].to_dict() if v["quality"] is not None else None,
+    }
+
+
+_MISSING = object()
+
+
+def _merge_doc(current: Any, incoming: Any) -> Any:
+    if isinstance(incoming, dict) and isinstance(current, dict):
+        merged = dict(current)
+        for k, v in incoming.items():
+            if k.endswith("_remove"):
+                continue
+            cv = merged.get(k, _MISSING)
+            if isinstance(v, dict) and isinstance(cv, dict):
+                merged[k] = _merge_doc(cv, v)
+            elif isinstance(v, list) and isinstance(cv, list):
+                merged[k] = _union_list(cv, v)
+            else:
+                merged[k] = v
+        # `<field>_remove` ops are consumed at any dict depth — they drop
+        # named entries from a same-level list and never persist (CONTROL R12).
+        for k, v in incoming.items():
+            if not k.endswith("_remove") or not isinstance(v, list) or not v:
+                continue
+            entries = merged.get(k[: -len("_remove")])
+            if isinstance(entries, list):
+                merged[k[: -len("_remove")]] = [
+                    e for e in entries if e not in v
+                ]
+        return merged
+    if isinstance(incoming, list) and isinstance(current, list):
+        return _union_list(current, incoming)
+    return incoming
+
+
+def _union_list(current: list, incoming: list) -> list:
+    out = list(current)
+    for item in incoming:
+        if item not in out:
+            out.append(item)
+    return out
+
+
+def _merge_entry_fields(
+    current: dict[str, Any],
+    incoming: dict[str, Any],
+) -> dict[str, Any]:
+    """Sparse delta merge of one catalog write (BUGHUNT-02 P0-4, CONTROL R2).
+
+    Every field present in ``incoming`` was deliberately touched by the
+    writer and is applied — the strict CAS above already proved the
+    writer's declared version is the stored one, so no base inference is
+    needed or allowed. ``None``, ``[]`` and ``{}`` mean "not provided" —
+    they can never shrink or clear the stored doc; a non-empty list
+    union-adds (idempotent), a non-empty dict merges field-wise, a scalar
+    takes the writer's value (an intentional revert is a legitimate write).
+    Removal from ``capabilities``/``regions`` only via the explicit
+    ``*_remove`` ops, applied by ``update_entry``."""
+    merged = dict(current)
+    for key, value in incoming.items():
+        if key not in current:
+            continue
+        if value is None or value == [] or value == {}:
+            continue
+        if isinstance(value, list):
+            merged[key] = _union_list(list(merged[key] or []), list(value))
+            continue
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_doc(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+_REMOVE_FIELDS = {"capabilities_remove": "capabilities",
+                  "regions_remove": "regions"}
+
+
+def _apply_remove_fields(
+    merged: dict[str, Any], ops: dict[str, Any]
+) -> dict[str, Any]:
+    """Apply the explicit ``capabilities_remove``/``regions_remove`` ops —
+    delete the named values from the collection. Values already absent are
+    a no-op (idempotent), never an error."""
+    out = dict(merged)
+    for op, field in _REMOVE_FIELDS.items():
+        values = ops.get(op)
+        if not isinstance(values, list) or not values:
+            continue
+        current = out.get(field)
+        if not isinstance(current, list):
+            continue
+        drop = set(values)
+        out[field] = [v for v in current if v not in drop]
+    return out
+
+
 def _entry_from_row(row: Any) -> CatalogEntry:
     quality_raw = row["quality_json"]
     return CatalogEntry(
@@ -357,6 +492,14 @@ def create_entry(
                 entry.version, actor, entry.updated_at,
             ),
         )
+        conn.execute(
+            "INSERT OR IGNORE INTO bo_catalog_history "
+            "(tenant, entry_id, version, doc_json) VALUES (?, ?, ?, ?)",
+            (
+                tenant, entry.entry_id, entry.version,
+                json.dumps(_entry_doc_from_validated(v)),
+            ),
+        )
     _audit_catalog(tenant, "create", entry, actor=actor)
     return entry
 
@@ -370,11 +513,10 @@ def update_entry(
     actor: str,
     db_path: Path | None = None,
 ) -> CatalogEntry:
-    v = validate_fields(**fields)
     with get_conn(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
-            "SELECT version FROM bo_model_catalog WHERE tenant = ? AND entry_id = ?",
+            "SELECT * FROM bo_model_catalog WHERE tenant = ? AND entry_id = ?",
             (tenant, entry_id),
         ).fetchone()
         if row is None:
@@ -385,6 +527,19 @@ def update_entry(
                 f"expected_version={expected_version} dar versiunea curentă "
                 f"este {current_version}"
             )
+        # Sparse delta merge: the strict CAS above proves the writer's
+        # declared expected_version IS the stored version, so the merge base
+        # is the current document itself — there is no history lookup and
+        # no inferred base (CONTROL R2). A stale writer gets 409 and rebases
+        # explicitly; fields it omits are preserved; removals only happen
+        # through the explicit ``*_remove`` ops.
+        current_doc = _entry_doc_from_row(row)
+        fields = dict(fields)
+        remove_ops = {k: fields.pop(k) for k in _REMOVE_FIELDS if k in fields}
+        merged_fields = _apply_remove_fields(
+            _merge_entry_fields(current_doc, fields), remove_ops
+        )
+        v = validate_fields(**merged_fields)
         clash = conn.execute(
             "SELECT entry_id FROM bo_model_catalog WHERE tenant = ? "
             "AND provider = ? AND model_id = ? AND model_version IS ? "
@@ -415,6 +570,14 @@ def update_entry(
                 else None,
                 v["purpose"], v["source"], current_version + 1,
                 actor, _now(), tenant, entry_id, current_version,
+            ),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO bo_catalog_history "
+            "(tenant, entry_id, version, doc_json) VALUES (?, ?, ?, ?)",
+            (
+                tenant, entry_id, current_version + 1,
+                json.dumps(_entry_doc_from_validated(v)),
             ),
         )
     entry = get_entry(tenant, entry_id, db_path=db_path)

@@ -1,10 +1,219 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def _money_value(raw: str) -> Decimal:
+    """Normalize a captured amount literal to a Decimal.
+
+    The LAST separator wins as the decimal mark when both are present:
+    "1,234.56" is English (comma thousands), "1.234,56" is Romanian (dot
+    thousands). Commas alone stay thousands ("1,500" → 1500) unless the
+    tail is 1-2 digits — "12,50" reads as a decimal comma. Decimal, never
+    float — money must not round-trip through binary floats (BUGHUNT-02).
+    """
+    if "," in raw:
+        if "." in raw and raw.rfind(",") > raw.rfind("."):
+            return Decimal(raw.replace(".", "").replace(",", "."))
+        if "." not in raw:
+            head, _, tail = raw.rpartition(",")
+            if head.isdigit() and "," not in head and len(tail) in (1, 2):
+                return Decimal(f"{head}.{tail}")
+        return Decimal(raw.replace(",", ""))
+    return Decimal(raw)
+
+_CCY_FORMS = {
+    "$": "USD", "usd": "USD", "us dollar": "USD", "us dollars": "USD",
+    "dollar": "USD", "dollars": "USD",
+    "€": "EUR", "eur": "EUR", "euro": "EUR", "euros": "EUR",
+    "ron": "RON", "lei": "RON", "leu": "RON",
+    "£": "GBP", "gbp": "GBP", "pound": "GBP", "pounds": "GBP",
+}
+_CCY_ATOM = (
+    r"[$€£]"
+    r"|\bUSD\b|\bUS[ \t]+dollars?\b|\bdollars?\b"
+    r"|\bEUR\b|\beuros?\b"
+    r"|\bRON\b|\blei\b|\bleu\b"
+    r"|\bGBP\b|\bpounds?\b"
+)
+# A "chain" is currency markers joined only by separators — "USD or EUR"
+# reads as a conflict on the same amount, while ", costs in EUR" does not
+# extend the chain because "costs" is not a currency form.
+_CCY_CHAIN = rf"(?:{_CCY_ATOM})(?:[ \t]*(?:in|or|and|/|,)[ \t]*(?:{_CCY_ATOM}))*"
+_CCY_RE = re.compile(_CCY_ATOM, re.IGNORECASE)
+_CCY_PREFIX = re.compile(rf"({_CCY_CHAIN})[ \t]*$", re.IGNORECASE)
+# After the amount the marker may sit directly ("20M USD"), after "in"
+# ("20M in USD"), or after a comma leading "in" ("20M, in RON" — the comma
+# sub-clause still refers to the amount it follows). A comma followed by
+# anything else ("20M, costs in USD") starts a new clause for a different
+# sum and must not attach.
+_CCY_SUFFIX = re.compile(
+    rf"^[ \t]*(?:,[ \t]*)?(?:in[ \t]+)?({_CCY_CHAIN})", re.IGNORECASE
+)
+
+
+# Clause separators for field binding: a keyword binds an amount only when
+# both sit in the same clause. The amount's own commas ("1,500M") are inside
+# the match span, so they never split its clause.
+_CLAUSE_SEPS = re.compile(r"[,.;:\n!?]")
+
+_ARR_STRONG = re.compile(r"\barr\b|\barr(?=\d)", re.IGNORECASE)
+_ARR_WEAK = re.compile(r"\brevenues?\b|\bturnover\b", re.IGNORECASE)
+_BURN_STRONG = re.compile(r"\bburn\w*", re.IGNORECASE)
+# Bilingual: Romanian operators answer "costuri lunare"/"cheltuieli" — an
+# unstated-language answer must still bind its amount to burn (BUGHUNT-02).
+_BURN_WEAK = re.compile(
+    r"\bcosts?\b|\bcosturi\b|\bspends?\b|\bexpenses?\b|\bcheltuieli\b",
+    re.IGNORECASE,
+)
+# Each field's "foreign" set is the OTHER field's vocabulary: a magnitude
+# bound to it explicitly belongs elsewhere ("costs $5M" is not revenue,
+# "revenue $50k monthly" is not burn).
+_ARR_FOREIGN = re.compile(
+    r"\bburn\w*|\bcosts?\b|\bspends?\b|\bexpenses?\b", re.IGNORECASE
+)
+_BURN_FOREIGN = re.compile(
+    r"\barr\b|\brevenues?\b|\bturnover\b", re.IGNORECASE
+)
+
+_NEG_WORD = (
+    r"unavailable|undisclosed|unknown|not stated|not provided|"
+    r"not disclosed|not applicable|not available|declined|"
+    r"prefer not to say|rather not say|private|none|no answer|"
+    r"n/?a\b|tbd|to be determined"
+)
+
+
+def _negation_pattern(target_alt: str) -> re.Pattern[str]:
+    """"<field> is unavailable" / "no <field>" — the answer declares the
+    target does not exist, so no magnitude may fill it."""
+    return re.compile(
+        rf"\b(?:{target_alt})\b[ \t]*(?:[:=\-]|is|was|remains?|still)?[ \t]*"
+        rf"(?:{_NEG_WORD})"
+        rf"|\b(?:no|without|haven't|don't have|do not have|didn't share)\b"
+        rf"[ \t]*(?:an?\s+|any\s+)?(?:{target_alt})\b",
+        re.IGNORECASE,
+    )
+
+
+@dataclass(frozen=True)
+class _FieldHints:
+    strong: re.Pattern[str]
+    weak: re.Pattern[str]
+    foreign: re.Pattern[str]
+    negated: re.Pattern[str]
+
+
+_ARR_HINTS = _FieldHints(
+    strong=_ARR_STRONG,
+    weak=_ARR_WEAK,
+    foreign=_ARR_FOREIGN,
+    negated=_negation_pattern(r"arr|revenues?|turnover"),
+)
+_BURN_HINTS = _FieldHints(
+    strong=_BURN_STRONG,
+    weak=_BURN_WEAK,
+    foreign=_BURN_FOREIGN,
+    negated=_negation_pattern(r"burn(?:ing|ed)?|costs?|spends?|expenses?"),
+)
+
+
+def _clause_bounds(text: str, match: re.Match[str]) -> tuple[int, int]:
+    left = 0
+    for m in _CLAUSE_SEPS.finditer(text[: match.start()]):
+        left = m.end()
+    after = _CLAUSE_SEPS.search(text, match.end())
+    right = after.start() if after else len(text)
+    return left, right
+
+
+def _binding_score(text: str, match: re.Match[str], hints: _FieldHints) -> int:
+    """Who does this magnitude belong to? strong=2, weak=1, foreign=-1,
+    nothing=0. An immediate label wins outright ("ARR: 20M", "costs -
+    $5M"); otherwise the nearest field keyword inside the match's clause
+    decides — "our costs are $5M but ARR is $20M" binds each figure to
+    its own field."""
+    pre = text[: match.start()]
+    for pat, w in ((hints.strong, 2), (hints.weak, 1), (hints.foreign, -1)):
+        if re.search(rf"(?:{pat.pattern})[ \t]*[:=\-]?[ \t]*$", pre, re.IGNORECASE):
+            return w
+    left, right = _clause_bounds(text, match)
+    clause = text[left:right]
+    m_start, m_end = match.start() - left, match.end() - left
+    best_key: tuple[int, int] | None = None
+    best_w = 0
+    for pat, w in ((hints.strong, 2), (hints.weak, 1), (hints.foreign, -1)):
+        for kw in pat.finditer(clause):
+            d = max(0, kw.start() - m_end, m_start - kw.end())
+            # A label normally precedes its value, so a keyword on the
+            # left wins a distance tie against one on the right.
+            key = (d, 0 if kw.end() <= m_start else 1)
+            if best_key is None or key < best_key:
+                best_key, best_w = key, w
+    return best_w
+
+
+def _select_amount(
+    text: str,
+    pattern: re.Pattern[str],
+    hints: _FieldHints,
+) -> re.Match[str] | None:
+    """Pick the magnitude bound to the target field, not another field's.
+
+    The field stays unset when the answer declares the target missing
+    ("ARR unavailable") or when every magnitude explicitly belongs to a
+    foreign field ("costs $5M" is not revenue). A single remaining
+    candidate wins as before; with several, the unique top scorer wins
+    and ties or all-unbound stay unset.
+    """
+    if hints.negated.search(text):
+        return None
+    matches = list(pattern.finditer(text))
+    if not matches:
+        return None
+    scored = [(_binding_score(text, m, hints), m) for m in matches]
+    candidates = [m for s, m in scored if s >= 0]
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+    best_score = max(s for s, m in scored if s >= 0)
+    best = [m for s, m in scored if s == best_score]
+    return best[0] if best_score > 0 and len(best) == 1 else None
+
+
+def _amount_currency(text: str, match: re.Match[str]) -> str | None:
+    """Currency bound to the matched amount's own expression — never a
+    currency mentioned elsewhere in the answer.
+
+    Only markers adjacent to the amount count: inside the match ("$20M"),
+    chained immediately before it ("USD 20M"), or right after it
+    ("20M USD", "20M in USD", "90k monthly, in RON"). A currency attached
+    to a different sum ("ARR 20M, costs in USD") is not evidence for this
+    amount, so the amount stays unknown. Two markers on the same
+    expression conflict and also stay unknown — we do not guess.
+    """
+    found: set[str] = set()
+    spans = [match.group(0)]
+    pre = _CCY_PREFIX.search(text[: match.start()])
+    if pre:
+        spans.append(pre.group(1))
+    post = _CCY_SUFFIX.match(text[match.end() :])
+    if post:
+        spans.append(post.group(1))
+    for span in spans:
+        for tok in _CCY_RE.finditer(span):
+            code = _CCY_FORMS.get(" ".join(tok.group(0).lower().split()))
+            if code:
+                found.add(code)
+    return next(iter(found)) if len(found) == 1 else None
+
 
 WIZARD_STEPS = [
     {
@@ -209,18 +418,31 @@ def build_profile_from_answers(answers: dict[str, Any]) -> dict[str, Any]:
         # "roughly 50 million" and "$50MM". The lookbehind keeps the scan
         # linear: without it every digit inside a long "1,1,1,…" run is a
         # candidate start and the search goes quadratic on hostile input.
-        arr_match = re.search(
-            r"\$?(?<![\d,])(\d[\d,]*)\s*(?:[Mm]{1,2}|[Mm]illion)\b", text
+        # Decimals are part of the amount ("20.5M"); several magnitudes in
+        # one answer go through field binding instead of first-match-wins.
+        arr_match = _select_amount(
+            text,
+            re.compile(
+                r"\$?(?<![\d,])(\d[\d,]*(?:\.\d+)?)\s*(?:[Mm]{1,2}|[Mm]illion)\b"
+            ),
+            _ARR_HINTS,
         )
         if arr_match:
-            val = arr_match.group(1).replace(",", "")
             # Defensive: this is a best-effort parse of free text, so a
             # surprising input must never take down onboarding. Skipping
             # the field costs one profile value; raising costs the run.
             # The answer text itself stays out of the log line.
             try:
-                profile["annual_revenue_arr"] = float(val) * 1_000_000
-            except ValueError:
+                profile["annual_revenue_arr"] = _money_value(
+                    arr_match.group(1)
+                ) * 1_000_000
+                # Currency only when the answer itself states one — a bare
+                # "$20M" keeps USD (the regex required the $); "20 million"
+                # stays unknown rather than being assumed USD.
+                profile["annual_revenue_arr_currency"] = _amount_currency(
+                    text, arr_match
+                )
+            except InvalidOperation:
                 logger.warning("onboarding: could not parse ARR from the business-model answer")
 
     if "competitive_landscape" in answers:
@@ -276,8 +498,22 @@ def build_profile_from_answers(answers: dict[str, Any]) -> dict[str, Any]:
         # `(?:[Kk]\s*)?` rather than `[Kk]?\s*` after the first `\s*`: two
         # adjacent `\s*` with an optional token between them let a long
         # whitespace run be split quadratically many ways.
-        burn_match = re.search(
-            r"\$?(?<![\d,])(\d[\d,]*)\s*(?:[Kk]\s*)?(?:monthly|/month|per month|burn)", text
+        # An explicit currency may sit between the amount and the keyword
+        # ("50k EUR monthly"); it becomes part of the matched expression,
+        # so _amount_currency sees it inside the match body.
+        burn_match = _select_amount(
+            text,
+            # The first alternative is Romanian notation ("1.234,56" —
+            # dot thousands, comma decimal); the second stays English
+            # ("1,234.56", "1234"). _money_value picks the decimal mark
+            # by the LAST separator, so both stay unambiguous.
+            re.compile(
+                r"\$?(?<![\d,])(\d{1,3}(?:\.\d{3})+,\d{1,2}|\d[\d,]*(?:\.\d+)?)"
+                r"\s*(?:[Kk]\s*)?"
+                r"(?:(?:" + _CCY_ATOM + r")[ \t]*)?"
+                r"(?:monthly|/month|per month|burn|lunar[ae]?)"
+            ),
+            _BURN_HINTS,
         )
         # Same lookbehind as the other two: without it every digit of a
         # long run is a candidate start and the search is quadratic.
@@ -285,11 +521,15 @@ def build_profile_from_answers(answers: dict[str, Any]) -> dict[str, Any]:
 
         fin: dict[str, Any] = {}
         if burn_match:
-            val = burn_match.group(1).replace(",", "")
             multiplier = 1000 if "k" in text[burn_match.start():burn_match.end()].lower() else 1
             try:
-                fin["burn_rate_monthly"] = float(val) * multiplier
-            except ValueError:
+                fin["burn_rate_monthly"] = _money_value(
+                    burn_match.group(1)
+                ) * multiplier
+                fin["burn_rate_currency"] = _amount_currency(
+                    text, burn_match
+                )
+            except InvalidOperation:
                 # Financials are promised "stored locally only" — keep the
                 # answer text out of the log stream.
                 logger.warning("onboarding: could not parse burn rate from the financials answer")

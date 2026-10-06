@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -352,6 +353,207 @@ def _emit_cache_event(
     )
 
 
+class _TurnFencedError(Exception):
+    """The turn's lease was invalidated mid-flight (expired → reconciled →
+    switched). Raised inside the generator to abort before any further
+    observable or durable effect lands."""
+
+
+@contextlib.asynccontextmanager
+async def _maybe_fence_hold(fence: Any) -> AsyncIterator[bool]:
+    """Hold the turn fence across a durable section; True = proceed."""
+    if fence is None:
+        yield True
+    else:
+        async with fence.ahold() as ok:
+            yield ok
+
+
+# Bounded window for draining still-running children after the parent
+# task was cancelled (RA15-BO01-06). Children that outlive it stay
+# registered on the lease — reconcile keeps refusing until they actually
+# finish; the window only bounds how long THIS turn's unwinding waits.
+_CHILD_DRAIN_SECONDS = 5.0
+
+
+async def _run_children(
+    fence: Any, coros: Any, labels: Any = None
+) -> list[Any]:
+    """Dispatch child coroutines shielded from parent cancellation.
+
+    RA15-BO01-06: ``asyncio.gather`` delivers cancellation to its
+    children on parent cancel but does NOT wait for them — a child that
+    swallows cancellation, or still awaits an executor thread, keeps
+    running after the parent task is done. Reconcile then saw only the
+    finished parent and freed the turn while a live worker could still
+    produce an effect in the swapped-in client.
+
+    Here each child runs as its own task, shielded so a parent cancel
+    never reaches it. Two completion signals stay honest:
+
+    * ``task.done()`` means the coroutine — including whatever it
+      awaited — completed;
+    * executor work the child submitted (``to_thread`` inside a
+      ``wait_for`` timeout) stays tracked via
+      ``turn_barrier.ensure_thread_tracking`` + ``wrap_child_context``
+      — a ``concurrent.futures.Future`` is honest about the thread even
+      after its owning task is gone.
+
+    Every task is registered on the lease
+    (``turn_barrier.register_child_task``) so ``reconcile_turn``
+    refuses while any child task OR tracked executor work is still
+    runnable. On parent cancellation we drain for a bounded window,
+    then audit the outcome of every child whose result we abandon
+    (finished during drain → written now; still pending → done-callback
+    writes it later) into the unswapped ``bo_control_audit``
+    (RA15-BO01-09), and propagate the cancellation.
+    """
+    coro_list = list(coros)
+    label_list = (
+        list(labels)
+        if labels is not None
+        else [getattr(c, "__qualname__", "child") for c in coro_list]
+    )
+    turn_id = fence.lease.turn_id if fence is not None else None
+    if turn_id is not None:
+        from openexecutive.bo import turn_barrier as _tb
+
+        _tb.ensure_thread_tracking()
+        tasks = [
+            asyncio.ensure_future(_tb.wrap_child_context(turn_id, c))
+            for c in coro_list
+        ]
+        for t in tasks:
+            _tb.register_child_task(turn_id, t)
+    else:
+        tasks = [asyncio.ensure_future(c) for c in coro_list]
+    try:
+        return list(
+            await asyncio.shield(
+                asyncio.gather(*tasks, return_exceptions=True)
+            )
+        )
+    except asyncio.CancelledError:
+        await asyncio.wait(tasks, timeout=_CHILD_DRAIN_SECONDS)
+        if turn_id is not None:
+            from openexecutive.bo import turn_barrier as _tb
+
+            labels = (label_list + ["child"] * len(tasks))[: len(tasks)]
+            for label, t in zip(labels, tasks, strict=True):
+                if not _tb._mark_outcome_tracked(t):
+                    continue
+                if t.done():
+                    _tb.late_child_outcome(turn_id, label, t)
+                else:
+                    t.add_done_callback(
+                        lambda _t, tid=turn_id, lbl=label:
+                        _tb.late_child_outcome(tid, lbl, _t)
+                    )
+        raise
+
+
+async def _run_child(fence: Any, coro: Any, label: str = "child") -> Any:
+    """Single-child variant of ``_run_children`` — re-raises child
+    failures like a plain ``await`` would."""
+    result = (await _run_children(fence, [coro], [label]))[0]
+    if isinstance(result, BaseException):
+        raise result
+    return result
+
+
+def _barrier_turn(kind: str) -> Any:
+    """Admit a durable turn lease around an Executive entry point (RA13-A02-01)
+    and fence its effect boundaries (RA15-BO01-03).
+
+    The lease lives in the unswapped coordination store (bo_agents.db), so a
+    client switch/restore can never start while a turn is in flight and
+    strand its journal evidence in a parked snapshot. Refusal while a
+    switch is in progress yields a maintenance message instead of running;
+    interruption or exception mid-turn marks the lease ``uncertain`` — it
+    blocks later switching until an operator reconciles it, because a lost
+    write can never prove the external effect didn't happen.
+
+    Beyond admission, the wrapper revalidates the lease at every yielded
+    boundary (renewing its heartbeat, so a live turn never expires) and
+    hands the generator an ``EffectFence`` so its durable commits and
+    side-effecting tool dispatches run under the coordination write lock
+    — a switch's epoch bump cannot interleave between validation and the
+    effect commit."""
+    import functools
+
+    def deco(fn: Any) -> Any:
+        @functools.wraps(fn)
+        async def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+            from openexecutive.bo import turn_barrier as _tb
+
+            try:
+                lease = await asyncio.to_thread(_tb.admit_turn, kind)
+            except _tb.SwitchBusyError:
+                yield (
+                    "I'm switching client workspaces — please resend your "
+                    "message in a moment."
+                )
+                return
+            except _tb.TurnAdmissionError:
+                logger.exception("turn admission failed — refusing turn")
+                yield (
+                    "I can't start work right now — the coordination store "
+                    "is unavailable. Please try again in a moment."
+                )
+                return
+            _tb.register_turn_task(lease.turn_id)
+            fence = _tb.EffectFence(lease)
+            agen = fn(self, *args, _fence=fence, **kwargs)
+            try:
+                while True:
+                    try:
+                        item = await agen.__anext__()
+                    except StopAsyncIteration:
+                        break
+                    if not await asyncio.to_thread(fence.check):
+                        raise _TurnFencedError
+                    yield item
+            except _TurnFencedError:
+                # Expired-and-reconciled or switched mid-flight: the
+                # remainder of this turn must not produce effects. The
+                # lease stays 'uncertain' so switching still requires an
+                # explicit reconcile — we never silently release.
+                await asyncio.to_thread(
+                    _tb.fail_turn_uncertain,
+                    lease,
+                    reason="fenced_post_invalidation",
+                )
+                yield (
+                    "This turn was interrupted by a workspace change — "
+                    "its remaining effects were fenced. An operator can "
+                    "reconcile it from the turn blockers before retrying."
+                )
+                return
+            except BaseException:
+                # Abandoned/cancelled/failed mid-turn — effects may have
+                # partially landed. The lease becomes 'uncertain' and blocks
+                # switching until reconciled; it is never silently dropped.
+                await asyncio.to_thread(
+                    _tb.fail_turn_uncertain, lease, reason="turn_interrupted"
+                )
+                raise
+            finally:
+                # Close the inner generator so its try/finally blocks
+                # (session cleanup, clear_turn) run on every exit path —
+                # including when the wrapper itself raised before agen
+                # terminated.
+                with contextlib.suppress(Exception):
+                    await agen.aclose()
+                _tb.unregister_turn_task(lease.turn_id)
+            await asyncio.to_thread(
+                _tb.complete_turn, lease, outcome="completed"
+            )
+
+        return wrapper
+
+    return deco
+
+
 class Executive:
     """The Executive orchestrator — the single voice the user always interacts with.
 
@@ -473,6 +675,7 @@ class Executive:
     # Sentinel yielded when specialist calls are in flight — lets callers send keepalives.
     _THINKING = "\x01"
 
+    @_barrier_turn("executive")
     async def stream_chat(
         self,
         user_message: str,
@@ -489,8 +692,13 @@ class Executive:
         briefing_context: str = "",
         channel_context_block: str = "",
         page_context_block: str = "",
+        _fence: Any = None,
     ) -> AsyncIterator[str | dict[str, Any]]:
         """Stream a response from the Executive, routing to specialists as needed.
+
+        ``_fence`` is internal: the ``_barrier_turn`` decorator injects the
+        turn's EffectFence so durable commits and side-effecting tool
+        dispatches are fenced at their real boundary (RA15-BO01-03).
 
         ``person_id`` (when provided) keys the Honcho per-person memory
         prefetch + post-turn sync. The integration adapters (Slack,
@@ -591,18 +799,21 @@ class Executive:
                 page_context_block=page_context_block,
             )
 
-            _emit_memory_snapshot(
-                session_id=session.session_id,
-                turn_id=turn_id,
-                user_message=user_message,
-                episodic_context=episodic_context,
-                retrieved_context=retrieved_context,
-                system_blocks=system_blocks,
-                history_len=len(session.get_recent_history()),
-                company_profile=session.company_profile,
-                model=effective_model,
-                committee=False,
-            )
+            # Durable journal write → fence it (RA15-BO01-03 residual).
+            async with _maybe_fence_hold(_fence) as _snap_ok:
+                if _snap_ok:
+                    _emit_memory_snapshot(
+                        session_id=session.session_id,
+                        turn_id=turn_id,
+                        user_message=user_message,
+                        episodic_context=episodic_context,
+                        retrieved_context=retrieved_context,
+                        system_blocks=system_blocks,
+                        history_len=len(session.get_recent_history()),
+                        company_profile=session.company_profile,
+                        model=effective_model,
+                        committee=False,
+                    )
             consulted: list[str] = []
             async for item in self._stream_agent_loop(
                 system_blocks,
@@ -613,6 +824,7 @@ class Executive:
                 debug_collector=debug_collector,
                 consulted_out=consulted,
                 turn_id=turn_id,
+                _fence=_fence,
             ):
                 if isinstance(item, str) and item != self._THINKING:
                     full_response += item
@@ -625,75 +837,85 @@ class Executive:
             })
             yield debug_collector.to_sse_dict(evt)
 
-        session.add_user_message(user_message)
-        session.add_assistant_message(full_response)
+        # RA15-BO01-03: the whole durable tail of the turn — session rows,
+        # the chat_turn audit record, episodic extraction, Honcho mirrors —
+        # commits under the fence's write lock, so a completed switch
+        # (epoch bump) can never interleave between validation and these
+        # writes landing in the swapped journal.
+        async with _maybe_fence_hold(_fence) as _tail_ok:
+            if not _tail_ok:
+                raise _TurnFencedError
 
-        # Audit the Executive's outbound response. Without this, the audit
-        # log only records the *inputs* to a turn (inbound message, memory
-        # snapshot, retrievals, specialist consults, tool calls) but never
-        # the response itself — making sessions hard to follow. Mirrors the
-        # web /api/chat route's pattern, but at the unified place that every
-        # entry point (web stream, .chat() wrapper used by Discord / Slack
-        # / Telegram / Email / Google Chat) flows through.
-        # Only emit on real text — an empty response means the agent loop
-        # produced only tool_use blocks or hit max_iterations without text,
-        # and an audit row for "" adds noise without signal.
-        if full_response.strip():
-            audit_log(
-                "chat_turn",
-                f"Executive: {full_response[:200]}",
-                session_id=session.session_id,
-                turn_id=turn_id,
-                actor="executive",
-                details={
-                    "direction": "out",
-                    "response_len": len(full_response),
-                    "duration_s": round(time.monotonic() - t0, 3),
-                    "model": effective_model,
-                    "committee": False,
-                },
-                full={"response": full_response},
+            session.add_user_message(user_message)
+            session.add_assistant_message(full_response)
+
+            # Audit the Executive's outbound response. Without this, the audit
+            # log only records the *inputs* to a turn (inbound message, memory
+            # snapshot, retrievals, specialist consults, tool calls) but never
+            # the response itself — making sessions hard to follow. Mirrors the
+            # web /api/chat route's pattern, but at the unified place that every
+            # entry point (web stream, .chat() wrapper used by Discord / Slack
+            # / Telegram / Email / Google Chat) flows through.
+            # Only emit on real text — an empty response means the agent loop
+            # produced only tool_use blocks or hit max_iterations without text,
+            # and an audit row for "" adds noise without signal.
+            if full_response.strip():
+                audit_log(
+                    "chat_turn",
+                    f"Executive: {full_response[:200]}",
+                    session_id=session.session_id,
+                    turn_id=turn_id,
+                    actor="executive",
+                    details={
+                        "direction": "out",
+                        "response_len": len(full_response),
+                        "duration_s": round(time.monotonic() - t0, 3),
+                        "model": effective_model,
+                        "committee": False,
+                    },
+                    full={"response": full_response},
+                )
+
+            from openexecutive.memory.episodic import (
+                MIN_TURN_CHARS_FOR_EXTRACTION,
+                schedule_extraction,
             )
+            if len(full_response) + len(user_message) >= MIN_TURN_CHARS_FOR_EXTRACTION:
+                schedule_extraction(user_message, full_response, session_id=session.session_id)
 
-        from openexecutive.memory.episodic import (
-            MIN_TURN_CHARS_FOR_EXTRACTION,
-            schedule_extraction,
-        )
-        if len(full_response) + len(user_message) >= MIN_TURN_CHARS_FOR_EXTRACTION:
-            schedule_extraction(user_message, full_response, session_id=session.session_id)
+            # Mirror the completed exchange into Honcho so its server-side
+            # extraction can update the peer card. Fire-and-forget; the
+            # wrapper no-ops when person_id is None or Honcho is disabled.
+            #
+            # Re-bind the audit ContextVars for the duration of these calls so
+            # the fire-and-forget tasks they schedule can snapshot the right
+            # session_id/turn_id (the main `with set_turn(...)` block above
+            # exited at the end of the `async for` so the ContextVars are back
+            # to None by now). Without this wrapper, every sync_turn /
+            # sync_department_turn audit row would land with session_id=NULL
+            # and be invisible in the per-session audit view.
+            with set_turn(session_id=session.session_id, turn_id=turn_id):
+                from openexecutive.memory.honcho_client import sync_turn as _honcho_sync
+                _honcho_sync(
+                    user_message,
+                    full_response,
+                    person_id=person_id,
+                    session_id=session.session_id,
+                    co_present_person_ids=co_present_person_ids,
+                )
+                # Per-dept mirror for every department whose specialist contributed
+                # this turn. Runs after the person-side sync so dept and person
+                # syncs are visible in the audit log as a related pair.
+                _sync_consulted_departments_to_honcho(
+                    consulted,
+                    user_message,
+                    full_response,
+                    person_id=person_id,
+                    session_id=session.session_id,
+                    co_present_person_ids=co_present_person_ids,
+                )
 
-        # Mirror the completed exchange into Honcho so its server-side
-        # extraction can update the peer card. Fire-and-forget; the
-        # wrapper no-ops when person_id is None or Honcho is disabled.
-        #
-        # Re-bind the audit ContextVars for the duration of these calls so
-        # the fire-and-forget tasks they schedule can snapshot the right
-        # session_id/turn_id (the main `with set_turn(...)` block above
-        # exited at the end of the `async for` so the ContextVars are back
-        # to None by now). Without this wrapper, every sync_turn /
-        # sync_department_turn audit row would land with session_id=NULL
-        # and be invisible in the per-session audit view.
-        with set_turn(session_id=session.session_id, turn_id=turn_id):
-            from openexecutive.memory.honcho_client import sync_turn as _honcho_sync
-            _honcho_sync(
-                user_message,
-                full_response,
-                person_id=person_id,
-                session_id=session.session_id,
-                co_present_person_ids=co_present_person_ids,
-            )
-            # Per-dept mirror for every department whose specialist contributed
-            # this turn. Runs after the person-side sync so dept and person
-            # syncs are visible in the audit log as a related pair.
-            _sync_consulted_departments_to_honcho(
-                consulted,
-                user_message,
-                full_response,
-                person_id=person_id,
-                session_id=session.session_id,
-                co_present_person_ids=co_present_person_ids,
-            )
-
+    @_barrier_turn("executive")
     async def stream_chat_with_committee(
         self,
         user_message: str,
@@ -710,6 +932,7 @@ class Executive:
         briefing_context: str = "",
         channel_context_block: str = "",
         page_context_block: str = "",
+        _fence: Any = None,
     ) -> AsyncIterator[str | dict[str, Any]]:
         """Committee-reviewed variant of stream_chat.
 
@@ -818,17 +1041,20 @@ class Executive:
         draft = ""
         consulted: list[str] = []
         specialist_outputs: dict[str, str] = {}
-        _emit_memory_snapshot(
-            session_id=session.session_id,
-            turn_id=turn_id,
-            user_message=user_message,
-            episodic_context=episodic_context,
-            retrieved_context=retrieved_context,
-            system_blocks=system_blocks,
-            history_len=len(session.get_recent_history()),
-            company_profile=session.company_profile,
-            model=effective_model,
-            committee=True,
+        # Durable journal write → fence it (RA15-BO01-03 residual).
+        async with _maybe_fence_hold(_fence) as _snap_ok:
+            if _snap_ok:
+                _emit_memory_snapshot(
+                    session_id=session.session_id,
+                    turn_id=turn_id,
+                    user_message=user_message,
+                    episodic_context=episodic_context,
+                    retrieved_context=retrieved_context,
+                    system_blocks=system_blocks,
+                    history_len=len(session.get_recent_history()),
+                    company_profile=session.company_profile,
+                    model=effective_model,
+                    committee=True,
         )
 
         async for item in self._stream_agent_loop(
@@ -841,6 +1067,7 @@ class Executive:
             consulted_out=consulted,
             specialist_outputs_out=specialist_outputs,
             turn_id=turn_id,
+            _fence=_fence,
         ):
             # Swallow draft text and the THINKING sentinel — the user sees
             # only the revised stream. Pass debug-event dicts through so the
@@ -876,8 +1103,11 @@ class Executive:
             }
             fallback = "I was unable to complete the analysis. Please try again."
             yield fallback
-            session.add_user_message(user_message)
-            session.add_assistant_message(fallback)
+            async with _maybe_fence_hold(_fence) as _fb_ok:
+                if not _fb_ok:
+                    raise _TurnFencedError
+                session.add_user_message(user_message)
+                session.add_assistant_message(fallback)
             # Reset audit ContextVars so this task doesn't leak the turn_id
             # to a follow-up turn that runs on the same task.
             clear_turn()
@@ -907,11 +1137,19 @@ class Executive:
             yield debug_collector.to_sse_dict(evt)
 
         review_t0 = time.monotonic()
-        critiques = await committee.review(
-            user_message=user_message,
-            draft=draft,
-            consulted=consulted,
-            specialist_outputs=specialist_outputs,
+        # Committee reviewers fan out inside committee.review — shield
+        # and register it like every other dispatched child so a
+        # cancelled parent cannot free the turn mid-review
+        # (RA15-BO01-06).
+        critiques = await _run_child(
+            _fence,
+            label="committee.review",
+            coro=committee.review(
+                user_message=user_message,
+                draft=draft,
+                consulted=consulted,
+                specialist_outputs=specialist_outputs,
+            ),
         )
         review_ms = round((time.monotonic() - review_t0) * 1000)
         logger.info(
@@ -997,14 +1235,17 @@ class Executive:
                 revision_final_msg = None
         revision_ms = round((time.monotonic() - revision_t0) * 1000)
         if revision_final_msg is not None:
-            _emit_cache_event(
-                session_id=session.session_id,
-                turn_id=_committee_turn_id,
-                iteration=0,  # 0 = revision pass (post-draft, post-review)
-                final_msg=revision_final_msg,
-                model=effective_model,
-                actor="committee_revision",
-            )
+            # Durable journal write → fence it (RA15-BO01-03 residual).
+            async with _maybe_fence_hold(_fence) as _cache_ok:
+                if _cache_ok:
+                    _emit_cache_event(
+                        session_id=session.session_id,
+                        turn_id=_committee_turn_id,
+                        iteration=0,  # 0 = revision pass (post-draft, post-review)
+                        final_msg=revision_final_msg,
+                        model=effective_model,
+                        actor="committee_revision",
+                    )
 
         if debug_collector:
             evt = debug_collector.emit("synthesis_done", {
@@ -1017,85 +1258,92 @@ class Executive:
             })
             yield debug_collector.to_sse_dict(evt)
 
-        session.add_user_message(user_message)
-        # Guard against a revision pass that produced no text (only tool_use
-        # blocks, model_stop, etc.). Persisting an empty assistant turn
-        # corrupts the in-memory history with a phantom turn that future
-        # cache hits will key off of.
-        if final_response.strip():
-            session.add_assistant_message(final_response)
+        # RA15-BO01-03: same fenced tail as stream_chat — session rows, the
+        # chat_turn/committee_review audit records, extraction scheduling
+        # and the Honcho mirrors commit under the fence's write lock.
+        async with _maybe_fence_hold(_fence) as _tail_ok:
+            if not _tail_ok:
+                raise _TurnFencedError
 
-            # Audit the committee's final response. Same rationale as the
-            # non-committee path in stream_chat: callers should always be
-            # able to see the Executive's outbound text in the audit log,
-            # not just the inputs. committee=True so the UI can distinguish
-            # a committee-revised response from a normal one.
+            session.add_user_message(user_message)
+            # Guard against a revision pass that produced no text (only tool_use
+            # blocks, model_stop, etc.). Persisting an empty assistant turn
+            # corrupts the in-memory history with a phantom turn that future
+            # cache hits will key off of.
+            if final_response.strip():
+                session.add_assistant_message(final_response)
+
+                # Audit the committee's final response. Same rationale as the
+                # non-committee path in stream_chat: callers should always be
+                # able to see the Executive's outbound text in the audit log,
+                # not just the inputs. committee=True so the UI can distinguish
+                # a committee-revised response from a normal one.
+                audit_log(
+                    "chat_turn",
+                    f"Executive: {final_response[:200]}",
+                    session_id=session.session_id,
+                    turn_id=_committee_turn_id,
+                    actor="executive",
+                    details={
+                        "direction": "out",
+                        "response_len": len(final_response),
+                        "duration_s": round(time.monotonic() - t0, 3),
+                        "model": effective_model,
+                        "committee": True,
+                        "draft_length": len(draft),
+                    },
+                    full={"response": final_response, "draft": draft},
+                )
+
             audit_log(
-                "chat_turn",
-                f"Executive: {final_response[:200]}",
+                "committee_review",
+                f"Committee revised draft (consulted={consulted})",
                 session_id=session.session_id,
                 turn_id=_committee_turn_id,
-                actor="executive",
+                actor="committee",
                 details={
-                    "direction": "out",
-                    "response_len": len(final_response),
-                    "duration_s": round(time.monotonic() - t0, 3),
-                    "model": effective_model,
-                    "committee": True,
                     "draft_length": len(draft),
+                    "final_length": len(final_response),
+                    "consulted": consulted,
+                    "review_ms": review_ms,
+                    "revision_ms": revision_ms,
+                    "critiques": [
+                        {
+                            "reviewer": c.reviewer_name,
+                            "severity": c.severity,
+                            "critique": c.critique[:500],
+                            "suggested_edits": c.suggested_edits[:500],
+                        }
+                        for c in critiques
+                    ],
                 },
-                full={"response": final_response, "draft": draft},
             )
 
-        audit_log(
-            "committee_review",
-            f"Committee revised draft (consulted={consulted})",
-            session_id=session.session_id,
-            turn_id=_committee_turn_id,
-            actor="committee",
-            details={
-                "draft_length": len(draft),
-                "final_length": len(final_response),
-                "consulted": consulted,
-                "review_ms": review_ms,
-                "revision_ms": revision_ms,
-                "critiques": [
-                    {
-                        "reviewer": c.reviewer_name,
-                        "severity": c.severity,
-                        "critique": c.critique[:500],
-                        "suggested_edits": c.suggested_edits[:500],
-                    }
-                    for c in critiques
-                ],
-            },
-        )
+            from openexecutive.memory.episodic import (
+                MIN_TURN_CHARS_FOR_EXTRACTION,
+                schedule_extraction,
+            )
+            if len(final_response) + len(user_message) >= MIN_TURN_CHARS_FOR_EXTRACTION:
+                schedule_extraction(user_message, final_response, session_id=session.session_id)
 
-        from openexecutive.memory.episodic import (
-            MIN_TURN_CHARS_FOR_EXTRACTION,
-            schedule_extraction,
-        )
-        if len(final_response) + len(user_message) >= MIN_TURN_CHARS_FOR_EXTRACTION:
-            schedule_extraction(user_message, final_response, session_id=session.session_id)
-
-        # Mirror the completed exchange into Honcho (see stream_chat for
-        # rationale). Fire-and-forget; no-ops when person_id is None.
-        from openexecutive.memory.honcho_client import sync_turn as _honcho_sync
-        _honcho_sync(
-            user_message,
-            final_response,
-            person_id=person_id,
-            session_id=session.session_id,
-            co_present_person_ids=co_present_person_ids,
-        )
-        _sync_consulted_departments_to_honcho(
-            consulted,
-            user_message,
-            final_response,
-            person_id=person_id,
-            session_id=session.session_id,
-            co_present_person_ids=co_present_person_ids,
-        )
+            # Mirror the completed exchange into Honcho (see stream_chat for
+            # rationale). Fire-and-forget; no-ops when person_id is None.
+            from openexecutive.memory.honcho_client import sync_turn as _honcho_sync
+            _honcho_sync(
+                user_message,
+                final_response,
+                person_id=person_id,
+                session_id=session.session_id,
+                co_present_person_ids=co_present_person_ids,
+            )
+            _sync_consulted_departments_to_honcho(
+                consulted,
+                user_message,
+                final_response,
+                person_id=person_id,
+                session_id=session.session_id,
+                co_present_person_ids=co_present_person_ids,
+            )
 
         # Reset audit ContextVars at normal completion. The abandoned-stream
         # case (SSE client drop mid-yield) doesn't reach here — accept that
@@ -1114,6 +1362,7 @@ class Executive:
         consulted_out: list[str] | None = None,
         specialist_outputs_out: dict[str, str] | None = None,
         turn_id: str | None = None,
+        _fence: Any = None,
     ) -> AsyncIterator[str | dict[str, Any]]:
         """Tool-use loop that yields text deltas as they arrive.
 
@@ -1130,6 +1379,13 @@ class Executive:
                 "iter %d/%d", iteration, max_iterations,
                 extra={"iter_marker": True},
             )
+            # RA15-BO01-03: re-validate the lease before each LLM/tool
+            # round — a turn invalidated since the last boundary must not
+            # run another iteration.
+            if _fence is not None and not await asyncio.to_thread(
+                _fence.check
+            ):
+                raise _TurnFencedError
             full_text = ""
             tool_uses: list[dict[str, Any]] = []
             response_content: list[dict[str, Any]] = []
@@ -1183,13 +1439,18 @@ class Executive:
             # flow chart can show "this turn used N cache hits at iter K".
             # Always after the API call, never in the request path — does
             # not touch system_blocks / messages, so caching is unaffected.
-            _emit_cache_event(
-                session_id=getattr(current_session.get(), "session_id", None),
-                turn_id=turn_id or "",
-                iteration=iteration,
-                final_msg=final_msg,
-                model=stream_model,
-            )
+            # Durable journal write → fence it (RA15-BO01-03 residual).
+            async with _maybe_fence_hold(_fence) as _cache_ok:
+                if _cache_ok:
+                    _emit_cache_event(
+                        session_id=getattr(
+                            current_session.get(), "session_id", None
+                        ),
+                        turn_id=turn_id or "",
+                        iteration=iteration,
+                        final_msg=final_msg,
+                        model=stream_model,
+                    )
 
             web_search_queries: list[str] = []
             for block in final_msg.content:
@@ -1226,24 +1487,30 @@ class Executive:
                         "queries": web_search_queries,
                     })
                     yield debug_collector.to_sse_dict(evt)
-                for q in web_search_queries:
-                    audit_log(
-                        "tool_invocation",
-                        f"web_search: {q[:200]}",
-                        session_id=session_id,
-                        turn_id=turn_id,
-                        actor="executive",
-                        details={
-                            "tool": WEB_SEARCH_TOOL_NAME,
-                            "kind": "server_tool",
-                            "iteration": iteration,
-                            "query": q[:500],
-                        },
-                        full={
-                            "query": q,
-                            "active_prompt_blocks": _system_block_names(system_blocks),
-                        },
-                    )
+                # RA15-BO01-03 residual: the audit row is a durable journal
+                # write — hold the fence across it so a zombie resuming
+                # after reconcile+epoch-bump cannot stamp its evidence into
+                # the swapped-in client's journal.
+                async with _maybe_fence_hold(_fence) as _ws_ok:
+                    if _ws_ok:
+                        for q in web_search_queries:
+                            audit_log(
+                                "tool_invocation",
+                                f"web_search: {q[:200]}",
+                                session_id=session_id,
+                                turn_id=turn_id,
+                                actor="executive",
+                                details={
+                                    "tool": WEB_SEARCH_TOOL_NAME,
+                                    "kind": "server_tool",
+                                    "iteration": iteration,
+                                    "query": q[:500],
+                                },
+                                full={
+                                    "query": q,
+                                    "active_prompt_blocks": _system_block_names(system_blocks),
+                                },
+                            )
 
             if final_msg.stop_reason != "tool_use":
                 return
@@ -1319,13 +1586,49 @@ class Executive:
             session_id = getattr(current_session.get(), "session_id", None)
             if specialist_calls:
                 spec_t0 = time.monotonic()
-                specialist_results = await route_parallel(
-                    run_calls,
-                    episodic_context=episodic_context,
-                    session_id=session_id,
-                    debug_collector=debug_collector,
-                )
-                spec_ms = round((time.monotonic() - spec_t0) * 1000)
+                # RA15-BO01-03: specialist dispatch is a delegation boundary
+                # — consults emit specialist_consult audit rows and run
+                # retrievals; run under the fence hold so a committed
+                # switch cannot interleave between validation and dispatch.
+                async with _maybe_fence_hold(_fence) as _spec_ok:
+                    if not _spec_ok:
+                        raise _TurnFencedError
+                    specialist_results = await _run_child(
+                        _fence,
+                        label="route_parallel",
+                        coro=route_parallel(
+                            run_calls,
+                            episodic_context=episodic_context,
+                            session_id=session_id,
+                            debug_collector=debug_collector,
+                        ),
+                    )
+                    spec_ms = round((time.monotonic() - spec_t0) * 1000)
+                    # The consult audit rows are durable journal writes —
+                    # keep them inside the same hold as the dispatch so a
+                    # stale worker cannot stamp them into a swapped-in
+                    # journal after an epoch bump (RA15-BO01-03 residual).
+                    for call, spec_result in zip(
+                        run_calls, specialist_results, strict=True
+                    ):
+                        audit_log(
+                            "specialist_consult",
+                            f"Consulted {call['specialist']}: {str(call['query'])[:160]}",
+                            session_id=session_id,
+                            turn_id=turn_id,
+                            actor=call["specialist"],
+                            details={
+                                "iteration": iteration,
+                                "duration_ms": spec_ms,
+                                "context_preview": str(call.get("context", ""))[:200],
+                            },
+                            full={
+                                "query": call["query"],
+                                "context": call.get("context", ""),
+                                "response": spec_result,
+                                "active_prompt_blocks": _system_block_names(system_blocks),
+                            },
+                        )
                 for tu, result in zip(
                     run_tool_uses, specialist_results, strict=True
                 ):
@@ -1351,55 +1654,102 @@ class Executive:
                         # in multiple iterations — committee only needs a
                         # representative excerpt per domain.
                         specialist_outputs_out[call["specialist"]] = result
-                for call, spec_result in zip(
-                    run_calls, specialist_results, strict=True
-                ):
-                    audit_log(
-                        "specialist_consult",
-                        f"Consulted {call['specialist']}: {str(call['query'])[:160]}",
-                        session_id=session_id,
-                        turn_id=turn_id,
-                        actor=call["specialist"],
-                        details={
-                            "iteration": iteration,
-                            "duration_ms": spec_ms,
-                            "context_preview": str(call.get("context", ""))[:200],
-                        },
-                        full={
-                            "query": call["query"],
-                            "context": call.get("context", ""),
-                            "response": spec_result,
-                            "active_prompt_blocks": _system_block_names(system_blocks),
-                        },
-                    )
-
             if skill_tool_uses:
                 for tu in skill_tool_uses:
                     logger.info("→ skill:%s  input=%s", tu["name"], _trunc(tu["input"]))
+                # RA15-BO01-03: skill handlers are the turn's real effect
+                # boundary (calendar, broadcast, forms, workflow runs…). The
+                # batch runs under the fence's write lock so a switch cannot
+                # commit between the lease validation and these effects.
                 # return_exceptions=True: one crashing handler must not abort
                 # the whole turn. See `_tool_error_result`.
-                skill_results = await asyncio.gather(
-                    *(_ALL_SKILL_HANDLERS[tu["name"]](tu["input"]) for tu in skill_tool_uses),
-                    return_exceptions=True,
-                )
-                # `raw` rather than `result` so the narrowed value keeps the
-                # plain `str` type the rest of this function's loops use.
-                for tu, raw in zip(skill_tool_uses, skill_results, strict=True):
-                    if isinstance(raw, BaseException):
-                        # Cancellation is not a tool failure — `gather` captures
-                        # it like any other exception, so re-raise it or the
-                        # turn-timeout / client-disconnect paths in
-                        # api/routes/chat.py silently stop working.
-                        if isinstance(raw, asyncio.CancelledError):
-                            raise raw
-                        logger.exception(
-                            "skill:%s raised — session=%s turn=%s iteration=%d",
-                            tu["name"], session_id, turn_id, iteration,
-                            exc_info=raw,
+                # RA15-BO01-03 residual: the per-tool audit rows are durable
+                # journal writes — they run inside the same hold as the
+                # dispatch so a stale worker cannot stamp evidence into a
+                # swapped-in journal after an epoch bump. Chips/form_patch
+                # events are computed here but yielded after the hold
+                # releases (yields while holding the write lock would stall
+                # the wrapper's heartbeat renewal).
+                _skill_emits: list[Any] = []
+                async with _maybe_fence_hold(_fence) as _skill_ok:
+                    if not _skill_ok:
+                        raise _TurnFencedError
+                    skill_results = await _run_children(
+                        _fence,
+                        (_ALL_SKILL_HANDLERS[tu["name"]](tu["input"]) for tu in skill_tool_uses),
+                        [f"skill:{tu['name']}" for tu in skill_tool_uses],
+                    )
+                    # `raw` rather than `result` so the narrowed value keeps the
+                    # plain `str` type the rest of this function's loops use.
+                    for tu, raw in zip(skill_tool_uses, skill_results, strict=True):
+                        if isinstance(raw, BaseException):
+                            # Cancellation is not a tool failure — `gather` captures
+                            # it like any other exception, so re-raise it or the
+                            # turn-timeout / client-disconnect paths in
+                            # api/routes/chat.py silently stop working.
+                            if isinstance(raw, asyncio.CancelledError):
+                                raise raw
+                            logger.exception(
+                                "skill:%s raised — session=%s turn=%s iteration=%d",
+                                tu["name"], session_id, turn_id, iteration,
+                                exc_info=raw,
+                            )
+                            audit_log(
+                                "tool_invocation",
+                                f"skill:{tu['name']} FAILED: {type(raw).__name__}",
+                                session_id=session_id,
+                                turn_id=turn_id,
+                                actor="executive",
+                                details={
+                                    "tool": tu["name"],
+                                    "kind": "skill",
+                                    "iteration": iteration,
+                                    "ok": False,
+                                    "error": repr(raw)[:ERROR_DETAIL_LEN],
+                                },
+                            )
+                            # Hand the model an error tool_result and move on. No
+                            # chip: summarize_action must never see an exception.
+                            results_by_id[tu["id"]] = _tool_error_result(tu["name"], raw)
+                            continue
+                        result = raw
+                        logger.info("← skill:%s  result=%s", tu["name"], _trunc(result))
+                        results_by_id[tu["id"]] = result
+                        # Inline action chip for side-effecting tools. None
+                        # when the tool is read-only (search_skills, load_skill,
+                        # list_people, ask_about_person, lookup_person) or
+                        # when the handler reported an error.
+                        chip = summarize_action(
+                            tool_name=tu["name"],
+                            tool_input=tu["input"],
+                            tool_result=result,
+                            iteration=iteration,
                         )
+                        if chip is not None:
+                            _skill_emits.append(chip)
+                        # Form proposals reach the Ask OE panel as a dedicated
+                        # SSE event (not an action chip — nothing was mutated).
+                        # Only deliver what the handler accepted; a shape error
+                        # already went back to the model as the tool_result.
+                        if tu["name"] == PROPOSE_FORM_VALUES:
+                            try:
+                                handler_ok = "error" not in json.loads(result)
+                            except (json.JSONDecodeError, TypeError):
+                                # The handler always returns JSON today; if a
+                                # future change breaks that, drop the event
+                                # rather than killing the whole SSE stream.
+                                logger.warning(
+                                    "propose_form_values returned non-JSON; "
+                                    "suppressing form_patch event"
+                                )
+                                handler_ok = False
+                            if handler_ok:
+                                _skill_emits.append(
+                                    build_form_patch_event(tu["input"], iteration)
+                                )
                         audit_log(
                             "tool_invocation",
-                            f"skill:{tu['name']} FAILED: {type(raw).__name__}",
+                            f"skill:{tu['name']} input={audit_tool_input(tu['name'], tu['input'])}",
                             session_id=session_id,
                             turn_id=turn_id,
                             actor="executive",
@@ -1407,65 +1757,16 @@ class Executive:
                                 "tool": tu["name"],
                                 "kind": "skill",
                                 "iteration": iteration,
-                                "ok": False,
-                                "error": repr(raw)[:ERROR_DETAIL_LEN],
+                                "result_preview": audit_tool_result(tu["name"], result),
+                            },
+                            full={
+                                "input": audit_tool_input_full(tu["name"], tu["input"]),
+                                "result": audit_tool_result_full(tu["name"], result),
+                                "active_prompt_blocks": _system_block_names(system_blocks),
                             },
                         )
-                        # Hand the model an error tool_result and move on. No
-                        # chip: summarize_action must never see an exception.
-                        results_by_id[tu["id"]] = _tool_error_result(tu["name"], raw)
-                        continue
-                    result = raw
-                    logger.info("← skill:%s  result=%s", tu["name"], _trunc(result))
-                    results_by_id[tu["id"]] = result
-                    # Inline action chip for side-effecting tools. None
-                    # when the tool is read-only (search_skills, load_skill,
-                    # list_people, ask_about_person, lookup_person) or
-                    # when the handler reported an error.
-                    chip = summarize_action(
-                        tool_name=tu["name"],
-                        tool_input=tu["input"],
-                        tool_result=result,
-                        iteration=iteration,
-                    )
-                    if chip is not None:
-                        yield chip
-                    # Form proposals reach the Ask OE panel as a dedicated
-                    # SSE event (not an action chip — nothing was mutated).
-                    # Only deliver what the handler accepted; a shape error
-                    # already went back to the model as the tool_result.
-                    if tu["name"] == PROPOSE_FORM_VALUES:
-                        try:
-                            handler_ok = "error" not in json.loads(result)
-                        except (json.JSONDecodeError, TypeError):
-                            # The handler always returns JSON today; if a
-                            # future change breaks that, drop the event
-                            # rather than killing the whole SSE stream.
-                            logger.warning(
-                                "propose_form_values returned non-JSON; "
-                                "suppressing form_patch event"
-                            )
-                            handler_ok = False
-                        if handler_ok:
-                            yield build_form_patch_event(tu["input"], iteration)
-                    audit_log(
-                        "tool_invocation",
-                        f"skill:{tu['name']} input={audit_tool_input(tu['name'], tu['input'])}",
-                        session_id=session_id,
-                        turn_id=turn_id,
-                        actor="executive",
-                        details={
-                            "tool": tu["name"],
-                            "kind": "skill",
-                            "iteration": iteration,
-                            "result_preview": audit_tool_result(tu["name"], result),
-                        },
-                        full={
-                            "input": audit_tool_input_full(tu["name"], tu["input"]),
-                            "result": audit_tool_result_full(tu["name"], result),
-                            "active_prompt_blocks": _system_block_names(system_blocks),
-                        },
-                    )
+                for _emit in _skill_emits:
+                    yield _emit
 
             if mcp_tool_uses and self._mcp_gateway is not None:
                 _mcp_dispatch = {
@@ -1483,24 +1784,64 @@ class Executive:
                     else:
                         logger.info("→ %s  input=%s", tu["name"], _trunc(tu["input"]))
                 # Same isolation as the skill gather above: a gateway crash on
-                # one tool must not take the turn down with it.
-                mcp_results = await asyncio.gather(
-                    *(_mcp_dispatch[tu["name"]](tu["input"]) for tu in mcp_tool_uses),
-                    return_exceptions=True,
-                )
-                for tu, raw in zip(mcp_tool_uses, mcp_results, strict=True):
-                    tool_label = tu["input"].get("name", tu["name"]) if tu["name"] == "call_tool" else tu["name"]
-                    if isinstance(raw, BaseException):
-                        if isinstance(raw, asyncio.CancelledError):
-                            raise raw
-                        logger.exception(
-                            "mcp:%s raised — session=%s turn=%s iteration=%d",
-                            tool_label, session_id, turn_id, iteration,
-                            exc_info=raw,
+                # one tool must not take the turn down with it. MCP calls are
+                # the second real effect boundary — fenced the same way
+                # (RA15-BO01-03).
+                # Same as the skill block: audit rows are durable journal
+                # writes and stay inside the hold; chips are buffered and
+                # yielded after the lock releases (RA15-BO01-03 residual).
+                _mcp_emits: list[Any] = []
+                async with _maybe_fence_hold(_fence) as _mcp_ok:
+                    if not _mcp_ok:
+                        raise _TurnFencedError
+                    mcp_results = await _run_children(
+                        _fence,
+                        (_mcp_dispatch[tu["name"]](tu["input"]) for tu in mcp_tool_uses),
+                        [f"mcp:{tu['name']}" for tu in mcp_tool_uses],
+                    )
+                    for tu, raw in zip(mcp_tool_uses, mcp_results, strict=True):
+                        tool_label = tu["input"].get("name", tu["name"]) if tu["name"] == "call_tool" else tu["name"]
+                        if isinstance(raw, BaseException):
+                            if isinstance(raw, asyncio.CancelledError):
+                                raise raw
+                            logger.exception(
+                                "mcp:%s raised — session=%s turn=%s iteration=%d",
+                                tool_label, session_id, turn_id, iteration,
+                                exc_info=raw,
+                            )
+                            audit_log(
+                                "tool_invocation",
+                                f"mcp:{tool_label} FAILED: {type(raw).__name__}",
+                                session_id=session_id,
+                                turn_id=turn_id,
+                                actor="executive",
+                                details={
+                                    "tool": tool_label,
+                                    "kind": "mcp",
+                                    "iteration": iteration,
+                                    "ok": False,
+                                    "error": repr(raw)[:ERROR_DETAIL_LEN],
+                                },
+                            )
+                            results_by_id[tu["id"]] = _tool_error_result(tool_label, raw)
+                            continue
+                        result = raw
+                        logger.info("← %s  result=%s", tool_label, _trunc(result))
+                        results_by_id[tu["id"]] = result
+                        # MCP chip emission. search_tools is read-only (gets
+                        # filtered out by summarize_action's allowlist);
+                        # call_tool and load_mcp_server both surface a chip.
+                        chip = summarize_action(
+                            tool_name=tu["name"],
+                            tool_input=tu["input"],
+                            tool_result=result,
+                            iteration=iteration,
                         )
+                        if chip is not None:
+                            _mcp_emits.append(chip)
                         audit_log(
                             "tool_invocation",
-                            f"mcp:{tool_label} FAILED: {type(raw).__name__}",
+                            f"mcp:{tool_label} input={audit_tool_input(tool_label, tu['input'])}",
                             session_id=session_id,
                             turn_id=turn_id,
                             actor="executive",
@@ -1508,44 +1849,16 @@ class Executive:
                                 "tool": tool_label,
                                 "kind": "mcp",
                                 "iteration": iteration,
-                                "ok": False,
-                                "error": repr(raw)[:ERROR_DETAIL_LEN],
+                                "result_preview": audit_tool_result(tool_label, result),
+                            },
+                            full={
+                                "input": audit_tool_input_full(tool_label, tu["input"]),
+                                "result": audit_tool_result_full(tool_label, result),
+                                "active_prompt_blocks": _system_block_names(system_blocks),
                             },
                         )
-                        results_by_id[tu["id"]] = _tool_error_result(tool_label, raw)
-                        continue
-                    result = raw
-                    logger.info("← %s  result=%s", tool_label, _trunc(result))
-                    results_by_id[tu["id"]] = result
-                    # MCP chip emission. search_tools is read-only (gets
-                    # filtered out by summarize_action's allowlist);
-                    # call_tool and load_mcp_server both surface a chip.
-                    chip = summarize_action(
-                        tool_name=tu["name"],
-                        tool_input=tu["input"],
-                        tool_result=result,
-                        iteration=iteration,
-                    )
-                    if chip is not None:
-                        yield chip
-                    audit_log(
-                        "tool_invocation",
-                        f"mcp:{tool_label} input={audit_tool_input(tool_label, tu['input'])}",
-                        session_id=session_id,
-                        turn_id=turn_id,
-                        actor="executive",
-                        details={
-                            "tool": tool_label,
-                            "kind": "mcp",
-                            "iteration": iteration,
-                            "result_preview": audit_tool_result(tool_label, result),
-                        },
-                        full={
-                            "input": audit_tool_input_full(tool_label, tu["input"]),
-                            "result": audit_tool_result_full(tool_label, result),
-                            "active_prompt_blocks": _system_block_names(system_blocks),
-                        },
-                    )
+                for _emit in _mcp_emits:
+                    yield _emit
 
             if debug_collector:
                 for evt in debug_collector._events[event_cursor:]:

@@ -136,3 +136,127 @@ def test_long_digit_run_without_commas_is_linear_time() -> None:
     assert "annual_revenue_arr" not in profile
     assert profile["financials"] == {}
     assert profile["headcount"] == 999_999_999
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_ccy"),
+    [
+        ("We do $2M in ARR", "USD"),
+        ("about 20 million EUR", "EUR"),
+        ("revenue of 5M euro this year", "EUR"),
+        ("around 3M RON annually", "RON"),
+        ("roughly 8M lei", "RON"),
+        ("near 10M pounds", "GBP"),
+        # No currency marker at all → unknown, never an assumed USD.
+        ("Roughly 12M annually", None),
+        ("About 3 Million ARR", None),
+    ],
+)
+def test_arr_currency_from_explicit_markers(text: str, expected_ccy) -> None:
+    profile = build_profile_from_answers({"business_model": text})
+
+    assert "annual_revenue_arr" in profile
+    assert profile["annual_revenue_arr_currency"] == expected_ccy
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_ccy"),
+    [
+        # The defect from RA16-BO01-MONEY-01: a currency stated for a
+        # *different* amount must not bleed into the ARR attribution.
+        ("ARR 20M, costs in USD", None),
+        ("ARR 20M, costs in EUR", None),
+        ("ARR 20M. Our costs are in USD.", None),
+        ("ARR 20M, monthly burn $80k", None),
+        # Currency adjacent to the ARR amount still attaches, on either side.
+        ("ARR $20M, costs in EUR", "USD"),
+        ("ARR 20M USD, costs in EUR", "USD"),
+        ("ARR EUR 20M", "EUR"),
+        ("ARR in USD 20M", "USD"),
+        ("ARR 20M in RON", "RON"),
+        ("ARR 20M, in USD", "USD"),
+        # Two amounts with their own markers — each keeps its own.
+        ("ARR 20M RON, costs $5M", "RON"),
+        # Markers on the same expression that disagree → conflict, unknown.
+        ("ARR $20M EUR", None),
+        ("ARR 20M USD or EUR", None),
+    ],
+)
+def test_arr_currency_binds_to_the_amount_expression(
+    text: str, expected_ccy
+) -> None:
+    profile = build_profile_from_answers({"business_model": text})
+
+    assert "annual_revenue_arr" in profile
+    assert profile["annual_revenue_arr_currency"] == expected_ccy
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_arr"),
+    [
+        # Field binding: the ARR keyword picks its own amount, not another
+        # field's ("costs $5M, ARR 20M" must not yield 5M).
+        ("costs $5M, ARR 20M", 20_000_000.0),
+        ("costs $5M, ARR20M", 20_000_000.0),
+        ("ARR 20M, costs $5M", 20_000_000.0),
+        ("revenue 50M, ARR 20M", 20_000_000.0),
+        ("We do $2M in ARR", 2_000_000.0),
+        ("costs $5M, ARR 0.5M", 500_000.0),
+        ("ARR 0M EUR", 0.0),
+        # Ambiguous magnitudes — the field stays unset, never a guess.
+        ("ARR 20M, ARR 30M", None),
+        ("20M, 30M", None),
+        ("$5M but also 4M EUR", None),
+        ("We did 12M this year, 8M last year", None),
+    ],
+)
+def test_arr_amount_binds_to_the_field(text: str, expected_arr) -> None:
+    profile = build_profile_from_answers({"business_model": text})
+
+    assert profile.get("annual_revenue_arr") == expected_arr
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # RA17-BO01-MONEY-02: a single magnitude is not automatically the
+        # field's — when it explicitly belongs to a foreign field, or the
+        # answer declares the target missing, ARR stays unset.
+        "costs $5M",
+        "burn $50k monthly",
+        "spend 5M EUR",
+        "costs: $5M",
+        "ARR unavailable; costs $5M",
+        "ARR not stated. Our costs are 5M EUR.",
+        "no ARR yet, costs $5M",
+        "ARR: n/a, spend 5M",
+        "revenue undisclosed, we spend 5M",
+        "ARR is TBD",
+    ],
+)
+def test_arr_foreign_or_negated_single_candidate_stays_unset(text: str) -> None:
+    profile = build_profile_from_answers({"business_model": text})
+
+    assert "annual_revenue_arr" not in profile
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_arr", "expected_ccy"),
+    [
+        # Foreign-bound figures drop out of candidacy; a sole remaining
+        # unbound magnitude is still the historical univocal answer.
+        ("costs $5M, 20M", 20_000_000.0, None),
+        # The ARR figure keeps winning across clauses in either order,
+        # including when label and value share one clause.
+        ("our costs are $5M but ARR is $20M", 20_000_000.0, "USD"),
+        ("ARR: $20M, costs: $5M", 20_000_000.0, "USD"),
+        ("we make $2M ARR with $500k costs monthly", 2_000_000.0, "USD"),
+    ],
+)
+def test_arr_foreign_candidates_are_excluded_not_selected(
+    text: str, expected_arr: float, expected_ccy
+) -> None:
+    profile = build_profile_from_answers({"business_model": text})
+
+    assert profile["annual_revenue_arr"] == expected_arr
+    assert profile["annual_revenue_arr_currency"] == expected_ccy

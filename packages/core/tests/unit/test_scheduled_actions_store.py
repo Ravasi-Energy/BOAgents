@@ -265,9 +265,16 @@ def test_requeue_orphaned_running(db: Path) -> None:
     row = get_scheduled_action(action_id, db_path=db)
     assert row is not None and row.status == "running"
 
-    assert requeue_orphaned_running(db_path=db) == 1
+    # BUGHUNT-02 C13: a fresh claim is an in-flight dispatch — the sweep
+    # must not recycle it (that would re-claim and double-fire the row).
+    assert requeue_orphaned_running(db_path=db) == 0
     row2 = get_scheduled_action(action_id, db_path=db)
-    assert row2 is not None and row2.status == "pending"
+    assert row2 is not None and row2.status == "running"
+
+    # A claim older than the lease is a crashed worker's orphan → requeued.
+    assert requeue_orphaned_running(db_path=db, stale_after_seconds=0) == 1
+    row3 = get_scheduled_action(action_id, db_path=db)
+    assert row3 is not None and row3.status == "pending"
 
 
 def test_insert_truncates_overlong_intent(db: Path) -> None:

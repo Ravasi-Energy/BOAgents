@@ -1,10 +1,13 @@
 "use client";
+import { catalogPatch } from "@/lib/p0-edit";
+import { Money } from "@/lib/Money";
+import { moneyInputValue, parseMoneyInput } from "@/lib/money-format";
 
 // Modele și rutare (VAL3-01): catalog administrabil + observații produse de
 // routerul în mod observare. Pagina afișează explicit «observare» — decizia
 // calculată nu schimbă niciodată modelul folosit, iar estimarea de cost nu
 // este prezentată ca economie realizată.
-import { Fragment, useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState, useRef } from "react";
 
 import {
   BoPage,
@@ -76,6 +79,11 @@ function EntryEditor({
   onSaved: () => void;
   onCancel: () => void;
 }) {
+  const [base, setBase] = useState(entry);
+  const initialObservedAt = useRef(entry?.quality?.observed_at || new Date().toISOString().replace(/\.\d+Z$/, "Z"));
+  const originalPayload = useRef<Record<string, unknown> | null>(null);
+  const [removeCaps, setRemoveCaps] = useState("");
+  const [removeRegions, setRemoveRegions] = useState("");
   const [provider, setProvider] = useState(entry?.provider ?? "");
   const [modelId, setModelId] = useState(entry?.model_id ?? "");
   const [modelVersion, setModelVersion] = useState(entry?.model_version ?? "");
@@ -86,8 +94,8 @@ function EntryEditor({
   const [regions, setRegions] = useState((entry?.regions ?? []).join(","));
   const [purpose, setPurpose] = useState(entry?.purpose ?? "");
   const [source, setSource] = useState(entry?.source ?? "admin");
-  const [costIn, setCostIn] = useState(entry?.cost.input_per_million ?? "");
-  const [costOut, setCostOut] = useState(entry?.cost.output_per_million ?? "");
+  const [costIn, setCostIn] = useState(moneyInputValue(entry?.cost.input_per_million));
+  const [costOut, setCostOut] = useState(moneyInputValue(entry?.cost.output_per_million));
   const [currency, setCurrency] = useState(entry?.cost.currency ?? "");
   const [validUntil, setValidUntil] = useState(entry?.cost.valid_until ?? "");
   const [score, setScore] = useState(
@@ -115,11 +123,7 @@ function EntryEditor({
       .map((s) => s.trim())
       .filter(Boolean);
 
-  async function submit() {
-    setErr(null);
-    setConflict(false);
-    setBusy(true);
-    try {
+  function payload() {
       const quality =
         score.trim() || taskKind.trim()
           ? {
@@ -130,7 +134,7 @@ function EntryEditor({
               eval_set_version: evalVersion.trim() || "v1",
               observed_at:
                 observedAt.trim() ||
-                new Date().toISOString().replace(/\.\d+Z$/, "Z"),
+                initialObservedAt.current,
               sample_count: Number(sampleCount) || 0,
             }
           : null;
@@ -142,8 +146,8 @@ function EntryEditor({
         capabilities: csv(capabilities),
         regions: csv(regions),
         cost: {
-          input_per_million: costIn.trim() || null,
-          output_per_million: costOut.trim() || null,
+          input_per_million: parseMoneyInput(costIn),
+          output_per_million: parseMoneyInput(costOut),
           currency: currency.trim() || null,
           valid_until: validUntil.trim() || null,
         },
@@ -151,20 +155,35 @@ function EntryEditor({
         purpose: purpose.trim() || "general",
         source: source.trim() || "admin",
       };
-      if (entry) {
-        await updateBoCatalogEntry(entry.entry_id, {
-          ...payload,
-          expected_version: entry.version,
-        });
+      return payload;
+  }
+  if(!originalPayload.current) originalPayload.current=payload();
+  async function rebase() {
+    if(!base)return;
+    setBusy(true);
+    try {
+      const fresh=(await getBoRoutingCatalog()).entries.find(row=>row.entry_id===base.entry_id);
+      if(!fresh)throw Error('Intrarea nu mai există.');
+      setBase(fresh);setConflict(false);setErr('Baza curentă citită; editurile locale sunt păstrate.');
+    } catch {setErr('Reîncărcarea a eșuat; editura și baza sunt păstrate.');}
+    finally {setBusy(false);}
+  }
+  async function submit() {
+    if(conflict)return;
+    setErr(null);setBusy(true);
+    try {
+      const draft=payload();
+      if (base) {
+        await updateBoCatalogEntry(base.entry_id, catalogPatch(draft, originalPayload.current!, base, {capabilities:removeCaps,regions:removeRegions}));
       } else {
-        await createBoCatalogEntry(payload);
+        await createBoCatalogEntry(draft);
       }
       onSaved();
     } catch (e) {
       if (e instanceof BoApiError && e.status === 409) {
         setConflict(true);
         setErr(
-          "Altă sesiune a modificat intrarea între timp — reîncarcă și reia editarea.",
+          "Altă sesiune a modificat intrarea între timp — editura este păstrată; citește baza curentă.",
         );
       } else if (e instanceof BoApiError) {
         setErr(`${e.code}${e.detail ? ` — ${String(e.detail)}` : ""}`);
@@ -181,6 +200,8 @@ function EntryEditor({
       <h3 className="bo-card-title">
         {entry ? `Editează ${entry.provider}/${entry.model_id}` : "Intrare nouă în catalog"}
       </h3>
+      {base ? <div className="bo-row"><Field label="Eliminare explicită capabilități (CSV)" htmlFor="cat-remove-caps"><input id="cat-remove-caps" className="bo-input" value={removeCaps} onChange={e=>setRemoveCaps(e.target.value)} /></Field><Field label="Eliminare explicită regiuni (CSV)" htmlFor="cat-remove-regions"><input id="cat-remove-regions" className="bo-input" value={removeRegions} onChange={e=>setRemoveRegions(e.target.value)} /></Field></div> : null}
+      {conflict ? <button className="bo-btn" onClick={rebase} disabled={busy}>Reîncarcă și păstrează editura</button> : null}
       {err ? (
         <InlineAlert kind={conflict ? "warn" : "danger"}>{err}</InlineAlert>
       ) : null}
@@ -394,7 +415,7 @@ function ObservationDetail({ obs }: { obs: BoRouteObservation }) {
           <strong>Estimare cost</strong>
           <div>
             {obs.cost_estimate
-              ? `${obs.cost_estimate.amount} ${obs.cost_estimate.currency} (estimare, nu economie realizată)`
+              ? <><Money amount={obs.cost_estimate.amount} currency={obs.cost_estimate.currency} /> (estimare pe apel, nu economie realizată)</>
               : "necunoscut"}
           </div>
         </div>
@@ -402,7 +423,7 @@ function ObservationDetail({ obs }: { obs: BoRouteObservation }) {
           <strong>Cost facturat</strong>
           <div>
             {obs.billed
-              ? `${String(obs.billed.amount)} ${String(obs.billed.currency)}`
+              ? <Money amount={obs.billed.amount} currency={obs.billed.currency} />
               : "nedisponibil"}
           </div>
         </div>
@@ -430,7 +451,7 @@ function ObservationDetail({ obs }: { obs: BoRouteObservation }) {
                 <td>{c.eligible ? "da" : "nu"}</td>
                 <td>{c.reason ? reasonLabel(c.reason) : "—"}</td>
                 <td>{c.score != null ? c.score.toFixed(2) : "necunoscut"}</td>
-                <td>{c.estimated_cost ?? "necunoscut"}</td>
+                <td>{c.estimated_cost != null ? <><Money amount={c.estimated_cost} currency={c.estimated_cost_currency} /> — {c.estimated_cost_unit === "per_call" ? "pe apel" : "unitate neconfigurată"}</> : "necunoscut"}</td>
               </tr>
             ))}
           </tbody>

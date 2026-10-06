@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Any
 
 from openexecutive.clients.slots import (
+    ClientSlotSwitchRefusedError,
     activate_client_slot,
     get_active_client,
     list_client_slots,
@@ -144,6 +145,19 @@ async def run_client_rotation(
                 live_is_consistent = False
                 await activate_client_slot(settings, slug, app_state=app_state)
                 live_is_consistent = True
+            except ClientSlotSwitchRefusedError as exc:
+                # Barrier refusal is PRE-mutation: live state was never
+                # touched and the original client is still active — a
+                # force-restore would discard good live state for no
+                # reason. Record the deferral and stop; next rotation
+                # retries when the turn clears.
+                logger.info(
+                    "rotation: activating %r refused by the turn barrier "
+                    "(turns in flight/uncertain) — deferring", slug,
+                )
+                live_is_consistent = True
+                failed[slug] = f"activation refused: {str(exc)[:160]}"
+                break
             except Exception as exc:
                 logger.exception(
                     "rotation: activating %r failed — aborting rotation to "
@@ -211,6 +225,9 @@ async def _force_restore(
     abandoned target's slot still holds its own last good save, so nothing
     is lost by discarding the live state.
     """
+    import asyncio
+
+    from openexecutive.bo import turn_barrier
     from openexecutive.clients.slots import (
         _FIXTURE_OP_LOCK,
         _active_client_sentinel,
@@ -224,37 +241,58 @@ async def _force_restore(
     )
 
     async with _FIXTURE_OP_LOCK:
-        slot = _require_slot(settings, slug)
-        # Same durable-transition rule as activate_client_slot: when no
-        # marker exists yet, this restore is itself the transition that
-        # needs one — a kill mid-restore must still fence the restarted
-        # process. A write failure aborts BEFORE any live mutation.
-        fresh_marker = get_restore_blocked(settings) is None
-        if fresh_marker:
-            _write_transition_marker(
-                settings, failed_slug=failed_slug or slug, target_slug=slug
-            )
-        await _restore_slot_state(settings, slot, app_state=app_state)
-        _active_client_sentinel(settings).parent.mkdir(parents=True, exist_ok=True)
-        _active_client_sentinel(settings).write_text(slug, encoding="utf-8")
-        _set_honcho_client_workspace(slug)
-        # If a restore block was active, live state is now provably `slug` —
-        # re-point the recorded recovery target at it so the operator's
-        # allowed re-activation restores the client that's actually live,
-        # not a stale name. (The block itself persists until that
-        # re-activation verifies and clears it — still fail-closed.) A
-        # marker this call wrote is different: the restore it fenced just
-        # completed and verified, so it clears like a successful
-        # activation's marker does — sentinel first, marker last.
-        marker = get_restore_blocked(settings)
-        if fresh_marker:
-            _clear_restore_blocked(settings)
-        elif marker is not None and marker.get("restore_slug") != slug:
+        # Same durable barrier as activate_client_slot (RA13-A02-01):
+        # _restore_slot_state replaces the live journal wholesale, so a
+        # turn in flight would strand its evidence exactly as in the
+        # activate path. A refusal is pre-mutation — the half-swapped
+        # live state stays fenced for an operator via restore-blocked.
+        guard = turn_barrier.switch_guard(f"force_restore:{slug}")
+        try:
+            await asyncio.to_thread(guard.__enter__)
+        except turn_barrier.SwitchRefusedError as exc:
             _mark_restore_blocked(
                 settings,
-                failed_slug=marker.get("failed_slug") or slug,
+                failed_slug=failed_slug or slug,
                 target_slug=slug,
             )
+            raise RuntimeError(
+                f"force-restore of {slug!r} refused by the turn barrier: "
+                f"{exc.describe()}"
+            ) from exc
+        try:
+            slot = _require_slot(settings, slug)
+            # Same durable-transition rule as activate_client_slot: when no
+            # marker exists yet, this restore is itself the transition that
+            # needs one — a kill mid-restore must still fence the restarted
+            # process. A write failure aborts BEFORE any live mutation.
+            fresh_marker = get_restore_blocked(settings) is None
+            if fresh_marker:
+                _write_transition_marker(
+                    settings, failed_slug=failed_slug or slug, target_slug=slug
+                )
+            await _restore_slot_state(settings, slot, app_state=app_state)
+            _active_client_sentinel(settings).parent.mkdir(parents=True, exist_ok=True)
+            _active_client_sentinel(settings).write_text(slug, encoding="utf-8")
+            _set_honcho_client_workspace(slug)
+            # If a restore block was active, live state is now provably `slug` —
+            # re-point the recorded recovery target at it so the operator's
+            # allowed re-activation restores the client that's actually live,
+            # not a stale name. (The block itself persists until that
+            # re-activation verifies and clears it — still fail-closed.) A
+            # marker this call wrote is different: the restore it fenced just
+            # completed and verified, so it clears like a successful
+            # activation's marker does — sentinel first, marker last.
+            marker = get_restore_blocked(settings)
+            if fresh_marker:
+                _clear_restore_blocked(settings)
+            elif marker is not None and marker.get("restore_slug") != slug:
+                _mark_restore_blocked(
+                    settings,
+                    failed_slug=marker.get("failed_slug") or slug,
+                    target_slug=slug,
+                )
+        finally:
+            await asyncio.to_thread(guard.__exit__, None, None, None)
 
 
 async def _run_quiet_work_for_live_client(settings: Any, slug: str) -> None:

@@ -555,6 +555,16 @@ def submit_run(
     now = _now()
     with get_conn(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
+        # Idempotent submit (BUGHUNT-02 C2): a retry carrying the same
+        # correlation_id replays the already-accepted run — it must not
+        # create a second row nor double-reserve budget. BEGIN IMMEDIATE
+        # serializes writers, so the SELECT-then-INSERT is race-free.
+        existing = conn.execute(
+            "SELECT run_id FROM bo_exec_runs WHERE tenant = ? AND correlation_id = ?",
+            (tenant, correlation_id),
+        ).fetchone()
+        if existing is not None:
+            return get_run(tenant, existing["run_id"], db_path=db_path)
         _reserve_budget(
             conn, tenant, mandate, run_id, budget_amount, slots, now
         )

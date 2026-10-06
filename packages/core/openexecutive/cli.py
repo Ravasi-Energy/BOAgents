@@ -209,7 +209,7 @@ async def _purge_notion(page_id: str | None, stale: bool, purge_all: bool) -> No
     if page_id:
         state = load_state()
         if purge_page(page_id, store, state):
-            save_state(state)
+            save_state(state, replace=True)
             console.print(f"[green]Purged Notion page[/green] {page_id}")
         else:
             console.print(f"[red]Could not purge[/red] {page_id}")

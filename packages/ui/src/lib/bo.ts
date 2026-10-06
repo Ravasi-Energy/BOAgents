@@ -75,11 +75,12 @@ export function putBoSetting(
   key: string,
   value: unknown,
   expectedVersion: number,
+  remove?: string[],
 ): Promise<{ result: string; applied: boolean; setting: BoSetting }> {
   return req(`/settings/${encodeURIComponent(key)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ value, expected_version: expectedVersion }),
+    body: JSON.stringify({ value, expected_version: expectedVersion, ...(remove?.length ? {remove} : {}) }),
   });
 }
 
@@ -204,6 +205,9 @@ export function patchBoBot(
     name?: string;
     description?: string;
     content?: Record<string, unknown>;
+    steps_remove?: string[];
+    capability_refs_remove?: string[];
+    policy_refs_remove?: string[];
   },
 ): Promise<{ bot: BoBot }> {
   return req(`/bots/${id}`, {
@@ -215,8 +219,9 @@ export function patchBoBot(
 
 export function publishBoBot(
   id: string,
+  expected_version: number,
 ): Promise<{ bot: BoBot; result: string; active_version_no: number }> {
-  return req(`/bots/${id}/publish`, { method: "POST" });
+  return req(`/bots/${id}/publish`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expected_version }) });
 }
 
 export function simulateBoBot(
@@ -434,7 +439,7 @@ export interface BoRouteObservation {
   reasons: string[];
   recommendation: BoRouteChoice | null;
   actual_route: BoRouteChoice | null;
-  cost_estimate: { amount: string; currency: string; validUntil: string } | null;
+  cost_estimate: { amount: string; currency: string | null; validUntil: string } | null;
   measured: Record<string, number> | null;
   billed: Record<string, unknown> | null;
   detail: {
@@ -443,6 +448,8 @@ export interface BoRouteObservation {
       eligible: boolean;
       reason: string | null;
       estimated_cost: string | null;
+      estimated_cost_currency?: string | null;
+      estimated_cost_unit?: "per_call";
       score: number | null;
     }[];
   };
@@ -516,6 +523,8 @@ export function updateBoCatalogEntry(
     purpose: string;
     source: string;
     expected_version: number;
+    capabilities_remove?: string[];
+    regions_remove?: string[];
   },
 ): Promise<{ entry: BoCatalogEntry }> {
   return req(`/routing/catalog/${id}`, {

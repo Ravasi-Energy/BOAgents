@@ -108,3 +108,75 @@ def test_archived_name_still_collides_on_insert(db: Path) -> None:
 
 def test_get_missing_returns_none(db: Path) -> None:
     assert fx_store.get_fixture("nope", db) is None
+
+
+def test_arr_currency_roundtrip(db: Path) -> None:
+    """ARR + ISO currency insert and list back identically."""
+    _insert(arr=6000.0, arr_currency="EUR")
+    row = fx_store.list_fixtures(db)[0]
+    assert row["arr"] == 6000.0
+    assert row["arr_currency"] == "EUR"
+
+    full = fx_store.get_fixture("acme", db)
+    assert full["arr_currency"] == "EUR"
+
+
+def test_arr_currency_defaults_none(db: Path) -> None:
+    """Fixtures without a currency keep NULL — unknown stays unknown."""
+    _insert(arr=6000.0)
+    assert fx_store.list_fixtures(db)[0]["arr_currency"] is None
+
+
+def test_arr_currency_migration_idempotent(tmp_path: Path) -> None:
+    """A DB created before the column existed gains it on initialize_db,
+    keeps existing rows, and tolerates repeated initialize_db calls."""
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(
+        """
+        CREATE TABLE generated_fixtures (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            display_name TEXT NOT NULL,
+            scenario_description TEXT NOT NULL DEFAULT '',
+            profile_yaml TEXT NOT NULL DEFAULT '',
+            people_yaml TEXT NOT NULL DEFAULT '',
+            departments_yaml TEXT NOT NULL DEFAULT '',
+            memory_json TEXT NOT NULL DEFAULT '{}',
+            docs_json TEXT NOT NULL DEFAULT '{}',
+            dept_summary_json TEXT NOT NULL DEFAULT '[]',
+            people_summary_json TEXT NOT NULL DEFAULT '[]',
+            industry TEXT NOT NULL DEFAULT '',
+            stage TEXT NOT NULL DEFAULT '',
+            arr REAL,
+            headcount INTEGER,
+            founding_year INTEGER,
+            mission TEXT NOT NULL DEFAULT '',
+            doc_count INTEGER NOT NULL DEFAULT 0,
+            scenario_count INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0, 1))
+        );
+        INSERT INTO generated_fixtures
+            (name, display_name, arr, created_at, updated_at)
+        VALUES ('legacy', 'Legacy Co', 6000, 't', 't');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    fx_store.initialize_db(db)
+    fx_store.initialize_db(db)  # repeated migration must not error or drop
+
+    cols = {
+        r[1]
+        for r in sqlite3.connect(str(db)).execute(
+            "PRAGMA table_info(generated_fixtures)"
+        )
+    }
+    assert "arr_currency" in cols
+    row = fx_store.list_fixtures(db)[0]
+    assert row["display_name"] == "Legacy Co"
+    assert row["arr"] == 6000.0
+    assert row["arr_currency"] is None  # historical row stays unknown

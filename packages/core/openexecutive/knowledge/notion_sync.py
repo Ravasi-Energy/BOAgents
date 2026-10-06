@@ -133,11 +133,35 @@ def reset_local_state(*, profile_path: Path | None = None) -> None:
     path.unlink(missing_ok=True)
 
 
-def save_state(state: dict[str, Any]) -> None:
+def save_state(state: dict[str, Any], *, replace: bool = False) -> None:
+    """Persist sync state, merging over what's already on disk.
+
+    BUGHUNT-02 C6: partial callers pass only the pages they touched —
+    replacing the whole ``pages`` map would drop page records synced by
+    other paths. Pages union by key (new wins); a ``None`` watermark keeps
+    the stored one (None means "not provided", not "reset").
+
+    Callers holding the *authoritative* in-memory state — the sync tick
+    after reconciliation has popped purged pages, purge-all, CLI purge —
+    pass ``replace=True`` to write the state verbatim, so deletions stick.
+    """
+    if replace:
+        merged = state
+    else:
+        stored = load_state()
+        merged_pages = dict(stored["pages"])
+        incoming_pages = state.get("pages") if isinstance(state, dict) else None
+        if isinstance(incoming_pages, dict):
+            merged_pages.update(incoming_pages)
+        merged = dict(stored)
+        merged.update({k: v for k, v in state.items() if k not in ("pages", "watermark")})
+        merged["pages"] = merged_pages
+        if state.get("watermark") is not None:
+            merged["watermark"] = state["watermark"]
     path = _state_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.write_text(json.dumps(merged, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     tmp.replace(path)
 
 
@@ -823,7 +847,7 @@ async def _apply_tick(
                     state["watermark"] = candidate
 
     state["last_run"] = (now or datetime.now(UTC)).isoformat()
-    save_state(state)
+    save_state(state, replace=True)
 
 
 async def run_notion_sync(
@@ -937,7 +961,7 @@ def purge_all_synced(store: ChromaDBStore, state: dict[str, Any] | None = None) 
     store.delete_notion_docs()
     current["pages"] = {}
     current["watermark"] = None
-    save_state(current)
+    save_state(current, replace=True)
     return purged
 
 

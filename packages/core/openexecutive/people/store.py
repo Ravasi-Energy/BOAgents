@@ -18,6 +18,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import get_args
 
 from openexecutive.people.models import (
     AuthorityScope,
@@ -85,6 +86,7 @@ def initialize_db(db_path: Path | None = None) -> None:
                 on_leave_until TEXT,
                 reports_to_person_id INTEGER,
                 archived INTEGER NOT NULL DEFAULT 0,
+                version INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (reports_to_person_id) REFERENCES people(id)
@@ -117,15 +119,25 @@ def initialize_db(db_path: Path | None = None) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_pa_person
                 ON person_availability(person_id);
+
+            CREATE TABLE IF NOT EXISTS roster_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
         """)
-        # Additive migration: discord_user_id added after initial schema.
+        # Additive migrations: discord_user_id added after initial schema;
+        # version added for CAS on PATCH (BUGHUNT-02 P0-7).
         cols = {row["name"] for row in conn.execute("PRAGMA table_info(people)")}
-        if "discord_user_id" not in cols:
-            try:
-                conn.execute("ALTER TABLE people ADD COLUMN discord_user_id TEXT")
-            except sqlite3.OperationalError as exc:
-                if "duplicate column" not in str(exc).lower():
-                    raise
+        for col, ddl in (
+            ("discord_user_id", "ALTER TABLE people ADD COLUMN discord_user_id TEXT"),
+            ("version", "ALTER TABLE people ADD COLUMN version INTEGER NOT NULL DEFAULT 1"),
+        ):
+            if col not in cols:
+                try:
+                    conn.execute(ddl)
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column" not in str(exc).lower():
+                        raise
 
 
 # --------------------------------------------------------------------------- #
@@ -196,11 +208,71 @@ def _row_to_person(row: sqlite3.Row, conn: sqlite3.Connection) -> Person:
         on_leave_until=on_leave,
         reports_to_person_id=row["reports_to_person_id"],
         archived=bool(row["archived"]),
+        # `.keys()` is required: `in row` on sqlite3.Row iterates values,
+        # not column names — legacy rows without the column must read 1.
+        version=int(row["version"]) if "version" in row.keys() else 1,  # noqa: SIM118
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         authority_scope=_load_scope(person_id, conn),
         availability=_load_availability(person_id, conn),
     )
+
+
+# --------------------------------------------------------------------------- #
+# Roster administration flag (BUGHUNT-02 R4 — `administered` auth contract)
+# --------------------------------------------------------------------------- #
+
+_ROSTER_ADMINISTERED_KEY = "administered"
+
+
+def _mark_roster_administered(conn: sqlite3.Connection) -> None:
+    """Record that the roster has been administered at least once.
+
+    Write-once inside the mutating transaction: durable across restarts and
+    independent of the live roster contents — archiving every person leaves
+    it set, which is exactly what keeps an empty-but-administered roster
+    authoritative (CONTROL R4).
+    """
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS roster_meta "
+        "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO roster_meta (key, value) VALUES (?, '1')",
+        (_ROSTER_ADMINISTERED_KEY,),
+    )
+
+
+def roster_administered(db_path: Path | None = None) -> bool:
+    """True once the roster has seen at least one administrative write."""
+    path = _resolve_db_path(db_path)
+    if not path.exists():
+        return False
+    with _get_conn(db_path) as conn:
+        if not _table_exists(conn, "roster_meta"):
+            return False
+        row = conn.execute(
+            "SELECT value FROM roster_meta WHERE key = ?",
+            (_ROSTER_ADMINISTERED_KEY,),
+        ).fetchone()
+        return bool(row and row["value"] == "1")
+
+
+def reset_roster_administered(db_path: Path | None = None) -> bool:
+    """Explicitly clear the administered flag (audited recovery path only).
+
+    Returns True when a flag was actually cleared. After reset the server
+    reports ``administered: false`` again, re-permitting the UI's
+    ``ALLOWED_EMAILS`` bootstrap — this is the only way back and callers
+    must gate + audit it (POST /auth/roster/recover-env).
+    """
+    with _get_conn(db_path) as conn:
+        if not _table_exists(conn, "roster_meta"):
+            return False
+        cursor = conn.execute(
+            "DELETE FROM roster_meta WHERE key = ?", (_ROSTER_ADMINISTERED_KEY,)
+        )
+        return cursor.rowcount > 0
 
 
 # --------------------------------------------------------------------------- #
@@ -225,11 +297,20 @@ def upsert_person(
     db_path: Path | None = None,
 ) -> int:
     """Insert or update a Person row. Returns the person_id."""
+    # Validate against the Literal — a bogus channel would land in the row
+    # and break every subsequent Person read.
+    if preferred_channel not in get_args(PreferredChannel):
+        raise ValueError(
+            f"preferred_channel invalid: {preferred_channel!r} "
+            f"(permise: {sorted(get_args(PreferredChannel))})"
+        )
+    channel = preferred_channel
     now = _now()
     dept_json = json.dumps(department_slugs or [])
     leave_str = on_leave_until.isoformat() if on_leave_until else None
 
     with _get_conn(db_path) as conn:
+        _mark_roster_administered(conn)
         if person_id is not None and person_id > 0:
             conn.execute(
                 """
@@ -238,13 +319,13 @@ def upsert_person(
                     email=?, slack_user_id=?, telegram_chat_id=?, discord_user_id=?,
                     preferred_channel=?,
                     response_sla_hours=?, on_leave_until=?, reports_to_person_id=?,
-                    updated_at=?
+                    version = version + 1, updated_at=?
                 WHERE id=?
                 """,
                 (
                     full_name, role, int(is_principal), dept_json,
                     email, slack_user_id, telegram_chat_id, discord_user_id,
-                    preferred_channel,
+                    channel,
                     response_sla_hours, leave_str, reports_to_person_id,
                     now, person_id,
                 ),
@@ -263,12 +344,26 @@ def upsert_person(
             (
                 full_name, role, int(is_principal), dept_json,
                 email, slack_user_id, telegram_chat_id, discord_user_id,
-                preferred_channel,
+                channel,
                 response_sla_hours, leave_str, reports_to_person_id,
                 now, now,
             ),
         )
         return int(cursor.lastrowid or 0)
+
+
+def _replace_authority_scope(
+    conn: sqlite3.Connection, person_id: int, scopes: list[AuthorityScope]
+) -> None:
+    conn.execute(
+        "DELETE FROM person_authority_scope WHERE person_id = ?", (person_id,)
+    )
+    for scope in scopes:
+        conn.execute(
+            "INSERT OR IGNORE INTO person_authority_scope (person_id, scope_token)"
+            " VALUES (?, ?)",
+            (person_id, scope.value),
+        )
 
 
 def set_authority_scope(
@@ -278,15 +373,28 @@ def set_authority_scope(
 ) -> None:
     """Replace the full authority scope list for a person."""
     with _get_conn(db_path) as conn:
+        _replace_authority_scope(conn, person_id, scopes)
+
+
+def _replace_availability(
+    conn: sqlite3.Connection, person_id: int, windows: list[AvailabilityWindow]
+) -> None:
+    conn.execute(
+        "DELETE FROM person_availability WHERE person_id = ?", (person_id,)
+    )
+    for win in windows:
         conn.execute(
-            "DELETE FROM person_authority_scope WHERE person_id = ?", (person_id,)
+            "INSERT INTO person_availability"
+            " (person_id, weekdays_json, start_local, end_local, timezone)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (
+                person_id,
+                json.dumps(win.weekdays),
+                win.start_local,
+                win.end_local,
+                win.timezone,
+            ),
         )
-        for scope in scopes:
-            conn.execute(
-                "INSERT OR IGNORE INTO person_authority_scope (person_id, scope_token)"
-                " VALUES (?, ?)",
-                (person_id, scope.value),
-            )
 
 
 def set_availability(
@@ -296,22 +404,7 @@ def set_availability(
 ) -> None:
     """Replace the full availability window list for a person."""
     with _get_conn(db_path) as conn:
-        conn.execute(
-            "DELETE FROM person_availability WHERE person_id = ?", (person_id,)
-        )
-        for win in windows:
-            conn.execute(
-                "INSERT INTO person_availability"
-                " (person_id, weekdays_json, start_local, end_local, timezone)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (
-                    person_id,
-                    json.dumps(win.weekdays),
-                    win.start_local,
-                    win.end_local,
-                    win.timezone,
-                ),
-            )
+        _replace_availability(conn, person_id, windows)
 
 
 def get_person(person_id: int, db_path: Path | None = None) -> Person | None:
@@ -473,6 +566,8 @@ def archive_person(person_id: int, db_path: Path | None = None) -> bool:
             "UPDATE people SET archived = 1, updated_at = ? WHERE id = ? AND archived = 0",
             (_now(), person_id),
         )
+        if cursor.rowcount > 0:
+            _mark_roster_administered(conn)
         return cursor.rowcount > 0
 
 
@@ -506,6 +601,10 @@ def find_approvers(
         return [_row_to_person(row, conn) for row in rows]
 
 
+class PersonConflictError(Exception):
+    """expected_version did not match the stored version → HTTP 409."""
+
+
 def update_person(
     person_id: int,
     *,
@@ -519,28 +618,61 @@ def update_person(
     response_sla_hours: int | None = None,
     on_leave_until: date | None = None,
     clear_on_leave: bool = False,
+    clear_email: bool = False,
+    clear_slack_user_id: bool = False,
+    clear_telegram_chat_id: bool = False,
+    clear_discord_user_id: bool = False,
+    clear_reports_to: bool = False,
     reports_to_person_id: int | None = None,
     department_slugs: list[str] | None = None,
+    department_slugs_remove: list[str] | None = None,
+    authority_scope: list[AuthorityScope] | None = None,
+    availability: list[AvailabilityWindow] | None = None,
+    expected_version: int | None = None,
     db_path: Path | None = None,
 ) -> bool:
     """Partial update. Returns True if a row was modified.
 
-    Pass `clear_on_leave=True` to explicitly set on_leave_until to NULL.
+    Nullable fields clear ONLY through an explicit ``clear_*`` flag
+    (``clear_on_leave``, ``clear_email``, …) — passing ``None`` never
+    clears, and clearing an email severs the roster admission derived
+    from it on the person's very next request (CONTROL R12).
+
+    ``department_slugs`` is a DELTA: entries are union-added onto the
+    existing list (BUGHUNT-02 P0-7 — a partial PATCH must not silently
+    drop memberships added by someone else). Removal is explicit via
+    ``department_slugs_remove``; there is no implicit clear. When
+    ``expected_version`` is given it is checked against the row's CAS
+    counter — a stale writer loses deterministically with
+    ``PersonConflictError`` → HTTP 409.
     """
     fields: list[tuple[str, object]] = []
     if full_name is not None:
         fields.append(("full_name", full_name))
     if role is not None:
         fields.append(("role", role))
-    if email is not None:
+    if clear_email:
+        fields.append(("email", None))
+    elif email is not None:
         fields.append(("email", email))
-    if slack_user_id is not None:
+    if clear_slack_user_id:
+        fields.append(("slack_user_id", None))
+    elif slack_user_id is not None:
         fields.append(("slack_user_id", slack_user_id))
-    if telegram_chat_id is not None:
+    if clear_telegram_chat_id:
+        fields.append(("telegram_chat_id", None))
+    elif telegram_chat_id is not None:
         fields.append(("telegram_chat_id", telegram_chat_id))
-    if discord_user_id is not None:
+    if clear_discord_user_id:
+        fields.append(("discord_user_id", None))
+    elif discord_user_id is not None:
         fields.append(("discord_user_id", discord_user_id))
     if preferred_channel is not None:
+        if preferred_channel not in get_args(PreferredChannel):
+            raise ValueError(
+                f"preferred_channel invalid: {preferred_channel!r} "
+                f"(permise: {sorted(get_args(PreferredChannel))})"
+            )
         fields.append(("preferred_channel", preferred_channel))
     if response_sla_hours is not None:
         fields.append(("response_sla_hours", response_sla_hours))
@@ -548,17 +680,70 @@ def update_person(
         fields.append(("on_leave_until", None))
     elif on_leave_until is not None:
         fields.append(("on_leave_until", on_leave_until.isoformat()))
-    if reports_to_person_id is not None:
+    if clear_reports_to:
+        fields.append(("reports_to_person_id", None))
+    elif reports_to_person_id is not None:
         fields.append(("reports_to_person_id", reports_to_person_id))
-    if department_slugs is not None:
-        fields.append(("department_slugs_json", json.dumps(department_slugs)))
-    if not fields:
+    if not fields and authority_scope is None and availability is None \
+            and department_slugs is None and department_slugs_remove is None:
         return get_person(person_id, db_path) is not None
-    fields.append(("updated_at", _now()))
-    set_clause = ", ".join(f"{n} = ?" for n, _ in fields)
-    values = [v for _, v in fields] + [person_id]
     with _get_conn(db_path) as conn:
-        cursor = conn.execute(
-            f"UPDATE people SET {set_clause} WHERE id = ?", values
+        # BEGIN IMMEDIATE: the CAS read, the department-slug merge read and
+        # every write below must be one serializable unit — a concurrent
+        # commit slipping between them would defeat the version check
+        # (CONTROL R12).
+        conn.execute("BEGIN IMMEDIATE")
+        if expected_version is not None:
+            row = conn.execute(
+                "SELECT version FROM people WHERE id = ?", (person_id,)
+            ).fetchone()
+            if row is None:
+                return False
+            current_version = int(row["version"])
+            if expected_version != current_version:
+                raise PersonConflictError(
+                    f"expected_version={expected_version} dar versiunea curentă "
+                    f"este {current_version}"
+                )
+        if department_slugs is not None or department_slugs_remove is not None:
+            row = conn.execute(
+                "SELECT department_slugs_json FROM people WHERE id = ?",
+                (person_id,),
+            ).fetchone()
+            try:
+                current_slugs: list[str] = (
+                    json.loads(row["department_slugs_json"]) if row else []
+                ) or []
+            except (ValueError, TypeError):
+                current_slugs = []
+            merged = list(current_slugs)
+            for slug in department_slugs or []:
+                if slug not in merged:
+                    merged.append(slug)
+            for slug in department_slugs_remove or []:
+                if slug in merged:
+                    merged.remove(slug)
+            fields.append(("department_slugs_json", json.dumps(merged)))
+        if fields:
+            set_clause = ", ".join(f"{n} = ?" for n, _ in fields)
+            values = [v for _, v in fields] + [person_id]
+            cursor = conn.execute(
+                f"UPDATE people SET {set_clause} WHERE id = ?", values
+            )
+            if cursor.rowcount == 0:
+                return False
+        if authority_scope is not None:
+            _replace_authority_scope(conn, person_id, authority_scope)
+        if availability is not None:
+            _replace_availability(conn, person_id, availability)
+        # One bump covers every write in this transaction — a reader's
+        # version can never point at pre-mutation state, and the CAS chain
+        # stays honest for scope/availability-only updates too.
+        bump = conn.execute(
+            "UPDATE people SET version = version + 1, updated_at = ? WHERE id = ?",
+            (_now(), person_id),
         )
-        return cursor.rowcount > 0
+        if bump.rowcount == 0:
+            return False
+        _mark_roster_administered(conn)
+        return True

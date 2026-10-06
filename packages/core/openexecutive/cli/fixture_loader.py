@@ -152,6 +152,7 @@ def list_fixtures() -> list[dict[str, Any]]:
                 "industry": profile.industry,
                 "stage": profile.stage,
                 "arr": profile.annual_revenue_arr,
+                "arr_currency": profile.annual_revenue_arr_currency,
                 "headcount": profile.headcount,
                 "founding_year": profile.founding_year,
                 "mission": profile.mission,
@@ -290,95 +291,108 @@ async def _load_from_dir(
     of where ``fixture_dir`` came from.
     """
     async with _FIXTURE_OP_LOCK:
-        # Inside the lock — a block marker can land between an outside
-        # check and lock acquisition, and the park/unload below would then
-        # operate on the very mixed state the marker describes. Reads the
-        # caller's settings, not a lazy global, so tests/CLI callers with
-        # non-default paths are fenced at their own _client_slots dir.
-        from openexecutive.clients.slots import get_restore_blocked
+        # Turn/switch barrier (RA13-A02-01): this op parks the client and
+        # replaces the live journal — an in-flight turn's evidence would be
+        # stranded. Blocked while any turn is active or uncertain.
+        from openexecutive.bo.turn_barrier import SwitchRefusedError, switch_guard
 
-        if get_restore_blocked(settings) is not None:
-            raise FixtureActiveError(
-                "Instance is restore-blocked: a failed client activation left "
-                "live state inconsistent. Complete the recorded recovery "
-                "(reactivate the recorded client or POST /fixtures/unload) "
-                "before loading a fixture."
-            )
-        # If a client slot is active, the live state belongs to that client —
-        # save it back to its slot and leave client mode before the fixture
-        # replaces everything. Without this, loading a demo would silently
-        # destroy the active client's unsaved work.
         try:
-            from openexecutive.clients.slots import park_active_client
+            _sw_guard = switch_guard("fixture_load")
+            await asyncio.to_thread(_sw_guard.__enter__)
+        except SwitchRefusedError as exc:
+            raise FixtureActiveError(exc.describe()) from exc
+        try:
+            # Inside the lock — a block marker can land between an outside
+            # check and lock acquisition, and the park/unload below would then
+            # operate on the very mixed state the marker describes. Reads the
+            # caller's settings, not a lazy global, so tests/CLI callers with
+            # non-default paths are fenced at their own _client_slots dir.
+            from openexecutive.clients.slots import get_restore_blocked
 
-            park_active_client(settings)
-        except Exception:
-            logger.exception("fixture load: client save-back failed (continuing)")
-
-        # Auto-snapshot user state on first ever fixture load. Use the same
-        # condition as `has_snapshot` so a partial/failed snapshot directory
-        # (mkdir succeeded but profile.yaml never landed) does not permanently
-        # disable auto-snapshot. The sentinel guards the inverse: if a previous
-        # fixture is already active, current state is NOT the user's company.
-        backup_dir = _user_backup_dir(settings)
-        sentinel = _fixture_active_sentinel(settings)
-        auto_snapshot_taken = False
-        if not (backup_dir / "profile.yaml").exists() and not sentinel.exists():
+            if get_restore_blocked(settings) is not None:
+                raise FixtureActiveError(
+                    "Instance is restore-blocked: a failed client activation left "
+                    "live state inconsistent. Complete the recorded recovery "
+                    "(reactivate the recorded client or POST /fixtures/unload) "
+                    "before loading a fixture."
+                )
+            # If a client slot is active, the live state belongs to that client —
+            # save it back to its slot and leave client mode before the fixture
+            # replaces everything. Without this, loading a demo would silently
+            # destroy the active client's unsaved work.
             try:
-                snapshot_user_state(settings)
-                auto_snapshot_taken = True
+                from openexecutive.clients.slots import park_active_client
+
+                park_active_client(settings)
             except Exception:
-                # Best-effort: do not block the fixture load if snapshot fails
-                # on a truly empty environment. User can call snapshot manually.
-                pass
+                logger.exception("fixture load: client save-back failed (continuing)")
 
-        summary = await _apply_state_from_source(fixture_dir, settings)
+            # Auto-snapshot user state on first ever fixture load. Use the same
+            # condition as `has_snapshot` so a partial/failed snapshot directory
+            # (mkdir succeeded but profile.yaml never landed) does not permanently
+            # disable auto-snapshot. The sentinel guards the inverse: if a previous
+            # fixture is already active, current state is NOT the user's company.
+            backup_dir = _user_backup_dir(settings)
+            sentinel = _fixture_active_sentinel(settings)
+            auto_snapshot_taken = False
+            if not (backup_dir / "profile.yaml").exists() and not sentinel.exists():
+                try:
+                    snapshot_user_state(settings)
+                    auto_snapshot_taken = True
+                except Exception:
+                    # Best-effort: do not block the fixture load if snapshot fails
+                    # on a truly empty environment. User can call snapshot manually.
+                    pass
 
-        # Record which fixture is active so the UI can show it and so a
-        # subsequent load() knows not to take a fresh snapshot.
-        sentinel.parent.mkdir(parents=True, exist_ok=True)
-        sentinel.write_text(fixture_name, encoding="utf-8")
+            summary = await _apply_state_from_source(fixture_dir, settings)
 
-        # Honcho workspace isolation: switch to a per-fixture workspace
-        # so demo turns sync to a sacrificial store rather than polluting
-        # the operator's real peer cards. Best-effort — the fixture must
-        # still load if Honcho can't be reached.
-        try:
-            # If a previous fixture's workspace is still active (sequential
-            # load without unload), tear it down first so it doesn't
-            # become an orphan. set_active_workspace_id below overwrites
-            # the state file in place, so no explicit clear is needed.
-            # Client-slot workspaces are durable peer memory, not demo
-            # sacrifices — never tear those down here.
-            from openexecutive.clients.slots import CLIENT_WORKSPACE_PREFIX
-            from openexecutive.memory.honcho_client import (
-                delete_workspace_and_reset_client,
-                get_active_workspace_id,
-                set_active_workspace_id,
-            )
+            # Record which fixture is active so the UI can show it and so a
+            # subsequent load() knows not to take a fresh snapshot.
+            sentinel.parent.mkdir(parents=True, exist_ok=True)
+            sentinel.write_text(fixture_name, encoding="utf-8")
 
-            current_ws = get_active_workspace_id()
-            default_ws = settings.honcho_workspace_id
-            if (
-                current_ws
-                and current_ws != default_ws
-                and not current_ws.startswith(CLIENT_WORKSPACE_PREFIX)
-            ):
-                await delete_workspace_and_reset_client(current_ws)
+            # Honcho workspace isolation: switch to a per-fixture workspace
+            # so demo turns sync to a sacrificial store rather than polluting
+            # the operator's real peer cards. Best-effort — the fixture must
+            # still load if Honcho can't be reached.
+            try:
+                # If a previous fixture's workspace is still active (sequential
+                # load without unload), tear it down first so it doesn't
+                # become an orphan. set_active_workspace_id below overwrites
+                # the state file in place, so no explicit clear is needed.
+                # Client-slot workspaces are durable peer memory, not demo
+                # sacrifices — never tear those down here.
+                from openexecutive.clients.slots import CLIENT_WORKSPACE_PREFIX
+                from openexecutive.memory.honcho_client import (
+                    delete_workspace_and_reset_client,
+                    get_active_workspace_id,
+                    set_active_workspace_id,
+                )
 
-            demo_ws = f"openexec-fixture-{fixture_name}-{uuid.uuid4().hex[:8]}"
-            set_active_workspace_id(demo_ws, fixture_name=fixture_name)
-            summary["honcho_workspace"] = demo_ws
-        except Exception:
-            logger.exception(
-                "load_fixture: honcho workspace switch failed; demo will share "
-                "the operator's default workspace (cleanup may need a manual "
-                "/fixtures/reset)"
-            )
+                current_ws = get_active_workspace_id()
+                default_ws = settings.honcho_workspace_id
+                if (
+                    current_ws
+                    and current_ws != default_ws
+                    and not current_ws.startswith(CLIENT_WORKSPACE_PREFIX)
+                ):
+                    await delete_workspace_and_reset_client(current_ws)
 
-        summary["fixture"] = fixture_name
-        summary["auto_snapshot_taken"] = auto_snapshot_taken
-        return summary
+                demo_ws = f"openexec-fixture-{fixture_name}-{uuid.uuid4().hex[:8]}"
+                set_active_workspace_id(demo_ws, fixture_name=fixture_name)
+                summary["honcho_workspace"] = demo_ws
+            except Exception:
+                logger.exception(
+                    "load_fixture: honcho workspace switch failed; demo will share "
+                    "the operator's default workspace (cleanup may need a manual "
+                    "/fixtures/reset)"
+                )
+
+            summary["fixture"] = fixture_name
+            summary["auto_snapshot_taken"] = auto_snapshot_taken
+            return summary
+        finally:
+            await asyncio.to_thread(_sw_guard.__exit__, None, None, None)
 
 
 async def load_fixture_any(fixture_name: str, settings: Any) -> dict[str, Any]:
@@ -501,13 +515,16 @@ async def _apply_state_from_source(
     store = ChromaDBStore(persist_directory=settings.vector_store_path)
     store.delete_company_docs()
     # Recent-research artifacts are per-company; never let a new company
-    # inherit the prior company's research.
+    # inherit the prior company's research. strict=True: a failed delete must
+    # abort the load — silently surviving rows are one company's data served
+    # under another's identity.
     store.delete_documents(
         collection=ChromaDBStore.RESEARCH_COLLECTION,
         where={"type": "recent_research"},
+        strict=True,
     )
-    store.delete_notion_docs()
-    store.delete_attachment_docs()
+    store.delete_notion_docs(strict=True)
+    store.delete_attachment_docs(strict=True)
     # Company-authored skills share the same per-company rule: the source
     # dir's skills/ is authoritative for files, and its indexed rows must
     # not survive a swap (a failed client's skills otherwise stay
@@ -523,6 +540,7 @@ async def _apply_state_from_source(
     store.delete_documents(
         collection=SKILLS_COLLECTION,
         where={"source": "company"},
+        strict=True,
     )
     for skill in list_skills():
         if skill.source == "company":
@@ -634,99 +652,112 @@ async def unload_fixture(settings: Any) -> dict[str, Any]:
     is no original state to restore to.
     """
     async with _FIXTURE_OP_LOCK:
-        backup = _user_backup_dir(settings)
-        if not (backup / "profile.yaml").exists():
-            raise FixtureNotFoundError(
-                "No snapshot exists yet. Load a fixture first (auto-snapshots), "
-                "or click 'Snapshot current as my company' to capture state."
-            )
+        # Turn/switch barrier (RA13-A02-01): unload restores the user backup,
+        # replacing the live journal — an in-flight turn's evidence would be
+        # stranded. Blocked while any turn is active or uncertain.
+        from openexecutive.bo.turn_barrier import SwitchRefusedError, switch_guard
 
-        # Unload is also the "exit client mode" path: if a client slot is
-        # active (no fixture in play), save its live state back to the slot
-        # before the backup restore replaces it.
         try:
-            from openexecutive.clients.slots import park_active_client
-
-            summary_client = park_active_client(settings)
-        except Exception:
-            logger.exception("unload: client save-back failed (continuing)")
-            summary_client = None
-
-        # Under a restore block the live DB/company dir may still hold the
-        # failed client's residue — the backup format never carried it, so
-        # discard first (same wipe the slots recovery uses).
-        from openexecutive.clients.slots import get_restore_blocked
-
-        was_blocked = get_restore_blocked(settings) is not None
-        if was_blocked:
-            _discard_state_not_in_backup()
-
-        summary = await _apply_state_from_source(
-            backup, settings, strict_per_company=was_blocked
-        )
-        if summary_client is not None:
-            summary["client_saved"] = summary_client
-
-        # A restore-blocked instance recovers here: the backup replace just
-        # made live state coherent again, so the block marker goes away.
-        # (park_active_client above was a silent no-op under the block —
-        # get_active_client returns None — so the partial live state was
-        # discarded, not saved.) An .active_client sentinel can still exist
-        # physically under a block (a rotation's _force_restore writes one,
-        # or a cancelled recovery's inner task finishes late). Live state is
-        # the user's backup now — the sentinel goes FIRST and the marker
-        # LAST, so a crash between them leaves the safer state (still
-        # blocked beats unblocked-with-stale-client-identity).
-        if was_blocked:
-            from openexecutive.clients.slots import (
-                _active_client_sentinel,
-                _clear_restore_blocked,
-            )
-
-            _active_client_sentinel(settings).unlink(missing_ok=True)
-            _clear_restore_blocked(settings)
-
-        # Clear the active-fixture sentinel — current state is the user's own.
-        sentinel = _fixture_active_sentinel(settings)
-        sentinel.unlink(missing_ok=True)
-
-        # Honcho cleanup: delete the per-fixture workspace and clear the
-        # override so the operator's env-default workspace takes over
-        # again. Best-effort — the local restore must succeed regardless.
+            _sw_guard = switch_guard("fixture_unload")
+            await asyncio.to_thread(_sw_guard.__enter__)
+        except SwitchRefusedError as exc:
+            raise FixtureActiveError(exc.describe()) from exc
         try:
-            from openexecutive.clients.slots import CLIENT_WORKSPACE_PREFIX
-            from openexecutive.memory.honcho_client import (
-                clear_active_workspace_id,
-                delete_workspace_and_reset_client,
-                get_active_workspace_id,
-            )
+            backup = _user_backup_dir(settings)
+            if not (backup / "profile.yaml").exists():
+                raise FixtureNotFoundError(
+                    "No snapshot exists yet. Load a fixture first (auto-snapshots), "
+                    "or click 'Snapshot current as my company' to capture state."
+                )
 
-            demo_ws = get_active_workspace_id()
-            default_ws = settings.honcho_workspace_id
-            # Clear the override BEFORE attempting the delete. If the
-            # delete fails (network, ConflictError), an override file
-            # still pointing at a half-deleted workspace would make the
-            # next ``_get_client()`` build against a dead workspace and
-            # emit a NotFoundError on every Honcho call until restart.
-            clear_active_workspace_id()
-            if (
-                demo_ws
-                and demo_ws != default_ws
-                # Client-slot workspaces are durable peer memory — exiting
-                # client mode parks them, never deletes them.
-                and not demo_ws.startswith(CLIENT_WORKSPACE_PREFIX)
-            ):
-                await delete_workspace_and_reset_client(demo_ws)
-                summary["honcho_workspace_deleted"] = demo_ws
-        except Exception:
-            logger.exception(
-                "unload_fixture: honcho workspace cleanup failed; the "
-                "operator's env-default workspace is back in use, but a "
-                "demo workspace may remain in Honcho"
-            )
+            # Unload is also the "exit client mode" path: if a client slot is
+            # active (no fixture in play), save its live state back to the slot
+            # before the backup restore replaces it.
+            try:
+                from openexecutive.clients.slots import park_active_client
 
-        summary["restored_from_backup"] = True
-        return summary
+                summary_client = park_active_client(settings)
+            except Exception:
+                logger.exception("unload: client save-back failed (continuing)")
+                summary_client = None
+
+            # Under a restore block the live DB/company dir may still hold the
+            # failed client's residue — the backup format never carried it, so
+            # discard first (same wipe the slots recovery uses).
+            from openexecutive.clients.slots import get_restore_blocked
+
+            was_blocked = get_restore_blocked(settings) is not None
+            if was_blocked:
+                _discard_state_not_in_backup()
+
+            summary = await _apply_state_from_source(
+                backup, settings, strict_per_company=was_blocked
+            )
+            if summary_client is not None:
+                summary["client_saved"] = summary_client
+
+            # A restore-blocked instance recovers here: the backup replace just
+            # made live state coherent again, so the block marker goes away.
+            # (park_active_client above was a silent no-op under the block —
+            # get_active_client returns None — so the partial live state was
+            # discarded, not saved.) An .active_client sentinel can still exist
+            # physically under a block (a rotation's _force_restore writes one,
+            # or a cancelled recovery's inner task finishes late). Live state is
+            # the user's backup now — the sentinel goes FIRST and the marker
+            # LAST, so a crash between them leaves the safer state (still
+            # blocked beats unblocked-with-stale-client-identity).
+            if was_blocked:
+                from openexecutive.clients.slots import (
+                    _active_client_sentinel,
+                    _clear_restore_blocked,
+                )
+
+                _active_client_sentinel(settings).unlink(missing_ok=True)
+                _clear_restore_blocked(settings)
+
+            # Clear the active-fixture sentinel — current state is the user's own.
+            sentinel = _fixture_active_sentinel(settings)
+            sentinel.unlink(missing_ok=True)
+
+            # Honcho cleanup: delete the per-fixture workspace and clear the
+            # override so the operator's env-default workspace takes over
+            # again. Best-effort — the local restore must succeed regardless.
+            try:
+                from openexecutive.clients.slots import CLIENT_WORKSPACE_PREFIX
+                from openexecutive.memory.honcho_client import (
+                    clear_active_workspace_id,
+                    delete_workspace_and_reset_client,
+                    get_active_workspace_id,
+                )
+
+                demo_ws = get_active_workspace_id()
+                default_ws = settings.honcho_workspace_id
+                # Clear the override BEFORE attempting the delete. If the
+                # delete fails (network, ConflictError), an override file
+                # still pointing at a half-deleted workspace would make the
+                # next ``_get_client()`` build against a dead workspace and
+                # emit a NotFoundError on every Honcho call until restart.
+                clear_active_workspace_id()
+                if (
+                    demo_ws
+                    and demo_ws != default_ws
+                    # Client-slot workspaces are durable peer memory — exiting
+                    # client mode parks them, never deletes them.
+                    and not demo_ws.startswith(CLIENT_WORKSPACE_PREFIX)
+                ):
+                    await delete_workspace_and_reset_client(demo_ws)
+                    summary["honcho_workspace_deleted"] = demo_ws
+            except Exception:
+                logger.exception(
+                    "unload_fixture: honcho workspace cleanup failed; the "
+                    "operator's env-default workspace is back in use, but a "
+                    "demo workspace may remain in Honcho"
+                )
+
+            summary["restored_from_backup"] = True
+            return summary
+        finally:
+            await asyncio.to_thread(_sw_guard.__exit__, None, None, None)
 
 
 def _reregister_surviving_user_knowledge(db_path: Path) -> int:
@@ -803,299 +834,316 @@ async def reset_all_state(
     from openexecutive.memory.company_profile import CompanyProfile
 
     async with _FIXTURE_OP_LOCK:
-        # Under a restore block a reset would delete _user_backup (the
-        # recorded recovery target for kind=user_backup) and wipe the mixed
-        # live state the marker is still describing — unrecoverable brick.
-        from openexecutive.clients.slots import get_restore_blocked
+        # Turn/switch barrier (RA13-A02-01): reset wipes the live journal —
+        # an in-flight turn's evidence would be destroyed mid-effect. The
+        # factory-reset rules are preserved: it is refused (with reason +
+        # turn ids) while turns are active/uncertain, never a silent bypass.
+        from openexecutive.bo.turn_barrier import SwitchRefusedError, switch_guard
 
-        if get_restore_blocked(settings) is not None:
-            raise FixtureActiveError(
-                "Instance is restore-blocked — complete the recorded "
-                "recovery (reactivate the recorded client or unload) "
-                "before resetting."
+        try:
+            _sw_guard = switch_guard("factory_reset")
+            await asyncio.to_thread(_sw_guard.__enter__)
+        except SwitchRefusedError as exc:
+            raise FixtureActiveError(exc.describe()) from exc
+        try:
+            # Under a restore block a reset would delete _user_backup (the
+            # recorded recovery target for kind=user_backup) and wipe the mixed
+            # live state the marker is still describing — unrecoverable brick.
+            from openexecutive.clients.slots import get_restore_blocked
+
+            if get_restore_blocked(settings) is not None:
+                raise FixtureActiveError(
+                    "Instance is restore-blocked — complete the recorded "
+                    "recovery (reactivate the recorded client or unload) "
+                    "before resetting."
+                )
+            # 1. Live profile → empty
+            CompanyProfile().save_to_yaml(settings.company_profile_path)
+
+            # 2. Live docs + ChromaDB
+            company_docs_dir: Path = settings.company_profile_path.parent / "docs"
+            if company_docs_dir.exists():
+                shutil.rmtree(company_docs_dir)
+            company_docs_dir.mkdir(parents=True, exist_ok=True)
+
+            store = ChromaDBStore(persist_directory=settings.vector_store_path)
+            store.delete_company_docs()
+            store.delete_documents(
+                collection=ChromaDBStore.RESEARCH_COLLECTION,
+                where={"type": "recent_research"},
+                strict=True,
             )
-        # 1. Live profile → empty
-        CompanyProfile().save_to_yaml(settings.company_profile_path)
+            store.delete_notion_docs(strict=True)
+            store.delete_attachment_docs(strict=True)
+            from openexecutive.knowledge.notion_sync import reset_local_state
 
-        # 2. Live docs + ChromaDB
-        company_docs_dir: Path = settings.company_profile_path.parent / "docs"
-        if company_docs_dir.exists():
-            shutil.rmtree(company_docs_dir)
-        company_docs_dir.mkdir(parents=True, exist_ok=True)
+            reset_local_state(profile_path=settings.company_profile_path)
 
-        store = ChromaDBStore(persist_directory=settings.vector_store_path)
-        store.delete_company_docs()
-        store.delete_documents(
-            collection=ChromaDBStore.RESEARCH_COLLECTION,
-            where={"type": "recent_research"},
-        )
-        store.delete_notion_docs()
-        store.delete_attachment_docs()
-        from openexecutive.knowledge.notion_sync import reset_local_state
+            # 2b. Company-authored skills — delete the filesystem directory and
+            # the company-source rows from the shared `skills` ChromaDB
+            # collection. Built-in skills (source='builtin') are preserved so
+            # the box still has its default skill library after a reset.
+            from openexecutive.knowledge.skills_index import SKILLS_COLLECTION
+            company_skills_dir: Path = settings.company_profile_path.parent / "skills"
+            if company_skills_dir.exists():
+                shutil.rmtree(company_skills_dir)
+            store.delete_documents(
+                collection=SKILLS_COLLECTION,
+                where={"source": "company"},
+                strict=True,
+            )
 
-        reset_local_state(profile_path=settings.company_profile_path)
+            # 3. Episodic rows — includes chat history, voice personas, alerts
+            # state (alerts, mutes, preferences), AND the run/audit
+            # history (workflow_runs, audit_log, eval_runs) so a reset truly
+            # returns the box to factory state. Without the run/audit wipe the
+            # /jobs Runs tab and /audit view kept showing the previous fixture's
+            # executions and made reset look broken.
+            # Order matters under PRAGMA foreign_keys=ON: children before parents
+            # (chat_messages → sessions; external_signals → watchlist). The three
+            # run/audit tables have no
+            # FK relationships into the others, so their position is safe; the
+            # external-monitoring tables (watchlist + external_signals) also live
+            # in this DB and must be wiped so a reset starts with a clean
+            # watchlist instead of the previous company's monitors.
+            from openexecutive.memory.episodic import DB_PATH as EPISODIC_DB_PATH
+            from openexecutive.monitoring import store as monitoring_store
 
-        # 2b. Company-authored skills — delete the filesystem directory and
-        # the company-source rows from the shared `skills` ChromaDB
-        # collection. Built-in skills (source='builtin') are preserved so
-        # the box still has its default skill library after a reset.
-        from openexecutive.knowledge.skills_index import SKILLS_COLLECTION
-        company_skills_dir: Path = settings.company_profile_path.parent / "skills"
-        if company_skills_dir.exists():
-            shutil.rmtree(company_skills_dir)
-        store.delete_documents(
-            collection=SKILLS_COLLECTION,
-            where={"source": "company"},
-        )
+            # Ensure the monitoring schema exists before the DELETE pass — in
+            # production the lifespan inits it, but reset is also called directly
+            # (tests, scripts) against a DB that only has the episodic schema, and
+            # a missing table would raise mid-wipe. Idempotent. Guarded on the DB
+            # already existing so we never *materialise* a DB the caller never
+            # created — that would defeat _delete_all_rows' own exists() short
+            # circuit (and there's nothing to wipe in a DB that isn't there).
+            if EPISODIC_DB_PATH.exists():
+                monitoring_store.initialize_db(EPISODIC_DB_PATH)
+            # Same reasoning for the derived caches in PER_CLIENT_CACHE_TABLES,
+            # which this DELETE pass also covers; the helper is guarded on the
+            # DB existing, exactly like the monitoring init above.
+            _initialize_derived_cache_schemas(EPISODIC_DB_PATH)
+            episodic_cleared = _delete_all_rows(
+                EPISODIC_DB_PATH,
+                (
+                    "chat_messages",
+                    "sessions",
+                    "decisions",
+                    "initiatives",
+                    "advice_given",
+                    "scheduled_actions",
+                    "voice_personas",
+                    "alerts",
+                    "mute_topics",
+                    "user_preferences",
+                    "workflow_runs",
+                    "audit_log",
+                    "audit_dedup",
+                    "eval_runs",
+                    "external_signals",
+                    "watchlist",
+                    *PER_CLIENT_CACHE_TABLES,
+                ),
+            )
 
-        # 3. Episodic rows — includes chat history, voice personas, alerts
-        # state (alerts, mutes, preferences), AND the run/audit
-        # history (workflow_runs, audit_log, eval_runs) so a reset truly
-        # returns the box to factory state. Without the run/audit wipe the
-        # /jobs Runs tab and /audit view kept showing the previous fixture's
-        # executions and made reset look broken.
-        # Order matters under PRAGMA foreign_keys=ON: children before parents
-        # (chat_messages → sessions; external_signals → watchlist). The three
-        # run/audit tables have no
-        # FK relationships into the others, so their position is safe; the
-        # external-monitoring tables (watchlist + external_signals) also live
-        # in this DB and must be wiped so a reset starts with a clean
-        # watchlist instead of the previous company's monitors.
-        from openexecutive.memory.episodic import DB_PATH as EPISODIC_DB_PATH
-        from openexecutive.monitoring import store as monitoring_store
+            # 3c. Knowledge review state (same DB as the episodic rows above). A
+            # "factory reset" that keeps the previous operator's approvals,
+            # rejections and SME annotations is not a factory reset — and a
+            # rejection still suppresses retrieval, so a stale one would silently
+            # withhold knowledge on the new box. Wipe both tables (child first for
+            # FK ordering), then re-register the shipped docs so the reset state is
+            # trusted defaults rather than an empty table.
+            # Resolve the review DB through ``memory.episodic.DB_PATH`` like every
+            # other consumer (``api/routes/review._store``,
+            # ``retriever._default_review_store``). ``review_store.DB_PATH`` is
+            # bound at import, so using it here could wipe a different file than
+            # the one the app reads under a runtime override.
+            from openexecutive.knowledge.review_store import ReviewStore
+            from openexecutive.memory.episodic import DB_PATH as _REVIEW_DB_PATH
 
-        # Ensure the monitoring schema exists before the DELETE pass — in
-        # production the lifespan inits it, but reset is also called directly
-        # (tests, scripts) against a DB that only has the episodic schema, and
-        # a missing table would raise mid-wipe. Idempotent. Guarded on the DB
-        # already existing so we never *materialise* a DB the caller never
-        # created — that would defeat _delete_all_rows' own exists() short
-        # circuit (and there's nothing to wipe in a DB that isn't there).
-        if EPISODIC_DB_PATH.exists():
-            monitoring_store.initialize_db(EPISODIC_DB_PATH)
-        # Same reasoning for the derived caches in PER_CLIENT_CACHE_TABLES,
-        # which this DELETE pass also covers; the helper is guarded on the
-        # DB existing, exactly like the monitoring init above.
-        _initialize_derived_cache_schemas(EPISODIC_DB_PATH)
-        episodic_cleared = _delete_all_rows(
-            EPISODIC_DB_PATH,
-            (
-                "chat_messages",
-                "sessions",
-                "decisions",
-                "initiatives",
-                "advice_given",
-                "scheduled_actions",
-                "voice_personas",
-                "alerts",
-                "mute_topics",
-                "user_preferences",
-                "workflow_runs",
-                "audit_log",
-                "eval_runs",
-                "external_signals",
-                "watchlist",
-                *PER_CLIENT_CACHE_TABLES,
-            ),
-        )
+            # Guarded like the episodic wipe above: never materialise a DB the
+            # caller never created. ``sqlite3.connect`` creates the file, so an
+            # unguarded initialize_db + sync would leave ~81 rows in a stray DB.
+            if _REVIEW_DB_PATH.exists():
+                # ``_delete_all_rows`` guards a missing FILE but not a missing
+                # TABLE, and nothing guarantees the review schema exists here (a
+                # slot restored before these tables shipped, or a test DB built
+                # table-by-table). ``initialize_db`` is idempotent.
+                ReviewStore.initialize_db(_REVIEW_DB_PATH)
+                _delete_all_rows(
+                    _REVIEW_DB_PATH,
+                    ("review_annotations", "review_items"),
+                )
+                try:
+                    ReviewStore.sync_builtin_registrations(_REVIEW_DB_PATH)
+                except Exception:
+                    logger.exception("reset: sync_builtin_registrations failed")
+                # External (OER) sources too, or they carry no review rows until
+                # the next process restart re-syncs them in the lifespan. Same
+                # selector as api/main.py: only sources ingested onto this disk.
+                try:
+                    from openexecutive.knowledge.external_sources import load_manifest
+                    ingested = [
+                        {"id": src.id, "domains": src.domains}
+                        for src in load_manifest()
+                        if src.cache_dir.exists() and any(src.cache_dir.iterdir())
+                    ]
+                    if ingested:
+                        ReviewStore.sync_external_registrations(ingested, _REVIEW_DB_PATH)
+                except Exception:
+                    logger.exception("reset: sync_external_registrations failed")
 
-        # 3c. Knowledge review state (same DB as the episodic rows above). A
-        # "factory reset" that keeps the previous operator's approvals,
-        # rejections and SME annotations is not a factory reset — and a
-        # rejection still suppresses retrieval, so a stale one would silently
-        # withhold knowledge on the new box. Wipe both tables (child first for
-        # FK ordering), then re-register the shipped docs so the reset state is
-        # trusted defaults rather than an empty table.
-        # Resolve the review DB through ``memory.episodic.DB_PATH`` like every
-        # other consumer (``api/routes/review._store``,
-        # ``retriever._default_review_store``). ``review_store.DB_PATH`` is
-        # bound at import, so using it here could wipe a different file than
-        # the one the app reads under a runtime override.
-        from openexecutive.knowledge.review_store import ReviewStore
-        from openexecutive.memory.episodic import DB_PATH as _REVIEW_DB_PATH
+                # The wipe above deleted every review decision, but this reset does
+                # NOT delete user-authored knowledge files or their Chroma chunks —
+                # they live inside the installed package and survive. Left alone,
+                # a document an SME had REJECTED would come back retrievable with
+                # no review row at all: un-suppressed, and invisible in the queue.
+                #
+                # So re-register everything in the tree that the manifest does not
+                # claim, as `pending` — withheld from retrieval AND visible for a
+                # fresh decision. Deliberately conservative: a previously-approved
+                # upload comes back needing review, which is the safe direction.
+                # Deleting the files instead would make a reset silently destroy
+                # the operator's own work.
+                try:
+                    _reregister_surviving_user_knowledge(_REVIEW_DB_PATH)
+                except Exception:
+                    logger.exception("reset: re-registering user knowledge failed")
 
-        # Guarded like the episodic wipe above: never materialise a DB the
-        # caller never created. ``sqlite3.connect`` creates the file, so an
-        # unguarded initialize_db + sync would leave ~81 rows in a stray DB.
-        if _REVIEW_DB_PATH.exists():
-            # ``_delete_all_rows`` guards a missing FILE but not a missing
-            # TABLE, and nothing guarantees the review schema exists here (a
-            # slot restored before these tables shipped, or a test DB built
-            # table-by-table). ``initialize_db`` is idempotent.
-            ReviewStore.initialize_db(_REVIEW_DB_PATH)
+            # 4. People (child tables first to satisfy FK ordering)
+            from openexecutive.people import store as people_store
+            people_cleared = _delete_all_rows(
+                people_store.DB_PATH,
+                ("person_authority_scope", "person_availability", "people"),
+            )
+
+            # 5. Departments + Goals, then re-seed defaults. ``departments_meta``
+            # carries the "default-departments-already-seeded" sentinel; without
+            # wiping it here, ``seed_default_departments`` short-circuits to a
+            # no-op on any reset after the first ever (the sentinel is set at
+            # API boot via ``api/main.py``), and the box ends up with zero
+            # departments — which then nukes the cadence bootstrap downstream.
+            from openexecutive.departments import store as dept_store
             _delete_all_rows(
-                _REVIEW_DB_PATH,
-                ("review_annotations", "review_items"),
+                dept_store.DB_PATH,
+                ("department_goals", "departments", "departments_meta"),
             )
-            try:
-                ReviewStore.sync_builtin_registrations(_REVIEW_DB_PATH)
-            except Exception:
-                logger.exception("reset: sync_builtin_registrations failed")
-            # External (OER) sources too, or they carry no review rows until
-            # the next process restart re-syncs them in the lifespan. Same
-            # selector as api/main.py: only sources ingested onto this disk.
-            try:
-                from openexecutive.knowledge.external_sources import load_manifest
-                ingested = [
-                    {"id": src.id, "domains": src.domains}
-                    for src in load_manifest()
-                    if src.cache_dir.exists() and any(src.cache_dir.iterdir())
-                ]
-                if ingested:
-                    ReviewStore.sync_external_registrations(ingested, _REVIEW_DB_PATH)
-            except Exception:
-                logger.exception("reset: sync_external_registrations failed")
+            departments_seeded = dept_store.seed_default_departments()
 
-            # The wipe above deleted every review decision, but this reset does
-            # NOT delete user-authored knowledge files or their Chroma chunks —
-            # they live inside the installed package and survive. Left alone,
-            # a document an SME had REJECTED would come back retrievable with
-            # no review row at all: un-suppressed, and invisible in the queue.
+            # 5a. Re-bootstrap the built-in scheduled actions that
+            # ``api/main.py`` enqueues at process startup. The episodic wipe
+            # above just deleted them, but the bootstrap functions only run on
+            # API boot — without re-calling them here, the box stays "blank
+            # slate" until the next deploy/restart. That's what makes Today
+            # look stuck for the principal: no morning brief, no EoD digest,
+            # no reflection, and no department check-ins.
             #
-            # So re-register everything in the tree that the manifest does not
-            # claim, as `pending` — withheld from retrieval AND visible for a
-            # fresh decision. Deliberately conservative: a previously-approved
-            # upload comes back needing review, which is the safe direction.
-            # Deleting the files instead would make a reset silently destroy
-            # the operator's own work.
+            # All three calls are idempotent (each checks for a pending/running
+            # row before inserting), so calling them again on a freshly-empty
+            # table simply enqueues one row apiece.
+            from openexecutive.config import get_settings
+            from openexecutive.departments.cadence import bootstrap_cadences
+            from openexecutive.scheduler.runner import seed_principal_briefs
+
             try:
-                _reregister_surviving_user_knowledge(_REVIEW_DB_PATH)
+                seed_principal_briefs()
             except Exception:
-                logger.exception("reset: re-registering user knowledge failed")
-
-        # 4. People (child tables first to satisfy FK ordering)
-        from openexecutive.people import store as people_store
-        people_cleared = _delete_all_rows(
-            people_store.DB_PATH,
-            ("person_authority_scope", "person_availability", "people"),
-        )
-
-        # 5. Departments + Goals, then re-seed defaults. ``departments_meta``
-        # carries the "default-departments-already-seeded" sentinel; without
-        # wiping it here, ``seed_default_departments`` short-circuits to a
-        # no-op on any reset after the first ever (the sentinel is set at
-        # API boot via ``api/main.py``), and the box ends up with zero
-        # departments — which then nukes the cadence bootstrap downstream.
-        from openexecutive.departments import store as dept_store
-        _delete_all_rows(
-            dept_store.DB_PATH,
-            ("department_goals", "departments", "departments_meta"),
-        )
-        departments_seeded = dept_store.seed_default_departments()
-
-        # 5a. Re-bootstrap the built-in scheduled actions that
-        # ``api/main.py`` enqueues at process startup. The episodic wipe
-        # above just deleted them, but the bootstrap functions only run on
-        # API boot — without re-calling them here, the box stays "blank
-        # slate" until the next deploy/restart. That's what makes Today
-        # look stuck for the principal: no morning brief, no EoD digest,
-        # no reflection, and no department check-ins.
-        #
-        # All three calls are idempotent (each checks for a pending/running
-        # row before inserting), so calling them again on a freshly-empty
-        # table simply enqueues one row apiece.
-        from openexecutive.config import get_settings
-        from openexecutive.departments.cadence import bootstrap_cadences
-        from openexecutive.scheduler.runner import seed_principal_briefs
-
-        try:
-            seed_principal_briefs()
-        except Exception:
-            logger.exception("reset: seed_principal_briefs failed")
-        try:
-            bootstrap_cadences()
-        except Exception:
-            logger.exception("reset: bootstrap_cadences failed")
-        if get_settings().nudge_scan_enabled:
+                logger.exception("reset: seed_principal_briefs failed")
             try:
-                from openexecutive.scheduler.nudge_engine import bootstrap_nudge_scan
-                bootstrap_nudge_scan()
+                bootstrap_cadences()
             except Exception:
-                logger.exception("reset: bootstrap_nudge_scan failed")
-        if get_settings().external_monitor_enabled:
+                logger.exception("reset: bootstrap_cadences failed")
+            if get_settings().nudge_scan_enabled:
+                try:
+                    from openexecutive.scheduler.nudge_engine import bootstrap_nudge_scan
+                    bootstrap_nudge_scan()
+                except Exception:
+                    logger.exception("reset: bootstrap_nudge_scan failed")
+            if get_settings().external_monitor_enabled:
+                try:
+                    from openexecutive.monitoring.pipeline import (
+                        bootstrap_external_monitor_scan,
+                    )
+                    bootstrap_external_monitor_scan()
+                except Exception:
+                    logger.exception("reset: bootstrap_external_monitor_scan failed")
+            if get_settings().watchlist_research_enabled:
+                try:
+                    from openexecutive.monitoring.research.scheduler import (
+                        bootstrap_watchlist_research_scan,
+                    )
+                    bootstrap_watchlist_research_scan()
+                except Exception:
+                    logger.exception(
+                        "reset: bootstrap_watchlist_research_scan failed"
+                    )
+
+            # 5b. External per-person memory (Honcho) — best-effort. The
+            # wrapper swallows its own errors and audits them; the second
+            # try/except here catches anything outside that (e.g. ImportError
+            # from a missing honcho-ai package on a non-Honcho build) so a
+            # Honcho problem can never block the local reset from finishing.
+            #
+            # Reset means reset everywhere: delete the active workspace, and
+            # if a per-fixture override is active, ALSO delete the env-default
+            # workspace so the operator's real Honcho data is wiped too.
             try:
-                from openexecutive.monitoring.pipeline import (
-                    bootstrap_external_monitor_scan,
+                from openexecutive.clients.slots import CLIENT_WORKSPACE_PREFIX
+                from openexecutive.memory.honcho_client import (
+                    clear_active_workspace_id,
+                    delete_workspace_and_reset_client,
+                    get_active_workspace_id,
                 )
-                bootstrap_external_monitor_scan()
-            except Exception:
-                logger.exception("reset: bootstrap_external_monitor_scan failed")
-        if get_settings().watchlist_research_enabled:
-            try:
-                from openexecutive.monitoring.research.scheduler import (
-                    bootstrap_watchlist_research_scan,
-                )
-                bootstrap_watchlist_research_scan()
+
+                active_ws = get_active_workspace_id()
+                default_ws = settings.honcho_workspace_id
+                # Client-slot workspaces are durable peer memory tied to slot
+                # dirs, which reset preserves — skip deleting those.
+                if not active_ws.startswith(CLIENT_WORKSPACE_PREFIX):
+                    await delete_workspace_and_reset_client(active_ws)
+                # Clear the override BEFORE the second delete. The first
+                # call dropped the client cache; without clearing the file
+                # here, the next ``_get_client()`` would rebuild against the
+                # just-deleted demo workspace and the ``default_ws`` delete
+                # would emit a NotFoundError instead of doing real work.
+                clear_active_workspace_id()
+                if active_ws != default_ws:
+                    await delete_workspace_and_reset_client(default_ws)
             except Exception:
                 logger.exception(
-                    "reset: bootstrap_watchlist_research_scan failed"
+                    "reset: honcho workspace delete failed; local reset continuing"
                 )
 
-        # 5b. External per-person memory (Honcho) — best-effort. The
-        # wrapper swallows its own errors and audits them; the second
-        # try/except here catches anything outside that (e.g. ImportError
-        # from a missing honcho-ai package on a non-Honcho build) so a
-        # Honcho problem can never block the local reset from finishing.
-        #
-        # Reset means reset everywhere: delete the active workspace, and
-        # if a per-fixture override is active, ALSO delete the env-default
-        # workspace so the operator's real Honcho data is wiped too.
-        try:
-            from openexecutive.clients.slots import CLIENT_WORKSPACE_PREFIX
-            from openexecutive.memory.honcho_client import (
-                clear_active_workspace_id,
-                delete_workspace_and_reset_client,
-                get_active_workspace_id,
-            )
+            # 6. Snapshot directory (sentinel lives inside it)
+            backup_dir = _user_backup_dir(settings)
+            if backup_dir.exists():
+                shutil.rmtree(backup_dir, ignore_errors=True)
 
-            active_ws = get_active_workspace_id()
-            default_ws = settings.honcho_workspace_id
-            # Client-slot workspaces are durable peer memory tied to slot
-            # dirs, which reset preserves — skip deleting those.
-            if not active_ws.startswith(CLIENT_WORKSPACE_PREFIX):
-                await delete_workspace_and_reset_client(active_ws)
-            # Clear the override BEFORE the second delete. The first
-            # call dropped the client cache; without clearing the file
-            # here, the next ``_get_client()`` would rebuild against the
-            # just-deleted demo workspace and the ``default_ws`` delete
-            # would emit a NotFoundError instead of doing real work.
-            clear_active_workspace_id()
-            if active_ws != default_ws:
-                await delete_workspace_and_reset_client(default_ws)
-        except Exception:
-            logger.exception(
-                "reset: honcho workspace delete failed; local reset continuing"
-            )
+            # 6a. Exit client mode, but preserve the slot dirs — they are explicit,
+            # named save files; deleting a client is its own deliberate action
+            # (DELETE /clients/{slug}), not a side effect of reset.
+            try:
+                from openexecutive.clients.slots import _active_client_sentinel
 
-        # 6. Snapshot directory (sentinel lives inside it)
-        backup_dir = _user_backup_dir(settings)
-        if backup_dir.exists():
-            shutil.rmtree(backup_dir, ignore_errors=True)
+                _active_client_sentinel(settings).unlink(missing_ok=True)
+            except Exception:
+                logger.exception("reset: clearing active-client sentinel failed")
 
-        # 6a. Exit client mode, but preserve the slot dirs — they are explicit,
-        # named save files; deleting a client is its own deliberate action
-        # (DELETE /clients/{slug}), not a side effect of reset.
-        try:
-            from openexecutive.clients.slots import _active_client_sentinel
+            # 7. Swap the shared store inside the lock to close the race where a
+            # concurrent reader could otherwise see the deleted/recreated
+            # collection through the previous store instance.
+            if app_state is not None and hasattr(app_state, "store"):
+                app_state.store = ChromaDBStore(
+                    persist_directory=settings.vector_store_path
+                )
 
-            _active_client_sentinel(settings).unlink(missing_ok=True)
-        except Exception:
-            logger.exception("reset: clearing active-client sentinel failed")
-
-        # 7. Swap the shared store inside the lock to close the race where a
-        # concurrent reader could otherwise see the deleted/recreated
-        # collection through the previous store instance.
-        if app_state is not None and hasattr(app_state, "store"):
-            app_state.store = ChromaDBStore(
-                persist_directory=settings.vector_store_path
-            )
-
-        return {
-            "reset": True,
-            "departments_seeded": departments_seeded,
-            "episodic_cleared": episodic_cleared,
-            "people_cleared": people_cleared,
-        }
+            return {
+                "reset": True,
+                "departments_seeded": departments_seeded,
+                "episodic_cleared": episodic_cleared,
+                "people_cleared": people_cleared,
+            }
+        finally:
+            await asyncio.to_thread(_sw_guard.__exit__, None, None, None)
 
 
 def _delete_all_rows(
@@ -1645,26 +1693,26 @@ def _seed_people(people_path: Path) -> int:
         AvailabilityWindow,
     )
 
-    # Wipe existing rows — fixture loading is destructive by design.
-    db_path = people_store.DB_PATH
-    if db_path.exists():
-        conn = sqlite3.connect(str(db_path))
-        try:
-            # Child tables first to satisfy foreign-key ordering when PRAGMA
-            # foreign_keys=ON. department_slugs are stored as a JSON column on
-            # `people` itself (no separate junction table).
-            conn.execute("DELETE FROM person_authority_scope")
-            conn.execute("DELETE FROM person_availability")
-            conn.execute("DELETE FROM people")
-            conn.commit()
-        finally:
-            conn.close()
+    # BUGHUNT-02 C6: fixture loading is additive — it must not wipe people
+    # that exist outside the fixture. Rows are keyed by email, then by exact
+    # full_name; matches update in place, new names insert. Pre-existing
+    # people untouched by the fixture keep their rows, scopes and windows.
+    existing_people = people_store.list_people(include_archived=True)
+    id_by_email = {
+        (p.email or "").strip().lower(): p.id
+        for p in existing_people if p.email
+    }
+    id_by_name = {p.full_name.strip().lower(): p.id for p in existing_people}
 
     name_to_id: dict[str, int] = {}
     for row in rows:
         full_name = row.get("full_name") or row.get("name")
         if not full_name:
             continue
+        email = row.get("email")
+        person_id = (
+            id_by_email.get(email.strip().lower()) if email else None
+        ) or id_by_name.get(full_name.strip().lower())
         person_id = people_store.upsert_person(
             full_name=full_name,
             role=row.get("role", ""),
@@ -1676,8 +1724,12 @@ def _seed_people(people_path: Path) -> int:
             response_sla_hours=int(row.get("response_sla_hours", 24)),
             department_slugs=list(row.get("department_slugs", [])),
             is_principal=bool(row.get("is_principal", False)),
+            person_id=person_id,
         )
         name_to_id[full_name] = person_id
+        if email:
+            id_by_email[email.strip().lower()] = person_id
+        id_by_name[full_name.strip().lower()] = person_id
 
         scopes_raw = row.get("authority_scope", [])
         scopes: list[AuthorityScope] = []

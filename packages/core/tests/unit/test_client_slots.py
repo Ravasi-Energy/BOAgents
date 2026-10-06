@@ -1435,3 +1435,129 @@ async def test_user_backup_recovery_wipes_db_only_tables(
     ).fetchone()[0]
     conn.close()
     assert remaining == 0
+
+
+# ---------------------------------------------------------------- B3
+# Generic (non-embedding-refusal) cleanup failures on the transition path
+# must propagate — a swallowed I/O error leaves the outgoing client's
+# research / Notion / attachment / skill rows readable under the incoming
+# client (REM-AUDIT-01 B3).
+
+
+def _io_failing_store(
+    monkeypatch: pytest.MonkeyPatch, *, site: str, once: bool
+) -> dict[str, bool]:
+    """Real ChromaDBStore whose ONE strict cleanup site raises a plain
+    OSError — the B3 case: not a persisted-schema refusal, just a failed
+    delete (locked volume, transient I/O). ``once`` disarms after the first
+    raise so the automatic recovery restore (which re-runs the same layer)
+    can succeed; ``once=False`` keeps the volume broken."""
+    import openexecutive.knowledge.store as store_mod
+    from openexecutive.knowledge.skills_index import SKILLS_COLLECTION
+    from openexecutive.knowledge.store import ChromaDBStore
+
+    _real = ChromaDBStore
+    armed = {"on": True}
+
+    def _fail() -> None:
+        if not armed["on"]:
+            return
+        if once:
+            armed["on"] = False
+        raise OSError(f"synthetic I/O fault on {site} cleanup")
+
+    class _IoStore(_real):
+        def delete_documents(
+            self, collection: str, where: dict[str, Any], *, strict: bool = False
+        ) -> None:
+            if site == "research" and collection == _real.RESEARCH_COLLECTION or site == "skills" and collection == SKILLS_COLLECTION:
+                _fail()
+            return super().delete_documents(collection, where, strict=strict)
+
+        def delete_notion_docs(self, *, strict: bool = False) -> None:
+            if site == "notion":
+                _fail()
+            return super().delete_notion_docs(strict=strict)
+
+        def delete_attachment_docs(self, *, strict: bool = False) -> None:
+            if site == "attachments":
+                _fail()
+            return super().delete_attachment_docs(strict=strict)
+
+    monkeypatch.setattr(store_mod, "ChromaDBStore", _IoStore)
+    return armed
+
+
+@pytest.mark.parametrize(
+    "site", ["research", "notion", "attachments", "skills"]
+)
+async def test_generic_cleanup_io_error_aborts_transition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, site: str
+) -> None:
+    """A non-EF I/O failure mid-cleanup propagates like the EF refusal:
+    the transition aborts, A is auto-recovered, and B is never published
+    on top of surviving A rows."""
+    env = _late_refusal_env(tmp_path, monkeypatch)
+    _seed_live_company(env, "Acme Corp")
+    await create_client_slot(env.settings, display_name="Acme Corp", source="current")
+    await create_client_slot(env.settings, display_name="Beta Inc", source="blank")
+
+    _io_failing_store(monkeypatch, site=site, once=True)
+    with pytest.raises(OSError, match="synthetic I/O fault"):
+        await activate_client_slot(env.settings, "beta_inc")
+
+    # Recovery restored A on every layer — the failed B was not published.
+    assert get_active_client(env.settings) == "acme_corp"
+    assert _decision_summaries(env.db_path) == ["Acme Corp decision"]
+    assert slots.get_restore_blocked(env.settings) is None
+
+
+@pytest.mark.parametrize(
+    "site", ["research", "notion", "attachments", "skills"]
+)
+async def test_generic_cleanup_io_error_persistent_fault_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, site: str
+) -> None:
+    """Cleanup fails during BOTH the transition and the recovery →
+    restore-blocked with the durable marker, never a silent publish."""
+    env = _late_refusal_env(tmp_path, monkeypatch)
+    _seed_live_company(env, "Acme Corp")
+    await create_client_slot(env.settings, display_name="Acme Corp", source="current")
+    await create_client_slot(env.settings, display_name="Beta Inc", source="blank")
+
+    _io_failing_store(monkeypatch, site=site, once=False)
+    with pytest.raises(ClientSlotError, match="restore-blocked"):
+        await activate_client_slot(env.settings, "beta_inc")
+
+    marker = slots.get_restore_blocked(env.settings)
+    assert marker is not None and marker["restore_slug"] == "acme_corp"
+    assert get_active_client(env.settings) is None
+
+
+def test_delete_documents_strict_flag_controls_propagation() -> None:
+    """Store-level contract: default stays best-effort (runtime callers),
+    strict propagates ANY failure (transition callers), and the persisted
+    schema refusal propagates in BOTH modes."""
+    from openexecutive.knowledge.store import (
+        ChromaDBStore,
+        PersistedEmbeddingConfigError,
+    )
+
+    class _IoFailing(ChromaDBStore):
+        def __init__(self) -> None:  # skip the chroma client entirely
+            pass
+
+        def _get_or_create_collection(self, name: str) -> Any:
+            raise OSError("synthetic I/O fault")
+
+    store = _IoFailing()
+    store.delete_documents("c", {"k": "v"})  # tolerated + logged
+    with pytest.raises(OSError, match="synthetic I/O fault"):
+        store.delete_documents("c", {"k": "v"}, strict=True)
+
+    class _Refusing(_IoFailing):
+        def _get_or_create_collection(self, name: str) -> Any:
+            raise PersistedEmbeddingConfigError("refused")
+
+    with pytest.raises(PersistedEmbeddingConfigError):
+        _Refusing().delete_documents("c", {"k": "v"})  # even non-strict

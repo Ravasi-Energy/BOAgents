@@ -32,7 +32,7 @@ from openexecutive.api.models import (
 )
 from openexecutive.bo import identity as bo_identity
 from openexecutive.config import get_settings
-from openexecutive.memory.company_profile import CompanyProfile
+from openexecutive.memory.company_profile import CompanyProfile, ProfileLockTimeout
 from openexecutive.onboarding.interview import (
     MAX_QUESTIONS,
     MAX_TRANSCRIPT_CHARS,
@@ -609,9 +609,19 @@ async def commit_interview(
     if not profile.name.strip():
         raise HTTPException(status_code=422, detail="Your company needs a name.")
 
-    # 3. The write. Atomic (write-then-rename, O_EXCL, fsync) inside.
+    # 3. The write. Atomic (write-then-rename, O_EXCL, fsync) inside, under
+    #    the cross-process profile fence — a wedged concurrent writer turns
+    #    into a bounded 503, never a hang (CONTROL R14).
     try:
         profile.save_to_yaml(settings.company_profile_path)
+    except ProfileLockTimeout as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "profile_lock_timeout",
+                "message": str(exc),
+            },
+        ) from exc
     except Exception as exc:
         logger.error("onboarding commit: save failed (%s)", type(exc).__name__)
         raise HTTPException(

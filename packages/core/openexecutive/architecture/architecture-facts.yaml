@@ -3742,7 +3742,9 @@ company_onboarding:
     The interview NEVER writes. POST /onboard/interview/commit is the single
     write, ordered so nothing observable changes until the atomic save
     succeeds: (1) validate profile + drafts, (2) reject an empty name,
-    (3) profile.save_to_yaml (write-then-rename, O_EXCL, fsync), (4) mark the
+    (3) profile.save_to_yaml (write-then-rename, O_EXCL, fsync, serialized
+    under the profile.yaml.lock kernel fence shared by every profile writer),
+    (4) mark the
     session saved, (5) seed people, (6) reconcile departments, (7) fire the
     post-onboarding research workflow. A failure at 1-3 leaves the session
     untouched, so the user edits the draft and retries. This replaces the

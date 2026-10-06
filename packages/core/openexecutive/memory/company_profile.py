@@ -5,6 +5,9 @@ import os
 import re
 import secrets
 import stat
+import threading
+import time
+from collections.abc import Iterator
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -15,6 +18,133 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # ISO-4217 alphabetic code (e.g. USD, EUR, RON). Money amounts carry their
 # currency explicitly — None means "not recorded", never an implied USD.
 _CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
+
+
+# ---------------------------------------------------------------------------
+# Cross-process write fence (CONTROL R14 — PROFILE-CAS-RACE)
+#
+# profile.yaml is shared state mutated by several writers (PATCH route,
+# onboarding commit, fixture load, client-slot restore, CLI). The CAS
+# contract is only honest if read→check→merge→write is one critical
+# section ACROSS PROCESSES — a thread lock or a check-before-save would
+# still let two writers both pass CAS on v1 and both write v2 (the R14
+# probe). The fence is a kernel lock on a sidecar file, so it lives on
+# the filesystem next to the profile and is held by the OS — a crashed
+# holder's fd closes and the lock releases automatically, so a leftover
+# ``.lock`` file is inert state, never a deadlock. There is exactly one
+# lock per profile path, so no lock ordering exists to deadlock on.
+#
+# The lock is re-entrant per thread: ``save_to_yaml`` acquires it itself
+# (every writer is fenced by construction), and a caller that already
+# holds it — the PATCH route spanning read→CAS→merge→save — just reuses
+# the same critical section.
+#
+# Blocking acquisition is bounded by PROFILE_LOCK_TIMEOUT_S so a wedged
+# holder surfaces as ProfileLockTimeout (HTTP 503) instead of hanging
+# the request forever. The retry sleep below paces acquisition; it is
+# never used to order the race — the lock itself orders it.
+# ---------------------------------------------------------------------------
+
+PROFILE_LOCK_TIMEOUT_S = 10.0
+
+
+class ProfileLockTimeout(TimeoutError):
+    """The profile write fence could not be acquired within the deadline."""
+
+
+if os.name == "nt":  # pragma: no cover — exercised on Windows runners only
+    import msvcrt
+
+    def _try_lock(fd: int) -> bool:
+        os.lseek(fd, 0, os.SEEK_SET)
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
+            return True
+        except OSError:
+            return False
+
+    def _unlock(fd: int) -> None:
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
+
+else:
+    import fcntl
+
+    def _try_lock(fd: int) -> bool:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            return False
+
+    def _unlock(fd: int) -> None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+def _resolve_profile_path(path: Path | str) -> Path:
+    """Resolve a symlinked profile path the way ``save_to_yaml`` does, so
+    the lock sidecar lands next to the TARGET and every writer contends
+    on the same file."""
+    path = Path(path)
+    try:
+        return path.resolve()
+    except (OSError, RuntimeError):
+        return path.absolute()
+
+
+_held = threading.local()
+
+
+@contextlib.contextmanager
+def profile_lock(
+    path: Path | str, timeout_s: float | None = None
+) -> Iterator[None]:
+    """Hold the cross-process write fence for the profile at ``path``.
+
+    Re-entrant per thread and per path: nested acquisition on the same
+    profile is a no-op, so ``save_to_yaml`` (which locks internally) can
+    be called inside a caller-held critical section.
+    """
+    resolved = _resolve_profile_path(path)
+    key = str(resolved)
+    held: set[str] = getattr(_held, "paths", set())
+    if key in held:
+        yield
+        return
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = resolved.with_name(resolved.name + ".lock")
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    timeout = PROFILE_LOCK_TIMEOUT_S if timeout_s is None else timeout_s
+    deadline = time.monotonic() + timeout
+    try:
+        while not _try_lock(fd):
+            if time.monotonic() >= deadline:
+                raise ProfileLockTimeout(
+                    f"profilul e blocat de alt writer (> {timeout}s)"
+                )
+            time.sleep(0.01)
+        held.add(key)
+        _held.paths = held
+        try:
+            yield
+        finally:
+            held.discard(key)
+    finally:
+        with contextlib.suppress(OSError):
+            _unlock(fd)
+        os.close(fd)
+
+
+def _persisted_version(path: Path) -> int:
+    """Version currently on disk for ``path`` (0 if absent/unreadable)."""
+    if not path.exists():
+        # load_from_yaml synthesizes a default profile for a missing file —
+        # that would fake version 1 out of thin air and skip the counter.
+        return 0
+    try:
+        return CompanyProfile.load_from_yaml(path).version
+    except Exception:
+        return 0
 
 
 def _currency_code(v: str | None) -> str | None:
@@ -122,21 +252,32 @@ class CompanyProfile(BaseModel):
         return cls.model_validate(company_data)
 
     def save_to_yaml(self, path: Path | str) -> None:
+        # The write runs under the cross-process fence (CONTROL R14): the
+        # lock is re-entrant, so a caller spanning read→CAS→merge→write
+        # (the PATCH route) simply widens its own critical section here.
+        with profile_lock(path):
+            self._save_locked(path)
+
+    def _save_locked(self, path: Path | str) -> None:
         # Resolve first so a symlinked profile path (a common deployment
         # pattern for COMPANY_PROFILE_PATH) is written at its target and the
         # link survives, instead of being replaced by a regular file. A
         # symlink loop raises RuntimeError on 3.11 and OSError on 3.13; fall
         # back to the unresolved path and let the open() below report it.
-        path = Path(path)
-        try:
-            path = path.resolve()
-        except (OSError, RuntimeError):
-            path = path.absolute()
+        path = _resolve_profile_path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
+        # The persisted version is monotone per file (CONTROL R14): a write
+        # can never stamp a version at or below the one already on disk, so
+        # a stale reader's expected_version can never collide with a later
+        # overwrite. CAS writers (PATCH) set version=stored+1 and pass
+        # through unchanged; non-CAS writers (onboarding, fixtures, slot
+        # restore) get a fresh number so old pins die with the overwrite.
+        persisted = _persisted_version(path)
         # mode="json" renders Decimal amounts as exact strings ("1.005") —
         # the default python dump would either crash yaml.dump or emit a
         # lossy float. Loading coerces the string straight back to Decimal.
         data = {"company": self.model_dump(mode="json")}
+        data["company"]["version"] = max(self.version, persisted + 1)
         # Write-then-rename so a failure mid-dump (disk full, unrepresentable
         # value) can never leave a truncated profile behind: every other
         # subsystem loads this file, and callers such as the onboarding

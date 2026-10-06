@@ -134,7 +134,7 @@ def test_save_to_yaml_is_atomic(tmp_path: Path, monkeypatch):
     monkeypatch.undo()
 
     assert CompanyProfile.load_from_yaml(path).name == "Before"
-    assert [p.name for p in tmp_path.iterdir()] == ["profile.yaml"], "temp file left behind"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["profile.yaml", "profile.yaml.lock"], "temp file left behind"
 
 
 def test_save_to_yaml_preserves_mode(tmp_path: Path):
@@ -156,7 +156,7 @@ def test_save_to_yaml_preserves_mode(tmp_path: Path):
 
     assert stat.S_IMODE(path.stat().st_mode) == 0o664
     assert CompanyProfile.load_from_yaml(path).name == "After"
-    assert [p.name for p in tmp_path.iterdir()] == ["profile.yaml"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["profile.yaml", "profile.yaml.lock"]
 
 
 def test_save_to_yaml_through_symlink_keeps_link_and_target_mode(tmp_path: Path):
@@ -180,7 +180,7 @@ def test_save_to_yaml_through_symlink_keeps_link_and_target_mode(tmp_path: Path)
     assert link.is_symlink(), "the symlink must survive the save"
     assert stat.S_IMODE(target.stat().st_mode) == 0o640
     assert CompanyProfile.load_from_yaml(link).name == "After"
-    assert [p.name for p in target.parent.iterdir()] == ["profile.yaml"]
+    assert sorted(p.name for p in target.parent.iterdir()) == ["profile.yaml", "profile.yaml.lock"]
 
 
 def test_save_to_yaml_replaces_a_symlink_loop(tmp_path: Path):
@@ -200,7 +200,7 @@ def test_save_to_yaml_replaces_a_symlink_loop(tmp_path: Path):
     assert not link.is_symlink()
     assert stat.S_IMODE(link.stat().st_mode) == 0o600
     assert CompanyProfile.load_from_yaml(link).name == "X"
-    assert [p.name for p in tmp_path.iterdir()] == ["profile.yaml"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["profile.yaml", "profile.yaml.lock"]
 
 
 def test_concurrent_saves_do_not_break_each_other(tmp_path: Path):
@@ -225,7 +225,7 @@ def test_concurrent_saves_do_not_break_each_other(tmp_path: Path):
 
     assert errors == []
     assert CompanyProfile.load_from_yaml(path).name.startswith("w")
-    assert [p.name for p in tmp_path.iterdir()] == ["profile.yaml"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["profile.yaml", "profile.yaml.lock"]
 
 
 def test_profile_vendors_and_tickers_render_and_roundtrip(tmp_path: Path):
@@ -294,7 +294,7 @@ def test_prompt_block_money_rendering():
     )
     assert "**ARR**: $6,000" in usd.to_prompt_block()
     assert "**ARR**: EUR 6,000" in eur.to_prompt_block()
-    arr_line = next(l for l in unknown.to_prompt_block().splitlines() if l.startswith("**ARR**"))
+    arr_line = next(line for line in unknown.to_prompt_block().splitlines() if line.startswith("**ARR**"))
     assert arr_line == "**ARR**: 6,000"  # no $ claim for unknown currency
     assert "Monthly burn: RON 2,500" in burn.to_prompt_block()
 

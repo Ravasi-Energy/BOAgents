@@ -20,6 +20,7 @@ from openexecutive.api.intake_uploads import (
     _INTAKE_MAX_DOC_CHARS,
     _gather_intake_attachments,
 )
+from openexecutive.memory.company_profile import ProfileLockTimeout
 
 router = APIRouter()
 
@@ -376,6 +377,12 @@ async def activate_client(slug: str, request: Request) -> dict:
     except ClientSlotError as exc:
         _raise_for(exc)
         raise
+    except ProfileLockTimeout as exc:
+        # A wedged concurrent profile writer — bounded refusal, never a hang.
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "profile_lock_timeout", "message": str(exc)},
+        ) from exc
 
 
 @router.get("/clients/cockpit")

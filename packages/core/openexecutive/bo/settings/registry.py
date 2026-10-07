@@ -77,6 +77,13 @@ def _validate_bool(v: Any, *, label: str) -> bool:
     return v
 
 
+def _validate_decimals_0_2(v: Any, *, label: str) -> int:
+    v = _validate_int(v, minimum=0, maximum=2, label=label)
+    if v not in (0, 2):
+        raise SettingValidationError(f"{label}: valori permise: 0 sau 2")
+    return v
+
+
 def _validate_trust_store(v: Any) -> str:
     """Text = document bo.package.registry.v1 validat structural la salvare.
 
@@ -323,6 +330,25 @@ REGISTRY: dict[str, SettingSpec] = {
         effect_ro="Se aplică imediat la timestampurile afișate în paginile BO.",
         acceptance_ro="Fusurile invalide sunt respinse cu mesaj explicit.",
         validate=lambda v: _validate_timezone(v, label="Fus orar"),
+    ),
+    "bo.ui.money_display_decimals": SettingSpec(
+        key="bo.ui.money_display_decimals",
+        type="integer",
+        default=2,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="general",
+        label_ro="Zecimale afișate la bani",
+        label_en="Money display decimals",
+        help_ro="Câte zecimale afișează sumele în suprafețele BO: 0 sau 2. "
+                "Doar afișarea — stocarea și calculul rămân exacte.",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Se aplică imediat la randarea sumelor; nu modifică valorile stocate.",
+        acceptance_ro="Doar 0 sau 2 sunt acceptate; 1 sau alte valori sunt respinse explicit.",
+        validate=lambda v: _validate_decimals_0_2(v, label="Zecimale afișate la bani"),
     ),
     "bo.bobot.simulation.max_steps": SettingSpec(
         key="bo.bobot.simulation.max_steps",

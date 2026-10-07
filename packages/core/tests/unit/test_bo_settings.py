@@ -94,12 +94,38 @@ def test_tenant_isolation(db: Path) -> None:
         ("bo.bobot.simulation.max_steps", "50"),  # string is not int
         ("bo.bobot.simulation.retention_days", 0),
         ("bo.bobot.simulation.retention_days", 3651),
+        ("bo.ui.money_display_decimals", 1),      # only 0 or 2 allowed
+        ("bo.ui.money_display_decimals", 3),
+        ("bo.ui.money_display_decimals", -1),
+        ("bo.ui.money_display_decimals", "2"),    # string is not int
+        ("bo.ui.money_display_decimals", True),   # bool is not int
     ],
 )
 def test_invalid_values_rejected(db: Path, key: str, value: object) -> None:
     with pytest.raises(SettingValidationError):
         store.set_value("tenant-a", key, value,
                         expected_version=0, actor="admin@test")
+
+
+def test_money_display_decimals_0_and_2_persist(db: Path) -> None:
+    """D07/F3: setarea de server 0/2 — valorile permise se salvează,
+    se citesc la reluare și sunt izolate pe tenant."""
+    assert store.get_effective_value(
+        "tenant-a", "bo.ui.money_display_decimals") == 2
+    for v in (0, 2):
+        rec = store.set_value(
+            "tenant-a", "bo.ui.money_display_decimals", v,
+            expected_version=store.config_version("tenant-a"),
+            actor="admin@test",
+        )
+        assert rec["version"] >= 1
+        assert store.get_effective_value(
+            "tenant-a", "bo.ui.money_display_decimals") == v
+    bo_db.initialize_db(db)  # restart simulat: valoarea rămâne
+    assert store.get_effective_value(
+        "tenant-a", "bo.ui.money_display_decimals") == 2
+    assert store.get_effective_value(
+        "tenant-b", "bo.ui.money_display_decimals") == 2
 
 
 def test_unknown_key_rejected(db: Path) -> None:

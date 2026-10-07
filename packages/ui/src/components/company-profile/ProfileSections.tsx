@@ -1,7 +1,7 @@
 "use client";
 import { profileDelta } from "@/lib/p0-edit";
 import { Money } from "@/lib/Money";
-import { moneyInputValue, parseMoneyNumber, moneyCurrency } from "@/lib/money-format";
+import { moneyInputValue, parseMoneyInput, parseMoneyNumber, moneyCurrency } from "@/lib/money-format";
 
 // The company-profile section editors, extracted from app/company-profile/page.tsx
 // so the onboarding draft-review screen can reuse the exact editing surface the
@@ -293,7 +293,7 @@ function CompanyBasicsSection({ profile, saving, onSave, pending }: SectionCompo
 
   const [moneyError, setMoneyError] = useState("");
   const saveMoney = async (payload: object) => {
-    try { const amount = parseMoneyNumber(arr); const currency = moneyCurrency(arrCurrency); setMoneyError(""); await onSave({ ...payload, annual_revenue_arr: amount, annual_revenue_arr_currency: currency }); }
+    try { const amount = parseMoneyInput(arr); const currency = moneyCurrency(arrCurrency); setMoneyError(""); await onSave({ ...payload, annual_revenue_arr: amount, annual_revenue_arr_currency: currency }); }
     catch (error) { setMoneyError(error instanceof Error ? error.message : "Sumă invalidă"); throw error; }
   };
   return (

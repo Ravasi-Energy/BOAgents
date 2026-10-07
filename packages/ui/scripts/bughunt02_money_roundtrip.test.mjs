@@ -4,7 +4,7 @@
 // coordinator harness, only wrapped in test() and re-pathed to ../src/lib.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { formatMoney, parseMoneyInput, moneyInputValue, parseMoneyNumber } from "../src/lib/money-format.ts";
+import { formatMoney, parseMoneyInput, moneyInputValue, parseMoneyNumber, money } from "../src/lib/money-format.ts";
 
 test("C8 1234,56 round-trips as 1.234,56 lei", () => {
   const saved = parseMoneyInput("1.234,56");
@@ -14,12 +14,12 @@ test("C8 1234,56 round-trips as 1.234,56 lei", () => {
   assert.equal(formatMoney(saved, "EUR", 2), "1.234,56 €");
 });
 
-test("C8 1,005 keeps three decimals in editor, formats 1,01 at two", () => {
-  const three = parseMoneyInput("1,005");
-  assert.equal(three, "1.005");
-  assert.equal(moneyInputValue(three), "1,005");
-  assert.equal(formatMoney(three, "RON", 2), "1,01 lei");
-  const asNumber = parseMoneyNumber("1,005");
-  assert.equal(typeof asNumber, "number");
-  assert.equal(moneyInputValue(asNumber), "1,005");
+test("C8 1,005 is rejected at input and rendered visibly invalid, never silently 1,01", () => {
+  // F3/D07 (BO01 patch): over-precision must not be saved nor silently
+  // rounded on display. parseMoneyInput refuses; money() shows the
+  // original value marked invalid.
+  assert.throws(() => parseMoneyInput("1,005"), /mai mult de 2 zecimale/);
+  assert.throws(() => parseMoneyNumber("1,005"));
+  assert.throws(() => formatMoney("1.005", "RON", 2), /mai mult de 2 zecimale/);
+  assert.equal(money("1.005", "RON", 2), "1.005 — Sumă cu mai mult de 2 zecimale");
 });

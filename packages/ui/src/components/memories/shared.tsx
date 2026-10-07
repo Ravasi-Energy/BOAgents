@@ -27,23 +27,7 @@ export function formatDate(iso: string): string {
   return iso.slice(0, 10);
 }
 
-/** ISO timestamp → an absolute string plus a coarse relative label ("in 5m", "3d ago"). */
-export function formatRunAt(iso: string): { absolute: string; relative: string } {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return { absolute: iso, relative: "" };
-  const absolute = d.toLocaleString();
-  const deltaMs = d.getTime() - Date.now();
-  const abs = Math.abs(deltaMs);
-  const mins = Math.round(abs / 60_000);
-  const hours = Math.round(abs / 3_600_000);
-  const days = Math.round(abs / 86_400_000);
-  let unit: string;
-  if (mins < 60) unit = `${mins}m`;
-  else if (hours < 48) unit = `${hours}h`;
-  else unit = `${days}d`;
-  const relative = deltaMs >= 0 ? `in ${unit}` : `${unit} ago`;
-  return { absolute, relative };
-}
+export { formatRunAt } from "@/lib/calendar";
 
 export const STATUS_PILL: Record<string, string> = {
   pending: "bg-sky-500/15 text-sky-300 border-sky-500/30",

@@ -11,8 +11,10 @@ test('legacy unknown stays unknown; no default currency',()=>{assert.equal(money
 test('partial retainer and ambiguous currency refused',()=>{
  for(const [amount,currency] of [['6.000,25',''],['','EUR'],['6000','usd'],['6000','EURO']]) assert.throws(()=>retainerMoneyPatch(amount,currency));
 });
-test('string retainer preserves precision beyond JSON numbers',()=>{
- assert.equal(retainerMoneyPatch('12.345.678.901.234.567.890,1234','EUR').retainer_amount,'12345678901234567890.1234');
+test('string retainer keeps exact big decimals; over-precision refused, never silently rounded',()=>{
+ // F3/D07: >2 fractional digits are rejected at the editor boundary.
+ assert.equal(retainerMoneyPatch('12.345.678.901.234.567.890,12','EUR').retainer_amount,'12345678901234567890.12');
+ assert.throws(()=>retainerMoneyPatch('12.345.678.901.234.567.890,1234','EUR'));
  assert.throws(()=>parseMoneyNumber('12.345.678.901.234.567.890,1234'));
 });
 

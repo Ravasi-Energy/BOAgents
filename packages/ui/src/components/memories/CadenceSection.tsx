@@ -8,6 +8,7 @@ import {
   type ActivityItem,
   type ScheduledAction,
 } from "@/lib/api";
+import { useCalendarTimezone } from "@/lib/CalendarTimezone";
 import Icon, { type IconName } from "@/components/Icon";
 import {
   LivePulse,
@@ -331,8 +332,9 @@ function RhythmCard({
   action: ScheduledAction;
   showDepartment: boolean;
 }) {
+  const timeZone = useCalendarTimezone();
   const meta = metaFor(action);
-  const { absolute, relative } = formatRunAt(action.run_at);
+  const { absolute, relative } = formatRunAt(action.run_at, timeZone);
   const isPending = action.status === "pending";
   return (
     <div className="group py-2.5 hover:bg-surface-overlay/30 transition-colors flex items-start justify-between gap-3">
@@ -358,9 +360,12 @@ function RhythmCard({
       </div>
       <div className="text-right whitespace-nowrap shrink-0">
         {isPending ? (
+          <>
           <div className="text-xs text-sky-300" title={absolute}>
-            {relative ? `next ${relative}` : absolute}
+            {relative ? (relative.endsWith(" ago") ? `overdue · ${relative}` : `next ${relative}`) : absolute}
           </div>
+          {relative && <div className="text-xs text-fg-subtle"><time dateTime={action.run_at}>{absolute}</time></div>}
+          </>
         ) : (
           <div className="flex flex-col items-end gap-1">
             <span
@@ -512,7 +517,8 @@ function FollowUpRow({
   cancelling: boolean;
   onCancel: () => void;
 }) {
-  const { absolute, relative } = formatRunAt(action.run_at);
+  const timeZone = useCalendarTimezone();
+  const { absolute, relative } = formatRunAt(action.run_at, timeZone);
   const pill = STATUS_PILL[action.status] ?? STATUS_PILL.cancelled;
   return (
     <div className="group py-3 hover:bg-surface-overlay/30 transition-colors">
@@ -527,6 +533,7 @@ function FollowUpRow({
           <span className="text-fg-subtle">→</span>
           <span className="text-fg-muted font-mono text-[11px] truncate max-w-[12rem]" title={action.channel_ref}>{action.channel_ref}</span>
           <span title={absolute}>{relative || absolute}</span>
+          {relative && <time className="text-fg-subtle" dateTime={action.run_at}>{absolute}</time>}
           {action.attempts > 0 && (
             <span className="text-amber-400">{action.attempts} attempt{action.attempts === 1 ? "" : "s"}</span>
           )}

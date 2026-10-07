@@ -7,6 +7,10 @@
 // executat. Acțiunile consecvențiale cer confirmare + motiv auditat.
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { useSession } from "next-auth/react";
+import { UnconfiguredMoney } from "@/lib/Money";
+import { requiredMoneyInput, moneyInputValue } from "@/lib/money-format";
+import { replayPayload, parseRunDraft, type RunSubmission } from "@/lib/execution-replay";
 import IconBO from "@/components/bo/IconBO";
 import { BoPage, InlineAlert, Pill, StateBlock } from "@/components/bo/ui";
 import {
@@ -222,6 +226,9 @@ function MandatesSection({
       setNotice({ kind: "danger", text: "Valabilitatea trebuie să fie un număr de ore pozitiv." });
       return;
     }
+    let budgetLimit: string;
+    try { budgetLimit = requiredMoneyInput(budget); }
+    catch (error) { setNotice({ kind: "danger", text: error instanceof Error ? error.message : "Sumă invalidă" }); return; }
     const parent = mandates.find((m) => m.mandate_id === parentId);
     const requestedExpiry = Date.now() + hours * 3600_000;
     const expires = new Date(
@@ -234,7 +241,7 @@ function MandatesSection({
           guardian_ref: guardianRef || undefined,
           allowed_resources: resources.split(",").map((s) => s.trim()).filter(Boolean),
           allowed_actions: actions.split(",").map((s) => s.trim()).filter(Boolean),
-          budget_limit: budget,
+          budget_limit: budgetLimit,
           concurrency_limit: 2,
           max_steps: Number(maxSteps) || 10,
           max_depth: 1,
@@ -318,7 +325,7 @@ function MandatesSection({
               className="bo-input"
               style={{ width: 110 }}
               placeholder="buget"
-              aria-label="Buget mandat"
+              aria-label="Buget mandat (6.000,25)"
               value={budget}
               onChange={(e) => setBudget(e.target.value)}
             />
@@ -369,7 +376,7 @@ function MandatesSection({
             <span className="bo-hint">
               {m.mandate_id} · acțiuni [{m.allowed_actions.join(", ")}] ·
               resurse [{m.allowed_resources.join(", ")}] · buget{" "}
-              {m.budget_limit}
+              <UnconfiguredMoney amount={m.budget_limit} />
               {m.guardian_ref ? ` · Guardian: ${m.guardian_ref}` : ""}
               {m.parent_mandate_id ? " · delegat" : ""}
             </span>
@@ -412,8 +419,32 @@ function SubmitRunForm({
     '[{"action":"increment","resource":"synth.counter","payload":{"amount":1}}]',
   );
   const [budget, setBudget] = useState("5");
+  const correlation = useRef<string | null>(null);
+  const attempted = useRef<RunSubmission | null>(null);
+  const { data: session } = useSession();
+  const storageKey = session?.user?.email ? "bo.exec.uncertain:" + session.user.email : null;
+  const [loadedKey, setLoadedKey] = useState<string | null>(null);
+  const [draftError, setDraftError] = useState("");
+  useEffect(() => {
+    attempted.current = null; correlation.current = null;
+    setDraftError(""); setOpen(false); setNotice(null); setMandateId(""); setBudget("5");
+    setSteps('[{"action":"increment","resource":"synth.counter","payload":{"amount":1}}]');
+    if (!storageKey) { setLoadedKey(null); return; }
+    try {
+      const raw = sessionStorage.getItem(storageKey);
+      if (raw) {
+        const draft = parseRunDraft(raw);
+        attempted.current = draft; correlation.current = draft.correlation_id;
+        setMandateId(draft.mandate_id); setBudget(moneyInputValue(draft.budget_amount));
+        setSteps(JSON.stringify(draft.steps)); setOpen(true);
+        setNotice({kind:"danger",text:"Trimitere neconfirmată păstrată. Verifică rularea existentă; reluarea folosește aceeași corelare și același draft."});
+      }
+    } catch (error) { const message=error instanceof Error ? error.message : "Draftul păstrat nu poate fi citit."; setDraftError(message); setNotice({kind:"danger",text:message}); }
+    setLoadedKey(storageKey);
+  }, [storageKey]);
 
   async function submit() {
+    if (draftError) { setNotice({kind:"danger",text:draftError}); return; }
     let parsed: unknown;
     try {
       parsed = JSON.parse(steps);
@@ -432,11 +463,20 @@ function SubmitRunForm({
     setBusy(true);
     setNotice(null);
     try {
-      await submitBoRun({
+      if (!storageKey || loadedKey !== storageKey) throw new Error("Identitatea draftului nu a fost verificată.");
+      correlation.current ??= crypto.randomUUID();
+      const payload = replayPayload(attempted.current, {
         mandate_id: mandateId,
         steps: parsed as Record<string, unknown>[],
-        budget_amount: budget,
+        budget_amount: requiredMoneyInput(budget),
+        correlation_id: correlation.current,
       });
+      sessionStorage.setItem(storageKey, JSON.stringify(payload));
+      attempted.current = payload;
+      await submitBoRun(payload);
+      sessionStorage.removeItem(storageKey);
+      attempted.current = null;
+      correlation.current = null;
       setNotice({ kind: "ok", text: "Execuție trimisă — în așteptare pentru un ciclu de lucru." });
       setOpen(false);
       onChanged();
@@ -444,7 +484,7 @@ function SubmitRunForm({
       const text =
         err instanceof BoApiError
           ? `${err.status} — ${typeof err.detail === "string" ? err.detail : err.code}`
-          : "Trimiterea a eșuat.";
+          : err instanceof Error ? err.message : "Trimiterea a eșuat.";
       setNotice({ kind: "danger", text });
     } finally {
       setBusy(false);
@@ -452,6 +492,7 @@ function SubmitRunForm({
   }
 
   const active = mandates.filter((m) => m.state === "active");
+  if (!storageKey || loadedKey !== storageKey) return <div className="bo-card" role="status">Se verifică identitatea draftului de execuție…</div>;
   return (
     <div className="bo-card" style={{ marginTop: 12 }}>
       <div className="bo-spread">
@@ -486,7 +527,7 @@ function SubmitRunForm({
               className="bo-input"
               style={{ width: 110 }}
               placeholder="buget"
-              aria-label="Buget execuție"
+              aria-label="Buget execuție (6.000,25)"
               value={budget}
               onChange={(e) => setBudget(e.target.value)}
             />
@@ -1247,7 +1288,7 @@ function RunDetail({
           <span className="bo-hint">
             {m.mandate_id} · acțiuni [{m.allowed_actions.join(", ")}] ·
             resurse [{m.allowed_resources.join(", ")}] · buget{" "}
-            {m.budget_limit} · expiră {m.expires_at.slice(0, 19)}Z
+            <UnconfiguredMoney amount={m.budget_limit} /> · expiră {m.expires_at.slice(0, 19)}Z
             {m.guardian_ref ? ` · Guardian: ${m.guardian_ref}` : ""}
           </span>
         </div>

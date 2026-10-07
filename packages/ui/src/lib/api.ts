@@ -328,7 +328,7 @@ export interface CompanyProfile {
   stage: string;
   founding_year: number | null;
   headcount: number | null;
-  annual_revenue_arr: number | null;
+  annual_revenue_arr: string | number | null;
   arr_currency?: string | null;
   annual_revenue_arr_currency?: string | null;
   mission: string;
@@ -2004,7 +2004,7 @@ export interface GeneratedFixtureBundle {
     industry?: string;
     stage?: string;
     headcount?: number | null;
-    annual_revenue_arr?: number | null;
+    annual_revenue_arr?: string | number | null;
     annual_revenue_arr_currency?: string | null;
     mission?: string;
     [key: string]: unknown;

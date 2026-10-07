@@ -1,8 +1,10 @@
+const ISO_CURRENCIES: ReadonlySet<string> = new Set(Intl.supportedValuesOf("currency"));
 /** D-07: amounts are major units; currency must come from the data contract. */
 export function formatMoney(amount: unknown, currency: unknown, decimals: number): string {
   if (decimals !== 0 && decimals !== 2) throw new Error("Zecimale: doar 0 sau 2");
-  if (typeof currency !== "string" || !/^[A-Z]{3}$/.test(currency)) throw new Error("Valută neconfigurată");
+  if (typeof currency !== "string" || !ISO_CURRENCIES.has(currency)) throw new Error("Valută neconfigurată");
   if (typeof amount !== "string" && typeof amount !== "number") throw new Error("Sumă invalidă");
+  if (typeof amount === "number" && (!Number.isFinite(amount) || Math.abs(amount) > Number.MAX_SAFE_INTEGER)) throw new Error("Sumă numerică fără precizie sigură; este necesar șirul original");
   // Decimal strings avoid loss of precision for large values received from APIs.
   let raw = String(amount);
   if (typeof amount === "number" && /e/i.test(raw) && Number.isFinite(amount)) {
@@ -18,6 +20,7 @@ export function formatMoney(amount: unknown, currency: unknown, decimals: number
   const match = /^(-?)(\d+)(?:\.(\d+))?$/.exec(raw);
   if (!match) throw new Error("Sumă invalidă");
   const fraction = match[3] ?? "";
+  if (fraction.length > 2) throw new Error("Sumă cu mai mult de 2 zecimale");
   const scale = BigInt(10) ** BigInt(decimals);
   let units = BigInt(match[2]) * scale + BigInt((fraction + "00").slice(0, decimals) || "0");
   if (Number(fraction[decimals] ?? "0") >= 5) units += BigInt(1);
@@ -36,6 +39,7 @@ export function parseMoneyInput(input: string): string | null {
   }
   const canonical = raw.replace(/\./g, "").replace(",", ".");
   const [integer, fraction] = canonical.split(".");
+  if (fraction && fraction.length > 2) throw new Error("Sumă cu mai mult de 2 zecimale; nu a fost salvată.");
   const negative = integer.startsWith("-");
   const digits = integer.replace("-", "").replace(/^0+(?=\d)/, "");
   return (negative ? "-" : "") + digits + (fraction === undefined ? "" : "." + fraction);
@@ -69,11 +73,11 @@ export function parseMoneyNumber(input: string): number | null {
   return value;
 }
 
-/** Empty currency means unknown. Validation is syntactic, not an ISO registry lookup. */
+/** Empty currency means unknown. Supported ISO currencies are checked against the runtime currency registry. */
 export function moneyCurrency(input: string): string | null {
   const value = input.trim();
   if (!value) return null;
-  if (!/^[A-Z]{3}$/.test(value)) throw new Error("Valută invalidă. Folosește un cod de trei litere mari, de exemplu EUR.");
+  if (!ISO_CURRENCIES.has(value)) throw new Error("Valută invalidă. Folosește un cod de trei litere mari, de exemplu EUR.");
   return value;
 }
 export function retainerMoneyPatch(amount: string, currency: string, existingStructured = false) {
@@ -81,6 +85,20 @@ export function retainerMoneyPatch(amount: string, currency: string, existingStr
   const code = moneyCurrency(currency);
   if ((value === null) !== (code === null)) throw new Error("Completează atât suma, cât și valuta onorariului, sau golește ambele câmpuri.");
   if (value === null && existingStructured) throw new Error("Ștergerea onorariului structurat nu este disponibilă prin API. Datele existente au fost păstrate.");
-  if (value !== null && (value.length > 32 || !/^\d+(?:\.\d{1,6})?$/.test(value))) throw new Error("Onorariul cere o sumă pozitivă sau zero, de maximum 32 caractere și 6 zecimale. Nu a fost salvat.");
+  if (value !== null && (value.length > 32 || !/^\d+(?:\.\d{1,2})?$/.test(value))) throw new Error("Onorariul cere o sumă pozitivă sau zero, de maximum 32 caractere și 2 zecimale. Nu a fost salvat.");
   return { retainer_amount: value, retainer_currency: code };
+}
+
+/** Invalid legacy money remains visible with its original value. No assumed currency. */
+export function money(amount: unknown, currency: unknown, decimals: number): string {
+  if (amount == null) return "—";
+  const original = typeof amount === "string" || typeof amount === "number" ? String(amount) : "necunoscută";
+  try { return formatMoney(amount, currency, decimals); }
+  catch (error) { return `${original} — ${error instanceof Error ? error.message : "Sumă invalidă"}`; }
+}
+
+export function requiredMoneyInput(input: string): string {
+  const value = parseMoneyInput(input);
+  if (value === null) throw new Error("Completează suma în unități majore, de exemplu 6.000,25.");
+  return value;
 }

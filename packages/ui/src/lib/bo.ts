@@ -722,6 +722,7 @@ export function submitBoRun(payload: {
   mandate_id: string;
   steps: Record<string, unknown>[];
   budget_amount: string;
+  correlation_id?: string;
   parent_run_id?: string;
 }): Promise<{ run: BoExecRun }> {
   return req("/execution/runs", {

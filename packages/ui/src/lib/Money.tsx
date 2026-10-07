@@ -1,6 +1,6 @@
 "use client";
 import { useState, useSyncExternalStore } from "react";
-import { formatMoney } from "./money-format";
+import { money } from "./money-format";
 const KEY = "bo.money.decimals";
 const EVENT = "bo-money-format-change";
 function read(): 0 | 2 | "storage-error" {
@@ -15,13 +15,13 @@ function usePreference() { return useSyncExternalStore(subscribe, read, () => 2 
 function useDecimals() { const value = usePreference(); return value === "storage-error" ? 2 : value; }
 export function Money({ amount, currency }: { amount: unknown; currency: unknown }) {
   const decimals = useDecimals();
-  try { return <>{currency == null || currency === "" ? <>{formatMoney(amount, "XXX", decimals).replace(/ XXX$/, "")} — valută neconfigurată</> : formatMoney(amount, currency, decimals)}</>; }
-  catch (error) { return <span role="status">{error instanceof Error ? error.message : "Sumă invalidă"}</span>; }
+  return <span>{money(amount, currency, decimals)}</span>;
 }
-export function UnconfiguredMoney({ amount }: { amount: number }) {
+export function UnconfiguredMoney({ amount }: { amount: number | string }) {
   const decimals = useDecimals();
-  return <span>{formatMoney(amount, "XXX", decimals).replace(/ XXX$/, "")} — valută neconfigurată</span>;
+  return <span>{money(amount, null, decimals)}</span>;
 }
+
 export function MoneySettings() {
   const preference = usePreference();
   const decimals = preference === "storage-error" ? 2 : preference;

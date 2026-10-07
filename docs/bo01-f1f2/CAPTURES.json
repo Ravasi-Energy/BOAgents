@@ -1,0 +1,38 @@
+[
+  {
+    "file": "captures/people-clear-desktop.png",
+    "sha256": "a06d4bb9859ddd32ac9d415cacbc8dbb07c8a51e3980b575e12a0b4db58b3905",
+    "bytes": 111757,
+    "width": 1440,
+    "height": 900,
+    "breakpoint": "desktop",
+    "executedPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "fixture": "Synthetic only; token/password fields masked by existing UI. Visually inspected before selection; no browser chrome, visible raw credentials or personal workspace paths.",
+    "sourceRun": "20261006-200329-183832",
+    "interpretation": "Functional visual evidence; not responsive/design acceptance. Original full-page dimensions retained; no editing/regeneration."
+  },
+  {
+    "file": "captures/people-clear-mobile.png",
+    "sha256": "ae539875062a0b40c36eaa61d729d8909a8def5f8a3507ebb4c0be256231cce8",
+    "bytes": 52243,
+    "width": 390,
+    "height": 844,
+    "breakpoint": "mobile",
+    "executedPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "fixture": "Synthetic only; token/password fields masked by existing UI. Visually inspected before selection; no browser chrome, visible raw credentials or personal workspace paths.",
+    "sourceRun": "20261006-200329-183832",
+    "interpretation": "Functional visual evidence; not responsive/design acceptance. Original full-page dimensions retained; no editing/regeneration."
+  },
+  {
+    "file": "captures/people-clear-tablet.png",
+    "sha256": "b1cb90dac38159279525e460596d71530e25a3a7a9e24eff71f27bea26a1529f",
+    "bytes": 84835,
+    "width": 1024,
+    "height": 768,
+    "breakpoint": "tablet",
+    "executedPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "fixture": "Synthetic only; token/password fields masked by existing UI. Visually inspected before selection; no browser chrome, visible raw credentials or personal workspace paths.",
+    "sourceRun": "20261006-200329-183832",
+    "interpretation": "Functional visual evidence; not responsive/design acceptance. Original full-page dimensions retained; no editing/regeneration."
+  }
+]

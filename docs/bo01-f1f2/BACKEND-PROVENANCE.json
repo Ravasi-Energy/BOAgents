@@ -1,0 +1,44 @@
+{
+  "date": "2026-10-07T10:59:55.939126+03:00",
+  "proofs": [
+    {
+      "id": "BO-PY311-FINAL-PROOF",
+      "owner": "A01",
+      "state": "PREDAT PENTRU REVIEW",
+      "pin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+      "runtime": "Python 3.11.16 owner Docker",
+      "failedThenRetested": [
+        "tests/unit/test_client_slots.py::test_marker_write_failure_fences_process_in_memory",
+        "tests/unit/test_docker_dependency_layer.py::test_every_requirement_is_an_exact_pin_with_hashes",
+        "tests/unit/test_docker_dependency_layer.py::test_export_is_locked_not_frozen",
+        "tests/unit/test_docker_dependency_layer.py::test_install_consumes_the_export_not_pyproject",
+        "tests/unit/test_docker_dependency_layer.py::test_layer_excludes_dev_tooling_and_the_project_itself",
+        "tests/unit/test_docker_dependency_layer.py::test_stage_copies_only_the_lock_inputs_before_installing",
+        "tests/unit/test_docker_dependency_layer.py::test_stale_lock_fails_the_export",
+        "tests/unit/test_mcp_gateway.py::test_example_config_commands_are_present_in_the_api_image",
+        "tests/unit/test_research_controls.py::test_env_example_documents_the_controls",
+        "tests/unit/test_review_store.py::test_shipped_manifest_matches_git"
+      ],
+      "firstRun": "4266 PASS /1skip /8FAIL /2ERROR incomplete-copy environment; never relabeled complete PASS",
+      "targetedCorrectedEnvironment": "same10cases PASS in v4; fixture/repo/non-root corrected by owner",
+      "consolidatedCoverage": "4266+10=4276 PASS;1skip. Split execution proven, not one fully green original run. Source pin binding declared in owner PIN-FINAL; original log has no git HEAD print.",
+      "CI": "BO normal CI remains3.12; compatibility proof3.11 is local owner evidence, not GitHubCI3.11.",
+      "reason": "Missing final runtime outcome reconciled with v3/v4 named case equality and owner pin declaration; coordinator review separate.",
+      "sources": [
+        {
+          "canonicalRelativeSource": "rapoarte/BO-A01/BUGHUNT-02-BOAGENTS/r15/py311-docker-v3.log",
+          "sha256": "572d342598f42441273517dc225db25fab335db0057c0fe31fdc872f54807c32"
+        },
+        {
+          "canonicalRelativeSource": "rapoarte/BO-A01/BUGHUNT-02-BOAGENTS/r15/py311-docker-v4.log",
+          "sha256": "29f7fb912ef58f39ca069d7129d819e7917d5bf65864bda0a0371d73926eb111"
+        },
+        {
+          "canonicalRelativeSource": "rapoarte/BO-A01/BUGHUNT-02-BOAGENTS/PIN-FINAL.md",
+          "sha256": "ca2ec2cc72cf705973648a09ce5da745b4ae1b54959a5ecca67307c9949c4f7b"
+        }
+      ]
+    }
+  ],
+  "normalCI": "Nominal new cases pending per CANDIDATE; local runtime/JUnit distinct from GitHub CI."
+}

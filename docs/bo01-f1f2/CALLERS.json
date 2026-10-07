@@ -1,0 +1,379 @@
+[
+  {
+    "id": "CALL-656ad5ffe3ff3e65b1",
+    "requirements": [
+      "B-P0-3"
+    ],
+    "product": "BOAgents",
+    "source": "packages/ui/src/app/bo/bots/[id]/page.tsx",
+    "sourceSHA256": "4e6917c67c635bb3ef2200349ca067b93f59e780a0712e236a7ccf8cb7d25b1c",
+    "function": "saveDraft",
+    "callee": "patchBoBot",
+    "wireSource": "packages/ui/scripts/p0-wire.test.mjs",
+    "wireSHA256": "664b0a11a69e1ca64459705464274ecac63c8ed6a0bbc45ca1151412478f60b3",
+    "executedUIPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "currentPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "postimage": "EXACT unchanged since executed UI",
+    "CI": {
+      "sha": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+      "url": "https://github.com/Ravasi-Energy/BOAgents/actions/runs/37491644118",
+      "logSHA256": "f621356d60e4e2dcb02cc058aa6e77a26a56c2102f7a219394b6ea72fadde677",
+      "namedCases": [
+        {
+          "line": 6569,
+          "text": "UI type check\tRun UI unit tests\t2026-10-06T15:58:21.2754745Z # Subtest: CALL-656ad5ffe3ff3e65b1 actual wire, response, denial/conflict keep input and no retry"
+        },
+        {
+          "line": 6570,
+          "text": "UI type check\tRun UI unit tests\t2026-10-06T15:58:21.2756112Z ok 126 - CALL-656ad5ffe3ff3e65b1 actual wire, response, denial/conflict keep input and no retry"
+        }
+      ]
+    }
+  },
+  {
+    "id": "CALL-aba5527b0a27d12476",
+    "requirements": [
+      "B-P0-3",
+      "B-P1-7"
+    ],
+    "product": "BOAgents",
+    "source": "packages/ui/src/app/bo/bots/[id]/page.tsx",
+    "sourceSHA256": "4e6917c67c635bb3ef2200349ca067b93f59e780a0712e236a7ccf8cb7d25b1c",
+    "function": "publish",
+    "callee": "publishBoBot",
+    "wireSource": "packages/ui/scripts/p0-wire.test.mjs",
+    "wireSHA256": "664b0a11a69e1ca64459705464274ecac63c8ed6a0bbc45ca1151412478f60b3",
+    "executedUIPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "currentPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "postimage": "EXACT unchanged since executed UI",
+    "CI": {
+      "sha": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+      "url": "https://github.com/Ravasi-Energy/BOAgents/actions/runs/37491644118",
+      "logSHA256": "f621356d60e4e2dcb02cc058aa6e77a26a56c2102f7a219394b6ea72fadde677",
+      "namedCases": [
+        {
+          "line": 6575,
+          "text": "UI type check\tRun UI unit tests\t2026-10-06T15:58:21.2758716Z # Subtest: CALL-aba5527b0a27d12476 actual wire, response, denial/conflict keep input and no retry"
+        },
+        {
+          "line": 6576,
+          "text": "UI type check\tRun UI unit tests\t2026-10-06T15:58:21.2760247Z ok 127 - CALL-aba5527b0a27d12476 actual wire, response, denial/conflict keep input and no retry"
+        }
+      ]
+    }
+  },
+  {
+    "id": "CALL-6090cec84695c54fa3",
+    "requirements": [
+      "B-P0-4"
+    ],
+    "product": "BOAgents",
+    "source": "packages/ui/src/app/bo/routing/page.tsx",
+    "sourceSHA256": "7af4aae1a533b51248d148b332870bc3233cf4c35f4c40b637c75ad5411269d9",
+    "function": "submit",
+    "callee": "updateBoCatalogEntry",
+    "wireSource": "packages/ui/scripts/p0-wire.test.mjs",
+    "wireSHA256": "664b0a11a69e1ca64459705464274ecac63c8ed6a0bbc45ca1151412478f60b3",
+    "executedUIPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "currentPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "postimage": "EXACT unchanged since executed UI",
+    "CI": {
+      "sha": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+      "url": "https://github.com/Ravasi-Energy/BOAgents/actions/runs/37491644118",
+      "logSHA256": "f621356d60e4e2dcb02cc058aa6e77a26a56c2102f7a219394b6ea72fadde677",
+      "namedCases": [
+        {
+          "line": 6581,
+          "text": "UI type check\tRun UI unit tests\t2026-10-06T15:58:21.2762852Z # Subtest: CALL-6090cec84695c54fa3 actual wire, response, denial/conflict keep input and no retry"
+        },
+        {
+          "line": 6582,
+          "text": "UI type check\tRun UI unit tests\t2026-10-06T15:58:21.2764229Z ok 128 - CALL-6090cec84695c54fa3 actual wire, response, denial/conflict keep input and no retry"
+        }
+      ]
+    }
+  },
+  {
+    "id": "CALL-1332014e0612f058ac",
+    "requirements": [
+      "B-P0-4"
+    ],
+    "product": "BOAgents",
+    "source": "packages/ui/src/app/bo/routing/page.tsx",
+    "sourceSHA256": "7af4aae1a533b51248d148b332870bc3233cf4c35f4c40b637c75ad5411269d9",
+    "function": "submit",
+    "callee": "createBoCatalogEntry",
+    "wireSource": "packages/ui/scripts/p0-wire.test.mjs",
+    "wireSHA256": "664b0a11a69e1ca64459705464274ecac63c8ed6a0bbc45ca1151412478f60b3",
+    "executedUIPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "currentPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "postimage": "EXACT unchanged since executed UI",
+    "CI": {
+      "sha": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+      "url": "https://github.com/Ravasi-Energy/BOAgents/actions/runs/37491644118",
+      "logSHA256": "f621356d60e4e2dcb02cc058aa6e77a26a56c2102f7a219394b6ea72fadde677",
+      "namedCases": [
+        {
+          "line": 6587,
+          "text": "UI type check\tRun UI unit tests\t2026-10-06T15:58:21.2767607Z # Subtest: CALL-1332014e0612f058ac actual wire, response, denial/conflict keep input and no retry"
+        },
+        {
+          "line": 6588,
+          "text": "UI type check\tRun UI unit tests\t2026-10-06T15:58:21.2768923Z ok 129 - CALL-1332014e0612f058ac actual wire, response, denial/conflict keep input and no retry"
+        }
+      ]
+    }
+  },
+  {
+    "id": "CALL-1449444e023f102ea5",
+    "requirements": [
+      "B-P0-5",
+      "B-P0-6",
+      "B-P0-9"
+    ],
+    "product": "BOAgents",
+    "source": "packages/ui/src/app/company-profile/page.tsx",
+    "sourceSHA256": "18db65b24090a2275253d52e90dda839de00cbc305f76acd6893505bf673cc20",
+    "function": "CompanyProfilePage",
+    "callee": "updateCompanyProfile",
+    "wireSource": "packages/ui/scripts/p0-wire.test.mjs",
+    "wireSHA256": "664b0a11a69e1ca64459705464274ecac63c8ed6a0bbc45ca1151412478f60b3",
+    "executedUIPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "currentPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "postimage": "EXACT unchanged since executed UI",
+    "CI": {
+      "sha": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+      "url": "https://github.com/Ravasi-Energy/BOAgents/actions/runs/37491644118",
+      "logSHA256": "f621356d60e4e2dcb02cc058aa6e77a26a56c2102f7a219394b6ea72fadde677",
+      "namedCases": [
+        {
+          "line": 6593,
+          "text": "UI type check\tRun UI unit tests\t2026-10-06T15:58:21.2771737Z # Subtest: CALL-1449444e023f102ea5 actual wire, response, denial/conflict keep input and no retry"
+        },
+        {
+          "line": 6594,
+          "text": "UI type check\tRun UI unit tests\t2026-10-06T15:58:21.2773064Z ok 130 - CALL-1449444e023f102ea5 actual wire, response, denial/conflict keep input and no retry"
+        }
+      ]
+    }
+  },
+  {
+    "id": "CALL-360a5cab1b04075270",
+    "requirements": [
+      "B-P0-10"
+    ],
+    "product": "BOAgents",
+    "source": "packages/ui/src/app/departments/[slug]/page.tsx",
+    "sourceSHA256": "7fc53c7f7b5197b83cba526a74bd92414efcc02fa0b76d9daf2843f76415054d",
+    "function": "DepartmentDetailPage",
+    "callee": "deleteDepartment",
+    "wireSource": "packages/ui/scripts/p0-wire.test.mjs",
+    "wireSHA256": "664b0a11a69e1ca64459705464274ecac63c8ed6a0bbc45ca1151412478f60b3",
+    "executedUIPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "currentPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "postimage": "EXACT unchanged since executed UI",
+    "CI": {
+      "sha": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+      "url": "https://github.com/Ravasi-Energy/BOAgents/actions/runs/37491644118",
+      "logSHA256": "f621356d60e4e2dcb02cc058aa6e77a26a56c2102f7a219394b6ea72fadde677",
+      "namedCases": [
+        {
+          "line": 6599,
+          "text": "UI type check\tRun UI unit tests\t2026-10-06T15:58:21.2775883Z # Subtest: CALL-360a5cab1b04075270 actual wire, response, denial/conflict keep input and no retry"
+        },
+        {
+          "line": 6600,
+          "text": "UI type check\tRun UI unit tests\t2026-10-06T15:58:21.2777212Z ok 131 - CALL-360a5cab1b04075270 actual wire, response, denial/conflict keep input and no retry"
+        }
+      ]
+    }
+  },
+  {
+    "id": "CALL-c73ac4cae80fa621a6",
+    "requirements": [
+      "B-P0-10"
+    ],
+    "product": "BOAgents",
+    "source": "packages/ui/src/app/departments/page.tsx",
+    "sourceSHA256": "85f461c3a585367ef8df949c8a317a20d918221167ac7117a9ce4a4cfa86e46a",
+    "function": "handleCreate",
+    "callee": "createDepartment",
+    "wireSource": "packages/ui/scripts/p0-wire.test.mjs",
+    "wireSHA256": "664b0a11a69e1ca64459705464274ecac63c8ed6a0bbc45ca1151412478f60b3",
+    "executedUIPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "currentPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "postimage": "EXACT unchanged since executed UI",
+    "CI": {
+      "sha": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+      "url": "https://github.com/Ravasi-Energy/BOAgents/actions/runs/37491644118",
+      "logSHA256": "f621356d60e4e2dcb02cc058aa6e77a26a56c2102f7a219394b6ea72fadde677",
+      "namedCases": [
+        {
+          "line": 6605,
+          "text": "UI type check\tRun UI unit tests\t2026-10-06T15:58:21.2780033Z # Subtest: CALL-c73ac4cae80fa621a6 actual wire, response, denial/conflict keep input and no retry"
+        },
+        {
+          "line": 6606,
+          "text": "UI type check\tRun UI unit tests\t2026-10-06T15:58:21.2781829Z ok 132 - CALL-c73ac4cae80fa621a6 actual wire, response, denial/conflict keep input and no retry"
+        }
+      ]
+    }
+  },
+  {
+    "id": "CALL-e4c017968bdef52e6f",
+    "requirements": [
+      "B-P0-7"
+    ],
+    "product": "BOAgents",
+    "source": "packages/ui/src/app/people/[id]/page.tsx",
+    "sourceSHA256": "362559470447118620b90df308e3fac4db8dbb01f214bb8534bbf16c5bdc8fd6",
+    "function": "save",
+    "callee": "updatePerson",
+    "wireSource": "packages/ui/scripts/p0-wire.test.mjs",
+    "wireSHA256": "664b0a11a69e1ca64459705464274ecac63c8ed6a0bbc45ca1151412478f60b3",
+    "executedUIPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "currentPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "postimage": "EXACT unchanged since executed UI",
+    "CI": {
+      "sha": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+      "url": "https://github.com/Ravasi-Energy/BOAgents/actions/runs/37491644118",
+      "logSHA256": "f621356d60e4e2dcb02cc058aa6e77a26a56c2102f7a219394b6ea72fadde677",
+      "namedCases": [
+        {
+          "line": 6611,
+          "text": "UI type check\tRun UI unit tests\t2026-10-06T15:58:21.2785611Z # Subtest: CALL-e4c017968bdef52e6f actual wire, response, denial/conflict keep input and no retry"
+        },
+        {
+          "line": 6612,
+          "text": "UI type check\tRun UI unit tests\t2026-10-06T15:58:21.2787472Z ok 133 - CALL-e4c017968bdef52e6f actual wire, response, denial/conflict keep input and no retry"
+        }
+      ]
+    }
+  },
+  {
+    "id": "CALL-21b2427503e74a226b",
+    "requirements": [
+      "B-P0-8",
+      "B-P0-10"
+    ],
+    "product": "BOAgents",
+    "source": "packages/ui/src/app/people/page.tsx",
+    "sourceSHA256": "9320c30bb505a6aa7ee399d5a0e371652f966f390cb4e981e0004c5dcb864cdc",
+    "function": "submit",
+    "callee": "createPerson",
+    "wireSource": "packages/ui/scripts/p0-wire.test.mjs",
+    "wireSHA256": "664b0a11a69e1ca64459705464274ecac63c8ed6a0bbc45ca1151412478f60b3",
+    "executedUIPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "currentPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "postimage": "EXACT unchanged since executed UI",
+    "CI": {
+      "sha": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+      "url": "https://github.com/Ravasi-Energy/BOAgents/actions/runs/37491644118",
+      "logSHA256": "f621356d60e4e2dcb02cc058aa6e77a26a56c2102f7a219394b6ea72fadde677",
+      "namedCases": [
+        {
+          "line": 6617,
+          "text": "UI type check\tRun UI unit tests\t2026-10-06T15:58:21.2792550Z # Subtest: CALL-21b2427503e74a226b actual wire, response, denial/conflict keep input and no retry"
+        },
+        {
+          "line": 6618,
+          "text": "UI type check\tRun UI unit tests\t2026-10-06T15:58:21.2814329Z ok 134 - CALL-21b2427503e74a226b actual wire, response, denial/conflict keep input and no retry"
+        }
+      ]
+    }
+  },
+  {
+    "id": "CALL-be87fa63a32f843d2f",
+    "requirements": [
+      "B-P0-1",
+      "B-P0-2"
+    ],
+    "product": "BOAgents",
+    "source": "packages/ui/src/app/settings/bo/page.tsx",
+    "sourceSHA256": "fafb837444457c69a084969414d9a1c363d9fb55c33ba6f945229ce50d52c20d",
+    "function": "save",
+    "callee": "putBoSetting",
+    "wireSource": "packages/ui/scripts/p0-wire.test.mjs",
+    "wireSHA256": "664b0a11a69e1ca64459705464274ecac63c8ed6a0bbc45ca1151412478f60b3",
+    "executedUIPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "currentPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "postimage": "EXACT unchanged since executed UI",
+    "CI": {
+      "sha": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+      "url": "https://github.com/Ravasi-Energy/BOAgents/actions/runs/37491644118",
+      "logSHA256": "f621356d60e4e2dcb02cc058aa6e77a26a56c2102f7a219394b6ea72fadde677",
+      "namedCases": [
+        {
+          "line": 6623,
+          "text": "UI type check\tRun UI unit tests\t2026-10-06T15:58:21.2825028Z # Subtest: CALL-be87fa63a32f843d2f actual wire, response, denial/conflict keep input and no retry"
+        },
+        {
+          "line": 6624,
+          "text": "UI type check\tRun UI unit tests\t2026-10-06T15:58:21.2826426Z ok 135 - CALL-be87fa63a32f843d2f actual wire, response, denial/conflict keep input and no retry"
+        }
+      ]
+    }
+  },
+  {
+    "id": "CALL-c9692973e9cc6ba228",
+    "requirements": [
+      "B-P0-10"
+    ],
+    "product": "BOAgents",
+    "source": "packages/ui/src/components/knowledge/CompanyPanel.tsx",
+    "sourceSHA256": "7709bf7dcbdf5f67951e4ea26f26fbb990b66527b481a1eef55431d4bacc3922",
+    "function": "handleFile",
+    "callee": "uploadDocument",
+    "wireSource": "packages/ui/scripts/p0-wire.test.mjs",
+    "wireSHA256": "664b0a11a69e1ca64459705464274ecac63c8ed6a0bbc45ca1151412478f60b3",
+    "executedUIPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "currentPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "postimage": "EXACT unchanged since executed UI",
+    "CI": {
+      "sha": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+      "url": "https://github.com/Ravasi-Energy/BOAgents/actions/runs/37491644118",
+      "logSHA256": "f621356d60e4e2dcb02cc058aa6e77a26a56c2102f7a219394b6ea72fadde677",
+      "namedCases": [
+        {
+          "line": 6629,
+          "text": "UI type check\tRun UI unit tests\t2026-10-06T15:58:21.2829136Z # Subtest: CALL-c9692973e9cc6ba228 actual wire, response, denial/conflict keep input and no retry"
+        },
+        {
+          "line": 6630,
+          "text": "UI type check\tRun UI unit tests\t2026-10-06T15:58:21.2830860Z ok 136 - CALL-c9692973e9cc6ba228 actual wire, response, denial/conflict keep input and no retry"
+        }
+      ]
+    }
+  },
+  {
+    "id": "CALL-debae20ef752be0361",
+    "requirements": [
+      "B-P0-10"
+    ],
+    "product": "BOAgents",
+    "source": "packages/ui/src/components/onboard/OnboardDraftReview.tsx",
+    "sourceSHA256": "8f335749509cbb541a9f5a2eb2180acbc84347e422e7bd8bf2084b031c27444e",
+    "function": "save",
+    "callee": "commitOnboardDraft",
+    "wireSource": "packages/ui/scripts/p0-wire.test.mjs",
+    "wireSHA256": "664b0a11a69e1ca64459705464274ecac63c8ed6a0bbc45ca1151412478f60b3",
+    "executedUIPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "currentPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "postimage": "EXACT unchanged since executed UI",
+    "CI": {
+      "sha": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+      "url": "https://github.com/Ravasi-Energy/BOAgents/actions/runs/37491644118",
+      "logSHA256": "f621356d60e4e2dcb02cc058aa6e77a26a56c2102f7a219394b6ea72fadde677",
+      "namedCases": [
+        {
+          "line": 6635,
+          "text": "UI type check\tRun UI unit tests\t2026-10-06T15:58:21.2833595Z # Subtest: CALL-debae20ef752be0361 actual wire, response, denial/conflict keep input and no retry"
+        },
+        {
+          "line": 6636,
+          "text": "UI type check\tRun UI unit tests\t2026-10-06T15:58:21.2834914Z ok 137 - CALL-debae20ef752be0361 actual wire, response, denial/conflict keep input and no retry"
+        }
+      ]
+    }
+  }
+]

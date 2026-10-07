@@ -1,0 +1,256 @@
+{
+  "date": "2026-10-07T17:46:29.367832+03:00",
+  "product": "BOAgents",
+  "owner": "A01",
+  "repo": "https://github.com/Ravasi-Energy/BOAgents",
+  "branch": "codex/livrare-completa",
+  "pin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+  "worktree": "clean",
+  "remotePinMatches": true,
+  "CI": {
+    "url": "https://github.com/Ravasi-Energy/BOAgents/actions/runs/37491644118",
+    "sha": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "conclusion": "success",
+    "jobs": [
+      {
+        "name": "Python lint & type check",
+        "url": "https://github.com/Ravasi-Energy/BOAgents/actions/runs/37491644118/job/112366301844",
+        "conclusion": "success"
+      },
+      {
+        "name": "Python tests",
+        "url": "https://github.com/Ravasi-Energy/BOAgents/actions/runs/37491644118/job/112366302244",
+        "conclusion": "success"
+      },
+      {
+        "name": "UI type check",
+        "url": "https://github.com/Ravasi-Energy/BOAgents/actions/runs/37491644118/job/112366302407",
+        "conclusion": "success"
+      }
+    ]
+  },
+  "normalCIrowBindings": [],
+  "UIpatchPostimages": [
+    {
+      "product": "BOAgents",
+      "file": "packages/ui/src/app/company-profile/page.tsx",
+      "sha": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+      "postSHA256": "18db65b24090a2275253d52e90dda839de00cbc305f76acd6893505bf673cc20",
+      "expectedSHA256": "18db65b24090a2275253d52e90dda839de00cbc305f76acd6893505bf673cc20",
+      "postimage": "EXACT"
+    },
+    {
+      "product": "BOAgents",
+      "file": "packages/ui/src/lib/api.ts",
+      "sha": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+      "postSHA256": "5c38d4b7b25d29a9db2208f94c0a730f858caab85682e9488c094be19d59ff10",
+      "expectedSHA256": "5c38d4b7b25d29a9db2208f94c0a730f858caab85682e9488c094be19d59ff10",
+      "postimage": "EXACT"
+    },
+    {
+      "product": "BOAgents",
+      "file": "packages/ui/src/lib/person-edit.ts",
+      "sha": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+      "postSHA256": "e39a1df7ca6e0d41a769e40468e0931d8a79543df22fd0d7f790c3b950b46b17",
+      "expectedSHA256": "e39a1df7ca6e0d41a769e40468e0931d8a79543df22fd0d7f790c3b950b46b17",
+      "postimage": "EXACT"
+    },
+    {
+      "product": "BOAgents",
+      "file": "packages/ui/src/lib/p0-edit.ts",
+      "sha": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+      "postSHA256": "df4acdd3d106b9808cd622628b763886010ecbe4ce7a4d679f2c9e60b908b40e",
+      "expectedSHA256": "df4acdd3d106b9808cd622628b763886010ecbe4ce7a4d679f2c9e60b908b40e",
+      "postimage": "EXACT"
+    },
+    {
+      "product": "BOAgents",
+      "file": "packages/ui/scripts/p0-compose.test.mjs",
+      "sha": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+      "postSHA256": "cff2b98ca6857076326213a080b754eecaa231643f3976c9bc8f4c2a205ebe1b",
+      "expectedSHA256": "cff2b98ca6857076326213a080b754eecaa231643f3976c9bc8f4c2a205ebe1b",
+      "postimage": "EXACT"
+    },
+    {
+      "product": "BOAgents",
+      "file": "packages/ui/scripts/p0-corrective.test.mjs",
+      "sha": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+      "postSHA256": "76f077a1f9b7d750286956536b9178ec42917e11c0e602b1c7ede4d98f3b005d",
+      "expectedSHA256": "76f077a1f9b7d750286956536b9178ec42917e11c0e602b1c7ede4d98f3b005d",
+      "postimage": "EXACT"
+    },
+    {
+      "product": "BOAgents",
+      "file": "packages/ui/scripts/p0-wire.test.mjs",
+      "sha": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+      "postSHA256": "664b0a11a69e1ca64459705464274ecac63c8ed6a0bbc45ca1151412478f60b3",
+      "expectedSHA256": "664b0a11a69e1ca64459705464274ecac63c8ed6a0bbc45ca1151412478f60b3",
+      "postimage": "EXACT"
+    }
+  ],
+  "remainingUIProductDelta": [],
+  "publication": "HANDOFF owner publishes only codex/livrare-completa; remote docs status separately in branchPostimages, never inferred from handoff.",
+  "acceptance": "FINAL PREDAT PENTRU REVIEW;0UIproductholds/0quietCIproductholds;6observabilitylimits; NOT globalACCEPTAT",
+  "unchangedUIEvidence": "No 51-capture/unchanged flow rerun. Current application files unchanged; head advanced only by tests/backup tooling as documented.",
+  "canonicalSources": [
+    {
+      "relativeSource": "coordonare/sarcini/EXECUTIE-ETAPE-COMPLETE-F1-F8.md",
+      "sha256": "3555a6999d9f9a3a3bc5aed6ad3a155fc80794a593b93d26bccb694843da3cc5",
+      "sync": "Owner publishes durable relevant coordination docs with canonical-source pointer; this package is evidence, not normative fork."
+    },
+    {
+      "relativeSource": "coordonare/sarcini/FISA-INCHIDERE-GRUPA.md",
+      "sha256": "8d28f8eecfaf5587157cbf687c5b4485a27e52ae7831b1ed2cf90f2338c7218e",
+      "sync": "Owner publishes durable relevant coordination docs with canonical-source pointer; this package is evidence, not normative fork."
+    },
+    {
+      "relativeSource": "coordonare/sarcini/RESTANTE-INCHIDERE-F1-F2.md",
+      "sha256": "cd523cad5eefaf4b22dc00dab7ad3043e56bd0a2af4188664e2e2fefa7c3156a",
+      "sync": "Owner publishes durable relevant coordination docs with canonical-source pointer; this package is evidence, not normative fork."
+    },
+    {
+      "relativeSource": "coordonare/sarcini/INCHIDERE-ETAPE-PUBLICARE-RAMURI-20261007.md",
+      "sha256": "257e1c6dde34bf5632a9f9f9df7993b67d4ade19b29a820ece90c8b890c92b57",
+      "sync": "Active branch-only/no unchanged CI rerun mandate; canonical source on coordination table"
+    },
+    {
+      "relativeSource": "coordonare/sarcini/INCHIDERE-ETAPE-PUBLICARE-RAMURI-20261007.md",
+      "sha256": "257e1c6dde34bf5632a9f9f9df7993b67d4ade19b29a820ece90c8b890c92b57",
+      "sync": "Active branch-only/no unchanged CI rerun mandate; canonical source on coordination table"
+    },
+    {
+      "relativeSource": "coordonare/sarcini/GITHUB-LA-ZI.md",
+      "sha256": "ae1ff515fb2c02070a1bd047a214449dc12270db5836d9259e5a02abacbe94cd",
+      "sync": "Publication instructions superseded by current branch-only mandate"
+    },
+    {
+      "relativeSource": "coordonare/sarcini/INCHIDERE-ETAPE-PUBLICARE-RAMURI-20261007.md",
+      "sha256": "257e1c6dde34bf5632a9f9f9df7993b67d4ade19b29a820ece90c8b890c92b57",
+      "sync": "Active branch-only/no unchanged CI rerun mandate; canonical source on coordination table"
+    },
+    {
+      "relativeSource": "coordonare/sarcini/FINALIZARE-ETAPE-F1-F2-20261007.md",
+      "sha256": "009efde514c330febbcf543fcd3c888019715a98e313653ad38ad745af5aab88",
+      "sync": "Active coordinator task/decision; source canonical, no normative fork"
+    },
+    {
+      "relativeSource": "coordonare/rapoarte/coordonator/REVIEW-F1-F2-20261007/DECIZIE-DOVEZI.md",
+      "sha256": "c8a1bb9409f219109e9c28e4773aadd08187db311b02200ce890bbadf84ccbc0",
+      "sync": "Active coordinator task/decision; source canonical, no normative fork"
+    }
+  ],
+  "mandate": "FINALIZARE-ETAPE-F1-F2-20261007.md",
+  "branchURL": "https://github.com/Ravasi-Energy/BOAgents/tree/codex/livrare-completa",
+  "historicalPR": "https://github.com/Ravasi-Energy/BOAgents/pull/11",
+  "PRpolicy": "No new PR; historical PR not updated/merged. Final single PR perrepo after full Mac verification by authorized owner.",
+  "branchPostimages": {
+    "product": "BOAgents",
+    "owner": "A01",
+    "branch": "codex/livrare-completa",
+    "baseCodePin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "remoteHead": "da81e60422c5e0bb51dfba7861e3b706a19eb828",
+    "observedAt": "2026-10-07T17:00:14.328787+03:00",
+    "branchURL": "https://github.com/Ravasi-Energy/BOAgents/tree/codex/livrare-completa",
+    "writes": "none; no checkout/push/PR",
+    "wirePostimages": [
+      {
+        "id": "CALL-656ad5ffe3ff3e65b1",
+        "file": "packages/ui/scripts/p0-wire.test.mjs",
+        "state": "EXACT"
+      },
+      {
+        "id": "CALL-aba5527b0a27d12476",
+        "file": "packages/ui/scripts/p0-wire.test.mjs",
+        "state": "EXACT"
+      },
+      {
+        "id": "CALL-6090cec84695c54fa3",
+        "file": "packages/ui/scripts/p0-wire.test.mjs",
+        "state": "EXACT"
+      },
+      {
+        "id": "CALL-1332014e0612f058ac",
+        "file": "packages/ui/scripts/p0-wire.test.mjs",
+        "state": "EXACT"
+      },
+      {
+        "id": "CALL-1449444e023f102ea5",
+        "file": "packages/ui/scripts/p0-wire.test.mjs",
+        "state": "EXACT"
+      },
+      {
+        "id": "CALL-360a5cab1b04075270",
+        "file": "packages/ui/scripts/p0-wire.test.mjs",
+        "state": "EXACT"
+      },
+      {
+        "id": "CALL-c73ac4cae80fa621a6",
+        "file": "packages/ui/scripts/p0-wire.test.mjs",
+        "state": "EXACT"
+      },
+      {
+        "id": "CALL-e4c017968bdef52e6f",
+        "file": "packages/ui/scripts/p0-wire.test.mjs",
+        "state": "EXACT"
+      },
+      {
+        "id": "CALL-21b2427503e74a226b",
+        "file": "packages/ui/scripts/p0-wire.test.mjs",
+        "state": "EXACT"
+      },
+      {
+        "id": "CALL-be87fa63a32f843d2f",
+        "file": "packages/ui/scripts/p0-wire.test.mjs",
+        "state": "EXACT"
+      },
+      {
+        "id": "CALL-c9692973e9cc6ba228",
+        "file": "packages/ui/scripts/p0-wire.test.mjs",
+        "state": "EXACT"
+      },
+      {
+        "id": "CALL-debae20ef752be0361",
+        "file": "packages/ui/scripts/p0-wire.test.mjs",
+        "state": "EXACT"
+      }
+    ],
+    "activeUIPatchPostimages": [
+      {
+        "file": "packages/ui/src/app/company-profile/page.tsx",
+        "state": "EXACT"
+      },
+      {
+        "file": "packages/ui/src/lib/api.ts",
+        "state": "EXACT"
+      },
+      {
+        "file": "packages/ui/src/lib/person-edit.ts",
+        "state": "EXACT"
+      },
+      {
+        "file": "packages/ui/src/lib/p0-edit.ts",
+        "state": "EXACT"
+      },
+      {
+        "file": "packages/ui/scripts/p0-compose.test.mjs",
+        "state": "EXACT"
+      },
+      {
+        "file": "packages/ui/scripts/p0-corrective.test.mjs",
+        "state": "EXACT"
+      },
+      {
+        "file": "packages/ui/scripts/p0-wire.test.mjs",
+        "state": "EXACT"
+      }
+    ],
+    "independentRegressionPostimages": [],
+    "sourceEquivalentToVerifiedCandidate": true,
+    "publication": "OWNER_DOCS_PENDING"
+  },
+  "coordinatorDecision": {
+    "source": "coordonare/rapoarte/coordonator/REVIEW-F1-F2-20261007/DECIZIE-DOVEZI.md",
+    "sha256": "c8a1bb9409f219109e9c28e4773aadd08187db311b02200ce890bbadf84ccbc0",
+    "disposition": "6historical quietCI holds are observabilitylimits, not current product defects. Native/transport independent final PASS; global headless/exhaustiveness acceptance remains coordinator."
+  }
+}

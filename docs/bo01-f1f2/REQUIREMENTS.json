@@ -1,0 +1,749 @@
+[
+  {
+    "id": "B-P0-1",
+    "group": "F2",
+    "title": "Settings CSV",
+    "routeMethodWorker": "PATCH /bo/settings/{key}; allowed_providers",
+    "scope": "Global installation roster/profile, tenant fixed by server; adversarial beta hint403. No fake per-tenant roster.",
+    "executedUIpin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "currentPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "readback": [
+      "Delta +patru after unu,doi,trei; explicitremove unu; empty no-op; stale409 draft retained/rebase/reload",
+      "writers B1; actual Next two workers"
+    ],
+    "PD1to6": {
+      "PD1": "3+1 cardinality/no lost siblings where collection seeded: see concrete native assertions and actual browser JSON",
+      "PD2": "N/A unrelated nested list; concrete operations do not supply nested collection deltas",
+      "PD3": "Omitted/empty collections no erase, explicit remove only; code and counts in bound tests",
+      "PD4": "N/A simultaneous formwriters: read-only or create/workerrole boundary; applicable race/recovery criterion below",
+      "PD5": "Strict version current/stale/v−3 where mutation contract hasCAS; no v−1 assumption",
+      "PD6": "Explicit deletion/remove only; delete refusal/fullreadback and encoding route boundary"
+    },
+    "nativeTests": [
+      {
+        "source": "packages/core/tests/unit/bughunt02/test_contract_r3.py",
+        "function": "test_csv_remove_op_and_empty_noop",
+        "currentSHA256": "0f8d42af1e9a0721a5edcc6ec1eab5dc4d48b217917d1ff214714372c897988b",
+        "nodeID": "packages/core/tests/unit/bughunt02/test_contract_r3.py::test_csv_remove_op_and_empty_noop",
+        "link": "https://github.com/Ravasi-Energy/BOAgents/blob/00d12b675cd7bf552ac495df4160a7c78fe5bccb/packages/core/tests/unit/bughunt02/test_contract_r3.py",
+        "assertions": [
+          {
+            "line": 286,
+            "expression": "value == \"doi,trei,patru\""
+          }
+        ],
+        "fixtureArguments": [
+          "bo_db"
+        ],
+        "sourceChangedSinceOriginalBinding": false
+      },
+      {
+        "source": "packages/core/tests/unit/bughunt02/test_pd_data_loss.py",
+        "function": "test_pd_stale_csv_version_keeps_list",
+        "currentSHA256": "b693e9e008a2862eca7d819384e923d2b6a247e84bda0d5d866ccffbcf00d7f0",
+        "nodeID": "packages/core/tests/unit/bughunt02/test_pd_data_loss.py::test_pd_stale_csv_version_keeps_list",
+        "link": "https://github.com/Ravasi-Energy/BOAgents/blob/00d12b675cd7bf552ac495df4160a7c78fe5bccb/packages/core/tests/unit/bughunt02/test_pd_data_loss.py",
+        "assertions": [
+          {
+            "line": 178,
+            "expression": "after == \"unu,doi,trei\""
+          }
+        ],
+        "fixtureArguments": [
+          "bo_db",
+          "seeded_csv"
+        ],
+        "sourceChangedSinceOriginalBinding": true
+      }
+    ],
+    "currentStatus": "PASS probe țintite; PREDAT PENTRU REVIEW, not ACCEPTAT",
+    "holds": [],
+    "externalLimit": "LocalFS/syntheticJWT/SQLitevector not NFS/multinode/GoogleOAuth/Chroma; no real data/provider"
+  },
+  {
+    "id": "B-P0-2",
+    "group": "F2",
+    "title": "Trust publishers/keys",
+    "routeMethodWorker": "PATCH /bo/settings/bo.trust_store",
+    "scope": "Global installation roster/profile, tenant fixed by server; adversarial beta hint403. No fake per-tenant roster.",
+    "executedUIpin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "currentPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "readback": [
+      "Nested [] no-op; add+remove consumed; key/publisher survivors readback/reload; viewer403 whole setting/version intact"
+    ],
+    "PD1to6": {
+      "PD1": "3+1 cardinality/no lost siblings where collection seeded: see concrete native assertions and actual browser JSON",
+      "PD2": "Nested collection survivor union/remove assertions",
+      "PD3": "Omitted/empty collections no erase, explicit remove only; code and counts in bound tests",
+      "PD4": "Twoactors different fields with conflict before effects and explicit rebase; no inferredbase/no echo",
+      "PD5": "Strict version current/stale/v−3 where mutation contract hasCAS; no v−1 assumption",
+      "PD6": "Explicit deletion/remove only; delete refusal/fullreadback and encoding route boundary"
+    },
+    "nativeTests": [
+      {
+        "source": "packages/core/tests/unit/bughunt02/test_contract_r3.py",
+        "function": "test_trust_store_keyed_upsert_and_remove",
+        "currentSHA256": "0f8d42af1e9a0721a5edcc6ec1eab5dc4d48b217917d1ff214714372c897988b",
+        "nodeID": "packages/core/tests/unit/bughunt02/test_contract_r3.py::test_trust_store_keyed_upsert_and_remove",
+        "link": "https://github.com/Ravasi-Energy/BOAgents/blob/00d12b675cd7bf552ac495df4160a7c78fe5bccb/packages/core/tests/unit/bughunt02/test_contract_r3.py",
+        "assertions": [
+          {
+            "line": 261,
+            "expression": "[p[\"publisherId\"] for p in saved[\"publishers\"]] == [\"p2\", \"p3\"]"
+          },
+          {
+            "line": 262,
+            "expression": "[k[\"keyId\"] for k in saved[\"keys\"]] == [\"key-p2\", \"key-p3\"]"
+          },
+          {
+            "line": 263,
+            "expression": "saved[\"policy\"][\"policyVersion\"] == \"pol-1\""
+          },
+          {
+            "line": 264,
+            "expression": "\"publishers_remove\" not in saved"
+          }
+        ],
+        "fixtureArguments": [
+          "bo_db"
+        ],
+        "sourceChangedSinceOriginalBinding": false
+      },
+      {
+        "source": "packages/core/tests/unit/bughunt02/test_pd_data_loss.py",
+        "function": "test_pd4_trust_store_different_fields",
+        "currentSHA256": "b693e9e008a2862eca7d819384e923d2b6a247e84bda0d5d866ccffbcf00d7f0",
+        "nodeID": "packages/core/tests/unit/bughunt02/test_pd_data_loss.py::test_pd4_trust_store_different_fields",
+        "link": "https://github.com/Ravasi-Energy/BOAgents/blob/00d12b675cd7bf552ac495df4160a7c78fe5bccb/packages/core/tests/unit/bughunt02/test_pd_data_loss.py",
+        "assertions": [
+          {
+            "line": 270,
+            "expression": "saved[\"policy\"][\"policyVersion\"] == \"pol-A\""
+          },
+          {
+            "line": 271,
+            "expression": "saved[\"version\"] == \"trust-B\""
+          }
+        ],
+        "fixtureArguments": [
+          "bo_db"
+        ],
+        "sourceChangedSinceOriginalBinding": true
+      }
+    ],
+    "currentStatus": "PASS probe țintite; PREDAT PENTRU REVIEW, not ACCEPTAT",
+    "holds": [],
+    "externalLimit": "LocalFS/syntheticJWT/SQLitevector not NFS/multinode/GoogleOAuth/Chroma; no real data/provider"
+  },
+  {
+    "id": "B-P0-3",
+    "group": "F2",
+    "title": "Bot draft/publish",
+    "routeMethodWorker": "PATCH /bo/bots/{id}; POST /bo/bots/{id}/publish",
+    "scope": "Global installation roster/profile, tenant fixed by server; adversarial beta hint403. No fake per-tenant roster.",
+    "executedUIpin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "currentPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "readback": [
+      "Sibling steps/caps/policies preserved; 409 retains local draft; explicit rebase; concurrent add+delete; publish missing422/stale409/viewer403 no effects, valid200 then active version/reload"
+    ],
+    "PD1to6": {
+      "PD1": "3+1 cardinality/no lost siblings where collection seeded: see concrete native assertions and actual browser JSON",
+      "PD2": "Nested collection survivor union/remove assertions",
+      "PD3": "Omitted/empty collections no erase, explicit remove only; code and counts in bound tests",
+      "PD4": "Twoactors different fields with conflict before effects and explicit rebase; no inferredbase/no echo",
+      "PD5": "Strict version current/stale/v−3 where mutation contract hasCAS; no v−1 assumption",
+      "PD6": "Explicit deletion/remove only; delete refusal/fullreadback and encoding route boundary"
+    },
+    "nativeTests": [
+      {
+        "source": "packages/core/tests/unit/bughunt02/test_contract_r3.py",
+        "function": "test_omission_probe_step_edit_preserves_siblings",
+        "currentSHA256": "0f8d42af1e9a0721a5edcc6ec1eab5dc4d48b217917d1ff214714372c897988b",
+        "nodeID": "packages/core/tests/unit/bughunt02/test_contract_r3.py::test_omission_probe_step_edit_preserves_siblings",
+        "link": "https://github.com/Ravasi-Energy/BOAgents/blob/00d12b675cd7bf552ac495df4160a7c78fe5bccb/packages/core/tests/unit/bughunt02/test_contract_r3.py",
+        "assertions": [
+          {
+            "line": 76,
+            "expression": "[s[\"id\"] for s in steps] == [\"s1\", \"s2\", \"s3\"]"
+          },
+          {
+            "line": 77,
+            "expression": "steps[0][\"message\"] == \"edit\""
+          }
+        ],
+        "fixtureArguments": [
+          "bo_db"
+        ],
+        "sourceChangedSinceOriginalBinding": false
+      },
+      {
+        "source": "packages/core/tests/unit/bughunt02/test_contract_r3.py",
+        "function": "test_base_older_than_vminus1_refused",
+        "currentSHA256": "0f8d42af1e9a0721a5edcc6ec1eab5dc4d48b217917d1ff214714372c897988b",
+        "nodeID": "packages/core/tests/unit/bughunt02/test_contract_r3.py::test_base_older_than_vminus1_refused",
+        "link": "https://github.com/Ravasi-Energy/BOAgents/blob/00d12b675cd7bf552ac495df4160a7c78fe5bccb/packages/core/tests/unit/bughunt02/test_contract_r3.py",
+        "assertions": [
+          {
+            "line": 100,
+            "expression": "[s[\"id\"] for s in steps] == [\"s1\", \"s2\", \"s3\"]"
+          }
+        ],
+        "fixtureArguments": [
+          "bo_db"
+        ],
+        "sourceChangedSinceOriginalBinding": false
+      },
+      {
+        "source": "packages/core/tests/unit/bughunt02/test_contract_r3.py",
+        "function": "test_two_tabs_third_write_between_rebase_flow",
+        "currentSHA256": "0f8d42af1e9a0721a5edcc6ec1eab5dc4d48b217917d1ff214714372c897988b",
+        "nodeID": "packages/core/tests/unit/bughunt02/test_contract_r3.py::test_two_tabs_third_write_between_rebase_flow",
+        "link": "https://github.com/Ravasi-Energy/BOAgents/blob/00d12b675cd7bf552ac495df4160a7c78fe5bccb/packages/core/tests/unit/bughunt02/test_contract_r3.py",
+        "assertions": [
+          {
+            "line": 123,
+            "expression": "content[\"steps\"][0][\"message\"] == \"mesaj-A\""
+          },
+          {
+            "line": 124,
+            "expression": "content[\"trigger\"][\"cron\"] == \"0 6 * * *\""
+          }
+        ],
+        "fixtureArguments": [
+          "bo_db"
+        ],
+        "sourceChangedSinceOriginalBinding": false
+      },
+      {
+        "source": "packages/core/tests/unit/bughunt02/test_contract_r3.py",
+        "function": "test_concurrent_adds_and_explicit_delete",
+        "currentSHA256": "0f8d42af1e9a0721a5edcc6ec1eab5dc4d48b217917d1ff214714372c897988b",
+        "nodeID": "packages/core/tests/unit/bughunt02/test_contract_r3.py::test_concurrent_adds_and_explicit_delete",
+        "link": "https://github.com/Ravasi-Energy/BOAgents/blob/00d12b675cd7bf552ac495df4160a7c78fe5bccb/packages/core/tests/unit/bughunt02/test_contract_r3.py",
+        "assertions": [
+          {
+            "line": 145,
+            "expression": "[s[\"id\"] for s in _draft_steps(TENANT, created[\"id\"])] == [\"s1\", \"s3\", \"s4\"]"
+          }
+        ],
+        "fixtureArguments": [
+          "bo_db"
+        ],
+        "sourceChangedSinceOriginalBinding": false
+      },
+      {
+        "source": "packages/core/tests/unit/bughunt02/test_contract_r3.py",
+        "function": "test_empty_collections_are_noops_everywhere",
+        "currentSHA256": "0f8d42af1e9a0721a5edcc6ec1eab5dc4d48b217917d1ff214714372c897988b",
+        "nodeID": "packages/core/tests/unit/bughunt02/test_contract_r3.py::test_empty_collections_are_noops_everywhere",
+        "link": "https://github.com/Ravasi-Energy/BOAgents/blob/00d12b675cd7bf552ac495df4160a7c78fe5bccb/packages/core/tests/unit/bughunt02/test_contract_r3.py",
+        "assertions": [
+          {
+            "line": 158,
+            "expression": "len(content[\"steps\"]) == 1"
+          },
+          {
+            "line": 159,
+            "expression": "content[\"capability_refs\"] == [\"cap-unu\"]"
+          },
+          {
+            "line": 160,
+            "expression": "content[\"policy_refs\"] == [\"pol-unu\"]"
+          }
+        ],
+        "fixtureArguments": [
+          "bo_db"
+        ],
+        "sourceChangedSinceOriginalBinding": false
+      },
+      {
+        "source": "packages/core/tests/unit/bughunt02/test_contract_r3.py",
+        "function": "test_publish_requires_expected_version",
+        "currentSHA256": "0f8d42af1e9a0721a5edcc6ec1eab5dc4d48b217917d1ff214714372c897988b",
+        "nodeID": "packages/core/tests/unit/bughunt02/test_contract_r3.py::test_publish_requires_expected_version",
+        "link": "https://github.com/Ravasi-Energy/BOAgents/blob/00d12b675cd7bf552ac495df4160a7c78fe5bccb/packages/core/tests/unit/bughunt02/test_contract_r3.py",
+        "assertions": [
+          {
+            "line": 182,
+            "expression": "definition[\"active_version_no\"] is None"
+          }
+        ],
+        "fixtureArguments": [
+          "bo_db"
+        ],
+        "sourceChangedSinceOriginalBinding": false
+      }
+    ],
+    "currentStatus": "PASS probe țintite; PREDAT PENTRU REVIEW, not ACCEPTAT",
+    "holds": [],
+    "externalLimit": "LocalFS/syntheticJWT/SQLitevector not NFS/multinode/GoogleOAuth/Chroma; no real data/provider"
+  },
+  {
+    "id": "B-P0-4",
+    "group": "F2",
+    "title": "Catalog editors",
+    "routeMethodWorker": "PATCH /bo/catalog/{id} + nested capabilities",
+    "scope": "Global installation roster/profile, tenant fixed by server; adversarial beta hint403. No fake per-tenant roster.",
+    "executedUIpin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "currentPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "readback": [
+      "v−3 stale409; cost20→10 intentional; concurrent capability add retained and explicitremove; reload"
+    ],
+    "PD1to6": {
+      "PD1": "3+1 cardinality/no lost siblings where collection seeded: see concrete native assertions and actual browser JSON",
+      "PD2": "Nested collection survivor union/remove assertions",
+      "PD3": "Omitted/empty collections no erase, explicit remove only; code and counts in bound tests",
+      "PD4": "Twoactors different fields with conflict before effects and explicit rebase; no inferredbase/no echo",
+      "PD5": "Strict version current/stale/v−3 where mutation contract hasCAS; no v−1 assumption",
+      "PD6": "Explicit deletion/remove only; delete refusal/fullreadback and encoding route boundary"
+    },
+    "nativeTests": [
+      {
+        "source": "packages/core/tests/unit/bughunt02/test_contract_r3.py",
+        "function": "test_catalog_upsert_and_explicit_remove",
+        "currentSHA256": "0f8d42af1e9a0721a5edcc6ec1eab5dc4d48b217917d1ff214714372c897988b",
+        "nodeID": "packages/core/tests/unit/bughunt02/test_contract_r3.py::test_catalog_upsert_and_explicit_remove",
+        "link": "https://github.com/Ravasi-Energy/BOAgents/blob/00d12b675cd7bf552ac495df4160a7c78fe5bccb/packages/core/tests/unit/bughunt02/test_contract_r3.py",
+        "assertions": [
+          {
+            "line": 228,
+            "expression": "sorted(saved.capabilities) == [\"a\", \"b\", \"c\"]"
+          },
+          {
+            "line": 234,
+            "expression": "sorted(saved.capabilities) == [\"b\", \"c\"]"
+          }
+        ],
+        "fixtureArguments": [
+          "bo_db"
+        ],
+        "sourceChangedSinceOriginalBinding": false
+      },
+      {
+        "source": "packages/core/tests/unit/bughunt02/test_pd_data_loss.py",
+        "function": "test_pd3_catalog_omitted_capabilities_default_empty",
+        "currentSHA256": "b693e9e008a2862eca7d819384e923d2b6a247e84bda0d5d866ccffbcf00d7f0",
+        "nodeID": "packages/core/tests/unit/bughunt02/test_pd_data_loss.py::test_pd3_catalog_omitted_capabilities_default_empty",
+        "link": "https://github.com/Ravasi-Energy/BOAgents/blob/00d12b675cd7bf552ac495df4160a7c78fe5bccb/packages/core/tests/unit/bughunt02/test_pd_data_loss.py",
+        "assertions": [
+          {
+            "line": 488,
+            "expression": "list(saved.capabilities) == [\"unu\", \"doi\", \"trei\"]"
+          },
+          {
+            "line": 489,
+            "expression": "list(saved.regions) == [\"eu\", \"us\", \"ro\"]"
+          }
+        ],
+        "fixtureArguments": [
+          "bo_db"
+        ],
+        "sourceChangedSinceOriginalBinding": true
+      }
+    ],
+    "currentStatus": "PASS probe țintite; PREDAT PENTRU REVIEW, not ACCEPTAT",
+    "holds": [],
+    "externalLimit": "LocalFS/syntheticJWT/SQLitevector not NFS/multinode/GoogleOAuth/Chroma; no real data/provider"
+  },
+  {
+    "id": "B-P0-5",
+    "group": "F2",
+    "title": "Profile vendors",
+    "routeMethodWorker": "PATCH /company-profile",
+    "scope": "Global installation roster/profile, tenant fixed by server; adversarial beta hint403. No fake per-tenant roster.",
+    "executedUIpin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "currentPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "readback": [
+      "vendors 3+1→4; []/omission preserve; normalPD tests plus actual profile page CAS/readback"
+    ],
+    "PD1to6": {
+      "PD1": "3+1 cardinality/no lost siblings where collection seeded: see concrete native assertions and actual browser JSON",
+      "PD2": "N/A unrelated nested list; concrete operations do not supply nested collection deltas",
+      "PD3": "Omitted/empty collections no erase, explicit remove only; code and counts in bound tests",
+      "PD4": "Twoactors different fields with conflict before effects and explicit rebase; no inferredbase/no echo",
+      "PD5": "Strict version current/stale/v−3 where mutation contract hasCAS; no v−1 assumption",
+      "PD6": "Explicit deletion/remove only; delete refusal/fullreadback and encoding route boundary"
+    },
+    "nativeTests": [
+      {
+        "source": "packages/core/tests/unit/bughunt02/test_pd_data_loss.py",
+        "function": "test_pd1_company_profile_vendors",
+        "currentSHA256": "b693e9e008a2862eca7d819384e923d2b6a247e84bda0d5d866ccffbcf00d7f0",
+        "nodeID": "packages/core/tests/unit/bughunt02/test_pd_data_loss.py::test_pd1_company_profile_vendors",
+        "link": "https://github.com/Ravasi-Energy/BOAgents/blob/00d12b675cd7bf552ac495df4160a7c78fe5bccb/packages/core/tests/unit/bughunt02/test_pd_data_loss.py",
+        "assertions": [],
+        "fixtureArguments": [
+          "tmp_path",
+          "monkeypatch"
+        ],
+        "sourceChangedSinceOriginalBinding": true
+      },
+      {
+        "source": "packages/core/tests/unit/bughunt02/test_pd_data_loss.py",
+        "function": "test_pd3_company_profile_empty_vendors",
+        "currentSHA256": "b693e9e008a2862eca7d819384e923d2b6a247e84bda0d5d866ccffbcf00d7f0",
+        "nodeID": "packages/core/tests/unit/bughunt02/test_pd_data_loss.py::test_pd3_company_profile_empty_vendors",
+        "link": "https://github.com/Ravasi-Energy/BOAgents/blob/00d12b675cd7bf552ac495df4160a7c78fe5bccb/packages/core/tests/unit/bughunt02/test_pd_data_loss.py",
+        "assertions": [],
+        "fixtureArguments": [
+          "tmp_path",
+          "monkeypatch"
+        ],
+        "sourceChangedSinceOriginalBinding": true
+      },
+      {
+        "source": "packages/core/tests/unit/bughunt02/test_pd_data_loss.py",
+        "function": "test_pd_company_profile_omitted_vendors_stay",
+        "currentSHA256": "b693e9e008a2862eca7d819384e923d2b6a247e84bda0d5d866ccffbcf00d7f0",
+        "nodeID": "packages/core/tests/unit/bughunt02/test_pd_data_loss.py::test_pd_company_profile_omitted_vendors_stay",
+        "link": "https://github.com/Ravasi-Energy/BOAgents/blob/00d12b675cd7bf552ac495df4160a7c78fe5bccb/packages/core/tests/unit/bughunt02/test_pd_data_loss.py",
+        "assertions": [
+          {
+            "line": 595,
+            "expression": "loaded.industry == \"alt\""
+          },
+          {
+            "line": 596,
+            "expression": "loaded.vendors == [\"unu\", \"doi\", \"trei\"]"
+          }
+        ],
+        "fixtureArguments": [
+          "tmp_path",
+          "monkeypatch"
+        ],
+        "sourceChangedSinceOriginalBinding": true
+      }
+    ],
+    "currentStatus": "PASS probe țintite; PREDAT PENTRU REVIEW, not ACCEPTAT",
+    "holds": [],
+    "externalLimit": "LocalFS/syntheticJWT/SQLitevector not NFS/multinode/GoogleOAuth/Chroma; no real data/provider"
+  },
+  {
+    "id": "B-P0-6",
+    "group": "F2",
+    "title": "Profile financials",
+    "routeMethodWorker": "PATCH /company-profile",
+    "scope": "Global installation roster/profile, tenant fixed by server; adversarial beta hint403. No fake per-tenant roster.",
+    "executedUIpin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "currentPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "readback": [
+      "Two browser contexts samev1; burn7000 winner200; runway10 loser409 with draft; rebase200 retains burn7000/runway10; 12 HTTP two-process races one200/one409; restart durable readback"
+    ],
+    "PD1to6": {
+      "PD1": "3+1 cardinality/no lost siblings where collection seeded: see concrete native assertions and actual browser JSON; N/A collection cardinality: scalar/identity/worker does not replace collections",
+      "PD2": "N/A unrelated nested list; concrete operations do not supply nested collection deltas",
+      "PD3": "No implicit blank clear. Scalar guard invalid/empty refused or omission preserves; worker has no user list replacement.",
+      "PD4": "Twoactors different fields with conflict before effects and explicit rebase; no inferredbase/no echo",
+      "PD5": "Strict version current/stale/v−3 where mutation contract hasCAS; no v−1 assumption",
+      "PD6": "N/A list delete; clear_contact flag only People, memoryjob/retention scoped lifecycle or identityread criterion"
+    },
+    "nativeTests": [
+      {
+        "source": "packages/core/tests/unit/bughunt02/test_pd_data_loss.py",
+        "function": "test_pd4_company_profile_partial_financials",
+        "currentSHA256": "b693e9e008a2862eca7d819384e923d2b6a247e84bda0d5d866ccffbcf00d7f0",
+        "nodeID": "packages/core/tests/unit/bughunt02/test_pd_data_loss.py::test_pd4_company_profile_partial_financials",
+        "link": "https://github.com/Ravasi-Energy/BOAgents/blob/00d12b675cd7bf552ac495df4160a7c78fe5bccb/packages/core/tests/unit/bughunt02/test_pd_data_loss.py",
+        "assertions": [
+          {
+            "line": 580,
+            "expression": "fin.runway_months == 12"
+          },
+          {
+            "line": 581,
+            "expression": "fin.burn_rate_monthly == 1234.56"
+          },
+          {
+            "line": 582,
+            "expression": "fin.burn_rate_currency == \"RON\""
+          },
+          {
+            "line": 583,
+            "expression": "fin.key_metrics == {\"clienti\": 3}"
+          }
+        ],
+        "fixtureArguments": [
+          "tmp_path",
+          "monkeypatch"
+        ],
+        "sourceChangedSinceOriginalBinding": true
+      }
+    ],
+    "currentStatus": "PASS probe țintite; PREDAT PENTRU REVIEW, not ACCEPTAT",
+    "holds": [],
+    "externalLimit": "LocalFS/syntheticJWT/SQLitevector not NFS/multinode/GoogleOAuth/Chroma; no real data/provider"
+  },
+  {
+    "id": "B-P0-7",
+    "group": "F2",
+    "title": "People departments",
+    "routeMethodWorker": "PATCH /people/{id}",
+    "scope": "Global installation roster/profile, tenant fixed by server; adversarial beta hint403. No fake per-tenant roster.",
+    "executedUIpin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "currentPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "readback": [
+      "department_slugs3+1→4; []/omitted survive; selected native and person delta composer"
+    ],
+    "PD1to6": {
+      "PD1": "3+1 cardinality/no lost siblings where collection seeded: see concrete native assertions and actual browser JSON",
+      "PD2": "N/A unrelated nested list; concrete operations do not supply nested collection deltas",
+      "PD3": "Omitted/empty collections no erase, explicit remove only; code and counts in bound tests",
+      "PD4": "Twoactors different fields with conflict before effects and explicit rebase; no inferredbase/no echo",
+      "PD5": "Strict version current/stale/v−3 where mutation contract hasCAS; no v−1 assumption",
+      "PD6": "Explicit deletion/remove only; delete refusal/fullreadback and encoding route boundary"
+    },
+    "nativeTests": [
+      {
+        "source": "packages/core/tests/unit/bughunt02/test_pd_data_loss.py",
+        "function": "test_pd1_people_department_slugs",
+        "currentSHA256": "b693e9e008a2862eca7d819384e923d2b6a247e84bda0d5d866ccffbcf00d7f0",
+        "nodeID": "packages/core/tests/unit/bughunt02/test_pd_data_loss.py::test_pd1_people_department_slugs",
+        "link": "https://github.com/Ravasi-Energy/BOAgents/blob/00d12b675cd7bf552ac495df4160a7c78fe5bccb/packages/core/tests/unit/bughunt02/test_pd_data_loss.py",
+        "assertions": [
+          {
+            "line": 625,
+            "expression": "person is not None"
+          }
+        ],
+        "fixtureArguments": [
+          "tmp_path",
+          "monkeypatch"
+        ],
+        "sourceChangedSinceOriginalBinding": true
+      }
+    ],
+    "currentStatus": "PASS probe țintite; PREDAT PENTRU REVIEW, not ACCEPTAT",
+    "holds": [],
+    "externalLimit": "LocalFS/syntheticJWT/SQLitevector not NFS/multinode/GoogleOAuth/Chroma; no real data/provider"
+  },
+  {
+    "id": "B-P0-8",
+    "group": "F1",
+    "title": "People creation",
+    "routeMethodWorker": "POST /people",
+    "scope": "Global installation roster/profile, tenant fixed by server; adversarial beta hint403. No fake per-tenant roster.",
+    "executedUIpin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "currentPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "readback": [
+      "Viewer fullapp403 no row; admin201 persistent person; real Next roster currentJWT boundary clear tested separately"
+    ],
+    "PD1to6": {
+      "PD1": "3+1 cardinality/no lost siblings where collection seeded: see concrete native assertions and actual browser JSON; N/A collection cardinality: scalar/identity/worker does not replace collections",
+      "PD2": "N/A unrelated nested list; concrete operations do not supply nested collection deltas",
+      "PD3": "No implicit blank clear. Scalar guard invalid/empty refused or omission preserves; worker has no user list replacement.",
+      "PD4": "N/A simultaneous formwriters: read-only or create/workerrole boundary; applicable race/recovery criterion below",
+      "PD5": "N/A userCAS: create/worker/read route; uses identity/scope/queue/fencing criterion instead",
+      "PD6": "N/A list delete; clear_contact flag only People, memoryjob/retention scoped lifecycle or identityread criterion"
+    },
+    "nativeTests": [
+      {
+        "source": "packages/core/tests/unit/bughunt02/test_http_mutation_gates.py",
+        "function": "test_people_create_viewer_403_admin_201_and_persists",
+        "currentSHA256": "6ecb54335263628598180cc0b05f446fbac9fd7d3e394abf367581b944e6f80b",
+        "nodeID": "packages/core/tests/unit/bughunt02/test_http_mutation_gates.py::test_people_create_viewer_403_admin_201_and_persists",
+        "link": "https://github.com/Ravasi-Energy/BOAgents/blob/00d12b675cd7bf552ac495df4160a7c78fe5bccb/packages/core/tests/unit/bughunt02/test_http_mutation_gates.py",
+        "assertions": [
+          {
+            "line": 92,
+            "expression": "client.post(\"/people\", json=body).status_code == 403"
+          },
+          {
+            "line": 93,
+            "expression": "client.post(\"/people\", json=body, headers=VIEWER).status_code == 403"
+          },
+          {
+            "line": 94,
+            "expression": "people_store.list_people(db_path=db) == []"
+          },
+          {
+            "line": 97,
+            "expression": "created.status_code == 201"
+          },
+          {
+            "line": 98,
+            "expression": "len(people_store.list_people(db_path=db)) == 1"
+          },
+          {
+            "line": 105,
+            "expression": "principal.status_code == 403"
+          },
+          {
+            "line": 106,
+            "expression": "all(\n        not p.is_principal for p in people_store.list_people(db_path=db)\n    )"
+          }
+        ],
+        "fixtureArguments": [
+          "tmp_path",
+          "monkeypatch"
+        ],
+        "sourceChangedSinceOriginalBinding": true
+      }
+    ],
+    "currentStatus": "PASS probe țintite; PREDAT PENTRU REVIEW, not ACCEPTAT",
+    "holds": [],
+    "externalLimit": "LocalFS/syntheticJWT/SQLitevector not NFS/multinode/GoogleOAuth/Chroma; no real data/provider"
+  },
+  {
+    "id": "B-P0-9",
+    "group": "F1",
+    "title": "Profile role boundary",
+    "routeMethodWorker": "PATCH /company-profile",
+    "scope": "Global installation roster/profile, tenant fixed by server; adversarial beta hint403. No fake per-tenant roster.",
+    "executedUIpin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "currentPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "readback": [
+      "Actual Next viewer403 full durable profile unchanged; tenant beta hint403; admin/profile two contexts200/409/rebase"
+    ],
+    "PD1to6": {
+      "PD1": "3+1 cardinality/no lost siblings where collection seeded: see concrete native assertions and actual browser JSON; N/A collection cardinality: scalar/identity/worker does not replace collections",
+      "PD2": "N/A unrelated nested list; concrete operations do not supply nested collection deltas",
+      "PD3": "No implicit blank clear. Scalar guard invalid/empty refused or omission preserves; worker has no user list replacement.",
+      "PD4": "N/A simultaneous formwriters: read-only or create/workerrole boundary; applicable race/recovery criterion below",
+      "PD5": "Strict version current/stale/v−3 where mutation contract hasCAS; no v−1 assumption",
+      "PD6": "N/A list delete; clear_contact flag only People, memoryjob/retention scoped lifecycle or identityread criterion"
+    },
+    "nativeTests": [
+      {
+        "source": "packages/core/tests/unit/bughunt02/test_http_mutation_gates.py",
+        "function": "test_profile_patch_viewer_403_and_admin_200",
+        "currentSHA256": "6ecb54335263628598180cc0b05f446fbac9fd7d3e394abf367581b944e6f80b",
+        "nodeID": "packages/core/tests/unit/bughunt02/test_http_mutation_gates.py::test_profile_patch_viewer_403_and_admin_200",
+        "link": "https://github.com/Ravasi-Energy/BOAgents/blob/00d12b675cd7bf552ac495df4160a7c78fe5bccb/packages/core/tests/unit/bughunt02/test_http_mutation_gates.py",
+        "assertions": [
+          {
+            "line": 67,
+            "expression": "client.patch(\"/company-profile\", json={\"vendors\": [\"patru\"]}).status_code == 403"
+          },
+          {
+            "line": 68,
+            "expression": "client.patch(\n        \"/company-profile\", json={\"vendors\": [\"patru\"]}, headers=VIEWER\n    ).status_code == 403"
+          },
+          {
+            "line": 71,
+            "expression": "CompanyProfile.load_from_yaml(path).vendors == [\"unu\", \"doi\", \"trei\"]"
+          },
+          {
+            "line": 76,
+            "expression": "ok.status_code == 200"
+          },
+          {
+            "line": 77,
+            "expression": "CompanyProfile.load_from_yaml(path).vendors == [\"unu\", \"doi\", \"trei\", \"patru\"]"
+          }
+        ],
+        "fixtureArguments": [
+          "tmp_path",
+          "monkeypatch"
+        ],
+        "sourceChangedSinceOriginalBinding": true
+      }
+    ],
+    "currentStatus": "PASS probe țintite; PREDAT PENTRU REVIEW, not ACCEPTAT",
+    "holds": [],
+    "externalLimit": "LocalFS/syntheticJWT/SQLitevector not NFS/multinode/GoogleOAuth/Chroma; no real data/provider"
+  },
+  {
+    "id": "B-P0-10",
+    "group": "F1",
+    "title": "4 fullapp mutators",
+    "routeMethodWorker": "POST /departments; DELETE /departments/{name}; POST /documents (upload multipart); POST /interview/commit",
+    "scope": "Global installation roster/profile, tenant fixed by server; adversarial beta hint403. No fake per-tenant roster.",
+    "executedUIpin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "currentPin": "00d12b675cd7bf552ac495df4160a7c78fe5bccb",
+    "readback": [
+      "Parametrized completeapp HTTP four mutations; viewer403 state unchanged; admin positive row/file/readback; synthetic fixtures; serializers multipart and payload bind separately"
+    ],
+    "PD1to6": {
+      "PD1": "3+1 cardinality/no lost siblings where collection seeded: see concrete native assertions and actual browser JSON; N/A collection cardinality: scalar/identity/worker does not replace collections",
+      "PD2": "N/A unrelated nested list; concrete operations do not supply nested collection deltas",
+      "PD3": "No implicit blank clear. Scalar guard invalid/empty refused or omission preserves; worker has no user list replacement.",
+      "PD4": "N/A simultaneous formwriters: read-only or create/workerrole boundary; applicable race/recovery criterion below",
+      "PD5": "N/A userCAS: create/worker/read route; uses identity/scope/queue/fencing criterion instead",
+      "PD6": "N/A list delete; clear_contact flag only People, memoryjob/retention scoped lifecycle or identityread criterion"
+    },
+    "nativeTests": [
+      {
+        "source": "packages/core/tests/unit/test_bughunt_p0_mutators_full_app.py",
+        "function": "test_p0_mutator_authorization_and_persistence",
+        "currentSHA256": "f82b1f43e98132d1d1aa9804bcd79cc6564134de9f7c8131c9fa99b47c981368",
+        "nodeID": "packages/core/tests/unit/test_bughunt_p0_mutators_full_app.py::test_p0_mutator_authorization_and_persistence",
+        "link": "https://github.com/Ravasi-Energy/BOAgents/blob/00d12b675cd7bf552ac495df4160a7c78fe5bccb/packages/core/tests/unit/test_bughunt_p0_mutators_full_app.py",
+        "assertions": [
+          {
+            "line": 130,
+            "expression": "not violations"
+          },
+          {
+            "line": 133,
+            "expression": "response.status_code==expected"
+          },
+          {
+            "line": 135,
+            "expression": "len(after['departments'])==len(before['departments'])+1"
+          },
+          {
+            "line": 136,
+            "expression": "client.get('/departments',headers=headers(role)).json()==after['departments']"
+          },
+          {
+            "line": 138,
+            "expression": "len(after['departments'])==len(before['departments'])-1"
+          },
+          {
+            "line": 139,
+            "expression": "{d['config']['slug'] for d in after['departments']}=={slugs[0],slugs[2]}"
+          },
+          {
+            "line": 140,
+            "expression": "client.get('/departments/'+slugs[1],headers=headers(role)).status_code==404"
+          },
+          {
+            "line": 142,
+            "expression": "(root/'docs/synthetic.txt').read_bytes()==b'Synthetic text only'"
+          },
+          {
+            "line": 143,
+            "expression": "response.json()['chunks_indexed']==len(vector.readback())>0"
+          },
+          {
+            "line": 144,
+            "expression": "json.loads(vector.readback()[0][2])['filename']=='synthetic.txt'"
+          },
+          {
+            "line": 145,
+            "expression": "client.get('/documents/synthetic.txt',headers=headers(role)).json()['content']=='Synthetic text only'"
+          },
+          {
+            "line": 148,
+            "expression": "CompanyProfile.load_from_yaml(root/'profile.yaml').name=='After Synthetic'"
+          },
+          {
+            "line": 149,
+            "expression": "after['saved']['reviewed'] is True"
+          },
+          {
+            "line": 150,
+            "expression": "any(p['full_name']=='Principal Synthetic' and p['is_principal'] for p in after['people'])"
+          },
+          {
+            "line": 151,
+            "expression": "any(d['config']['title']=='Patru Synthetic' for d in after['departments'])"
+          },
+          {
+            "line": 152,
+            "expression": "client.get('/company-profile',headers=headers(role)).json()['name']=='After Synthetic'"
+          }
+        ],
+        "fixtureArguments": [
+          "full_app",
+          "operation",
+          "role"
+        ],
+        "sourceChangedSinceOriginalBinding": false
+      }
+    ],
+    "currentStatus": "PASS probe țintite; PREDAT PENTRU REVIEW, not ACCEPTAT",
+    "holds": [],
+    "externalLimit": "LocalFS/syntheticJWT/SQLitevector not NFS/multinode/GoogleOAuth/Chroma; no real data/provider"
+  }
+]

@@ -1,0 +1,63 @@
+{
+  "at": "2026-10-07T17:46:29.367832+03:00",
+  "files": [
+    {
+      "file": "BACKEND-PROVENANCE.json",
+      "bytes": 2704,
+      "sha256": "d82963e32c9f1c80532cc0b5654fd43b631d2bae007ac51e18bdd418c3163899"
+    },
+    {
+      "file": "CALLERS.json",
+      "bytes": 16612,
+      "sha256": "ae54456c435668d29b6cfb65bcc22547f880ea22f8e1631c6145c59948bb5ce1"
+    },
+    {
+      "file": "CANDIDATE.json",
+      "bytes": 10472,
+      "sha256": "5646fa9032df8ae7f57f61b1c44ad1813c806d799205a3c69eb35cc1583467c0"
+    },
+    {
+      "file": "CAPTURES.json",
+      "bytes": 2015,
+      "sha256": "f4b34e285b99990f8e0da2688578dd23679e185565afda4b9018eee3732a2ada"
+    },
+    {
+      "file": "README.md",
+      "bytes": 3385,
+      "sha256": "9129fa41c8caff3aedb7a5a51a4ae6fc6d7832b18645c20bbae5e32998809508"
+    },
+    {
+      "file": "REPRODUCE.md",
+      "bytes": 3924,
+      "sha256": "21667a570b7b91e1a0c5a653999d5663656f91ddf5ba48b86dce990d4939bbb0"
+    },
+    {
+      "file": "REQUIREMENTS.json",
+      "bytes": 36752,
+      "sha256": "dd278ce04a1b2c9adb3664b639c419f743be360967e8d2bfbfc168cf6dbc00bb"
+    },
+    {
+      "file": "captures/people-clear-desktop.png",
+      "bytes": 111757,
+      "sha256": "a06d4bb9859ddd32ac9d415cacbc8dbb07c8a51e3980b575e12a0b4db58b3905"
+    },
+    {
+      "file": "captures/people-clear-mobile.png",
+      "bytes": 52243,
+      "sha256": "ae539875062a0b40c36eaa61d729d8909a8def5f8a3507ebb4c0be256231cce8"
+    },
+    {
+      "file": "captures/people-clear-tablet.png",
+      "bytes": 84835,
+      "sha256": "b1cb90dac38159279525e460596d71530e25a3a7a9e24eff71f27bea26a1529f"
+    },
+    {
+      "file": "verify-evidence.py",
+      "bytes": 1790,
+      "sha256": "f26ab4e7a28c8a7b8f947fedbe8d12f17efa611197a2542fb9bb572aa20f1da9"
+    }
+  ],
+  "bytes": 326489,
+  "publication": "Whitelist only; manifest self excluded. No env/DB/JWT/run/sourceexport/cache files.",
+  "sanitization": "Selected9images visually reviewed; synthetic demo labels preserved, masks present, no raw token/personal path. Text schema whitelist omits JWT/log bodies and personal absolute paths."
+}

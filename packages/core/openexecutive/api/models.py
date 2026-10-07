@@ -8,13 +8,33 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 def _iso_currency(v: str | None) -> str | None:
     """ISO-4217 alphabetic code (USD, EUR, RON); None stays unknown — it is
-    never coerced into a default currency."""
+    never coerced into a default currency. Membership in the active
+    ISO-4217 list is required — a well-formed but invented code (ZZZ) is
+    refused, matching the UI's ``Intl.supportedValuesOf`` whitelist."""
     if v is None:
         return None
     import re
 
-    if not re.match(r"^[A-Z]{3}$", v):
-        raise ValueError("așteptat cod ISO-4217 (ex. USD, EUR, RON)")
+    from openexecutive.memory.company_profile import ISO_4217_CODES
+
+    if not re.match(r"^[A-Z]{3}$", v) or v not in ISO_4217_CODES:
+        raise ValueError("așteptat cod ISO-4217 valid (ex. USD, EUR, RON)")
+    return v
+
+
+def _money_max_two_decimals(v: Decimal | None) -> Decimal | None:
+    """Exact-money boundary (F3/D07): values with more than two fractional
+    digits are refused outright rather than silently rounded to cents —
+    the stored value stays exact or the write never happens."""
+    if v is not None:
+        exponent = v.as_tuple().exponent
+        if not isinstance(exponent, int) or not v.is_finite():
+            raise ValueError("sumă invalidă")
+        if exponent < -2:
+            raise ValueError(
+                "suma are mai mult de 2 zecimale — corectează sau "
+                "aproximează explicit; nu rotunjim în tăcere"
+            )
     return v
 
 
@@ -254,6 +274,9 @@ class CompanyProfileUpdateRequest(BaseModel):
     expected_version: int | None = None
 
     _check_arr_ccy = field_validator("annual_revenue_arr_currency")(_iso_currency)
+    _check_arr_decimals = field_validator("annual_revenue_arr")(
+        _money_max_two_decimals
+    )
 
 
 

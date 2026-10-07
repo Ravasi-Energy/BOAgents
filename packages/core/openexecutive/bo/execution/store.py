@@ -559,11 +559,26 @@ def submit_run(
         # correlation_id replays the already-accepted run — it must not
         # create a second row nor double-reserve budget. BEGIN IMMEDIATE
         # serializes writers, so the SELECT-then-INSERT is race-free.
+        # The same correlation_id with a DIFFERENT payload (B-P1-1) is a
+        # hard 409 — the durable run stays untouched.
         existing = conn.execute(
-            "SELECT run_id FROM bo_exec_runs WHERE tenant = ? AND correlation_id = ?",
+            "SELECT run_id, mandate_id, parent_run_id, steps_json, "
+            "budget_reserved FROM bo_exec_runs "
+            "WHERE tenant = ? AND correlation_id = ?",
             (tenant, correlation_id),
         ).fetchone()
         if existing is not None:
+            if (
+                existing["mandate_id"] != mandate.mandate_id
+                or (existing["parent_run_id"] or None) != parent_run_id
+                or json.loads(existing["steps_json"]) != steps
+                or Decimal(existing["budget_reserved"]) != budget_amount
+            ):
+                raise PayloadConflictError(
+                    f"correlation_id {correlation_id!r} este deja folosit "
+                    f"cu alt payload — runul {existing['run_id']} rămâne "
+                    f"intact"
+                )
             return get_run(tenant, existing["run_id"], db_path=db_path)
         _reserve_budget(
             conn, tenant, mandate, run_id, budget_amount, slots, now

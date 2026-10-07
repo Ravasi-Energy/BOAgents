@@ -19,6 +19,45 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # currency explicitly — None means "not recorded", never an implied USD.
 _CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 
+# Active ISO-4217 alphabetic codes (incl. funds/precious-metal X-codes —
+# the same list the UI gets from ``Intl.supportedValuesOf("currency")``).
+# Shape alone ("^[A-Z]{3}$") is not enough: ZZZ passes the regex but is
+# not a real currency, and money must never carry an invented currency
+# (F3/D07).
+ISO_4217_CODES = frozenset([
+    "AED", "AFN", "ALL", "AMD", "ANG", "AOA", "ARS", "AUD", "AWG", "AZN",
+    "BAM", "BBD", "BDT", "BGN", "BHD", "BIF", "BMD", "BND", "BOB", "BOV",
+    "BRL", "BSD", "BTN", "BWP", "BYN", "BZD",
+    "CAD", "CDF", "CHE", "CHF", "CHW", "CLF", "CLP", "CNY", "COP", "COU",
+    "CRC", "CUC", "CUP", "CVE", "CZK",
+    "DJF", "DKK", "DOP", "DZD",
+    "EGP", "ERN", "ETB", "EUR",
+    "FJD", "FKP",
+    "GBP", "GEL", "GHS", "GIP", "GMD", "GNF", "GTQ", "GYD",
+    "HKD", "HNL", "HTG", "HUF",
+    "IDR", "ILS", "INR", "IQD", "IRR", "ISK",
+    "JMD", "JOD", "JPY",
+    "KES", "KGS", "KHR", "KMF", "KPW", "KRW", "KWD", "KYD", "KZT",
+    "LAK", "LBP", "LKR", "LRD", "LSL", "LYD",
+    "MAD", "MDL", "MGA", "MKD", "MMK", "MNT", "MOP", "MRU", "MUR", "MVR",
+    "MWK", "MXN", "MXV", "MYR", "MZN",
+    "NAD", "NGN", "NIO", "NOK", "NPR", "NZD",
+    "OMR",
+    "PAB", "PEN", "PGK", "PHP", "PKR", "PLN", "PYG",
+    "QAR",
+    "RON", "RSD", "RUB", "RWF",
+    "SAR", "SBD", "SCR", "SDG", "SEK", "SGD", "SHP", "SLE", "SLL", "SOS",
+    "SRD", "SSP", "STN", "SVC", "SYP", "SZL",
+    "THB", "TJS", "TMT", "TND", "TOP", "TRY", "TTD", "TWD", "TZS",
+    "UAH", "UGX", "USD", "USN", "UYI", "UYU", "UYW", "UZS",
+    "VED", "VES", "VND", "VUV",
+    "WST",
+    "XAF", "XAG", "XAU", "XBA", "XBB", "XBC", "XBD", "XCD", "XDR", "XOF",
+    "XPD", "XPF", "XPT", "XSU", "XTS", "XUA", "XXX",
+    "YER",
+    "ZAR", "ZMW", "ZWL",
+])
+
 
 # ---------------------------------------------------------------------------
 # Cross-process write fence (CONTROL R14 — PROFILE-CAS-RACE)
@@ -150,8 +189,8 @@ def _persisted_version(path: Path) -> int:
 def _currency_code(v: str | None) -> str | None:
     if v is None:
         return None
-    if not isinstance(v, str) or not _CURRENCY_RE.match(v):
-        raise ValueError("așteptat cod ISO-4217 (ex. USD, EUR, RON)")
+    if not isinstance(v, str) or not _CURRENCY_RE.match(v) or v not in ISO_4217_CODES:
+        raise ValueError("așteptat cod ISO-4217 valid (ex. USD, EUR, RON)")
     return v
 
 

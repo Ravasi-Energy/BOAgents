@@ -446,10 +446,25 @@ async def test_br4_public_load_fixture_snapshot_failure_and_rollback(
         "# Fixture doc\n\nfixture-marker")
     monkeypatch.setattr(fixture_loader, "FIXTURES_ROOT", fixture_root)
 
+    # _load_from_dir swallows snapshot errors (best-effort on empty envs);
+    # spy so a swallowed failure is diagnosable, not silent.
+    snapshot_errors: list[str] = []
+    _orig_snapshot = fixture_loader.snapshot_user_state
+
+    def _spy_snapshot(s: Any, **kw: Any) -> dict:
+        try:
+            return _orig_snapshot(s, **kw)
+        except Exception as exc:  # pragma: no cover - diagnostic surface
+            snapshot_errors.append(repr(exc))
+            raise
+
+    monkeypatch.setattr(
+        fixture_loader, "snapshot_user_state", _spy_snapshot)
+
     # Happy path: seed 3→1, auto-snapshot, sentinel, parked data intact.
     summary = await fixture_loader.load_fixture("demo_f5", settings)
     assert summary["docs_indexed"] >= 1
-    assert summary["auto_snapshot_taken"] is True
+    assert summary["auto_snapshot_taken"] is True, snapshot_errors
     assert _name(company / "_user_backup" / "profile.yaml") == "User Co"
     assert _name(company / "profile.yaml") == "Demo F5"
     assert sorted(p.name for p in docs.glob("*.md")) == ["only.md"]

@@ -1,4 +1,4 @@
-import { signIn, auth } from "@/auth";
+import { signIn, auth, checkEmailAllowed } from "@/auth";
 import { redirect } from "next/navigation";
 
 type SearchParams = Promise<{ callbackUrl?: string; error?: string }>;
@@ -15,9 +15,9 @@ export default async function SignInPage({ searchParams }: { searchParams: Searc
   const { callbackUrl, error } = await searchParams;
   const safeDest = safeCallbackUrl(callbackUrl);
 
-  // If already signed in, bounce straight to the destination.
+  // A decodable JWT may already be revoked. Revalidate before redirecting.
   const session = await auth();
-  if (session?.user) {
+  if (session?.user?.email && (await checkEmailAllowed(session.user.email.toLowerCase())).allowed) {
     redirect(safeDest);
   }
 

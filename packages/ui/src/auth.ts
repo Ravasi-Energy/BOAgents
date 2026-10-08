@@ -36,7 +36,7 @@ const loadRoster = createRosterLoader({
 });
 
 // Both login and existing JWT authorization revalidate the current DTO.
-const checkEmailAllowed = (email: string) =>
+export const checkEmailAllowed = (email: string) =>
   resolveAllowed(email, ENV_ALLOWED, loadRoster);
 
 // Fire-and-forget audit call to the backend. Never awaited — auth must never

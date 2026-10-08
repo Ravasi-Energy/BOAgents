@@ -1,7 +1,7 @@
 "use client";
 
 import { useParams, useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import TimeframePicker, { suggestPeriodValue } from "@/components/TimeframePicker";
 import {
@@ -905,7 +905,7 @@ export default function DepartmentDetailPage() {
                         </div>
                       </div>
                     </div>
-                    {[
+                    {([
                       ["Mission", dept.config.charter.mission || "—"],
                       ...(dept.config.head_person_id != null
                         ? [["Head", people.find((p) => p.id === dept.config.head_person_id)?.full_name ?? `Person #${dept.config.head_person_id}`]]
@@ -918,7 +918,7 @@ export default function DepartmentDetailPage() {
                       ...((dept.config.watched_entities ?? []).length > 0
                         ? [["Watched entities", (dept.config.watched_entities ?? []).join(", ")]]
                         : []),
-                    ].map(([label, value]) => (
+                    ] as [string, ReactNode][]).map(([label, value]) => (
                       <div key={label} className="flex items-start gap-3 py-2">
                         <div className="w-36 flex-shrink-0 text-xs text-fg-muted pt-0.5">{label}</div>
                         <div className="text-sm text-fg">{value}</div>

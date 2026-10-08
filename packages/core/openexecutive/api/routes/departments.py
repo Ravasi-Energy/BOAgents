@@ -12,11 +12,13 @@ headers, same shape as Phase A's /morning-brief).
 from __future__ import annotations
 
 import logging
+from decimal import Decimal
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field, field_validator
 
+from openexecutive.api.models import _money_max_two_decimals
 from openexecutive.bo import identity as bo_identity
 from openexecutive.departments import registry, store
 from openexecutive.departments.models import (
@@ -67,7 +69,7 @@ class DepartmentPatch(BaseModel):
     head_persona_slug: str | None = None
     cadences: dict[str, str] | None = None
     headcount: int | None = None
-    budget_usd: float | None = None
+    budget_usd: Decimal | None = None
     # Department-scoped broadcast channels. Each is independently
     # nullable — the request distinguishes "field omitted" (leave as-is)
     # from "field explicitly null" (clear back to NULL) via _UNSET in
@@ -78,6 +80,10 @@ class DepartmentPatch(BaseModel):
     # Named external entities the department wants watched (strong grounding
     # for the research watch policy). Sending `[]` clears the list.
     watched_entities: list[str] | None = Field(default=None, max_length=50)
+
+    _check_budget_decimals = field_validator("budget_usd")(
+        _money_max_two_decimals
+    )
 
     @field_validator("watched_entities")
     @classmethod

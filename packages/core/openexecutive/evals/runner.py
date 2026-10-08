@@ -24,6 +24,7 @@ import contextlib
 import logging
 import os
 from collections.abc import AsyncGenerator, Callable, Coroutine
+from decimal import Decimal
 from typing import Any
 
 from openexecutive.evals.judges import judge_chat, judge_triage, judge_workflow
@@ -333,7 +334,9 @@ def _make_chat_runner(
                         annual_revenue_arr=ctx.get("arr"),
                     )
                     if ctx.get("monthly_burn"):
-                        profile.financials.burn_rate_monthly = ctx["monthly_burn"]
+                        profile.financials.burn_rate_monthly = Decimal(
+                            str(ctx["monthly_burn"])
+                        )
                     if ctx.get("runway_months"):
                         profile.financials.runway_months = ctx["runway_months"]
                     session = Session(company_profile=profile)

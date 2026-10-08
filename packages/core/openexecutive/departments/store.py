@@ -16,6 +16,7 @@ import sqlite3
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 from openexecutive.departments.charters import (
@@ -110,7 +111,7 @@ def initialize_db(db_path: Path | None = None) -> None:
                 head_persona_slug TEXT,
                 cadences_json TEXT NOT NULL DEFAULT '{}',
                 headcount INTEGER,
-                budget_usd REAL,
+                budget_usd TEXT,
                 updated_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS department_goals (
@@ -138,6 +139,64 @@ def initialize_db(db_path: Path | None = None) -> None:
         _migrate_add_channel_columns(conn)
         _migrate_add_last_reviewed_at_column(conn)
         _migrate_add_watched_entities_column(conn)
+        _migrate_budget_usd_text(conn)
+
+
+def _migrate_budget_usd_text(conn: sqlite3.Connection) -> None:
+    """Rebuild `departments.budget_usd` REAL → TEXT (exact decimal string).
+
+    Money must not round-trip through binary floats (D07/F3): the column now
+    stores the canonical decimal text. REAL affinity would coerce a bound
+    string back to float, so the fix is a table rebuild — same pattern as
+    `_migrate_specialist_key_nullable`. Existing REAL values convert via
+    CAST to their shortest-repr text (e.g. 12500.0 → '12500.0'), which is
+    the honest bound of what a float column ever recorded.
+    """
+    cols = conn.execute("PRAGMA table_info(departments)").fetchall()
+    budget_col = next((c for c in cols if c["name"] == "budget_usd"), None)
+    if budget_col is None or budget_col["type"].upper() == "TEXT":
+        return
+    logger.info("departments: migrating budget_usd column to TEXT")
+    if conn.in_transaction:
+        conn.commit()
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.executescript("""
+            BEGIN;
+            CREATE TABLE departments_new (
+                slug TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                specialist_key TEXT,
+                charter_mission TEXT NOT NULL DEFAULT '',
+                charter_scope_json TEXT NOT NULL DEFAULT '[]',
+                charter_out_of_scope_json TEXT NOT NULL DEFAULT '[]',
+                authority_level TEXT NOT NULL DEFAULT 'propose_only',
+                head_person_id INTEGER,
+                head_persona_slug TEXT,
+                cadences_json TEXT NOT NULL DEFAULT '{}',
+                headcount INTEGER,
+                budget_usd TEXT,
+                slack_channel_id TEXT,
+                discord_channel_id TEXT,
+                telegram_chat_id TEXT,
+                watched_entities_json TEXT NOT NULL DEFAULT '[]',
+                updated_at TEXT NOT NULL
+            );
+            INSERT INTO departments_new SELECT
+                slug, title, specialist_key, charter_mission,
+                charter_scope_json, charter_out_of_scope_json,
+                authority_level, head_person_id, head_persona_slug,
+                cadences_json, headcount,
+                CAST(budget_usd AS TEXT),
+                slack_channel_id, discord_channel_id, telegram_chat_id,
+                COALESCE(watched_entities_json, '[]'), updated_at
+            FROM departments;
+            DROP TABLE departments;
+            ALTER TABLE departments_new RENAME TO departments;
+            COMMIT;
+        """)
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
 
 
 def _migrate_add_last_reviewed_at_column(conn: sqlite3.Connection) -> None:
@@ -295,7 +354,7 @@ def _migrate_specialist_key_nullable(conn: sqlite3.Connection) -> None:
                 head_persona_slug TEXT,
                 cadences_json TEXT NOT NULL DEFAULT '{}',
                 headcount INTEGER,
-                budget_usd REAL,
+                budget_usd TEXT,
                 updated_at TEXT NOT NULL
             );
             INSERT INTO departments_new SELECT * FROM departments;
@@ -402,7 +461,11 @@ def _row_to_state(row: sqlite3.Row, goals: list[Goal]) -> DepartmentState:
         config=_row_to_config(row),
         goals=goals,
         headcount=row["headcount"],
-        budget_usd=row["budget_usd"],
+        budget_usd=(
+            Decimal(str(row["budget_usd"]))
+            if row["budget_usd"] is not None
+            else None
+        ),
         member_person_ids=[],  # populated in Phase 3
         updated_at=row["updated_at"],
     )
@@ -538,7 +601,7 @@ def update_department(
     head_persona_slug: str | None = None,
     cadences: dict[str, str] | None = None,
     headcount: int | None = None,
-    budget_usd: float | None = None,
+    budget_usd: Decimal | None = None,
     slack_channel_id: str | None | object = _UNSET,
     discord_channel_id: str | None | object = _UNSET,
     telegram_chat_id: str | None | object = _UNSET,
@@ -574,7 +637,7 @@ def update_department(
     if headcount is not None:
         fields.append(("headcount", headcount))
     if budget_usd is not None:
-        fields.append(("budget_usd", budget_usd))
+        fields.append(("budget_usd", str(budget_usd)))
     if slack_channel_id is not _UNSET:
         fields.append(("slack_channel_id", slack_channel_id))
     if discord_channel_id is not _UNSET:

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import re
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
 
@@ -95,7 +96,7 @@ class DepartmentSpec(BaseModel):
     charter: CharterSpec = Field(default_factory=CharterSpec)
     cadences: dict[str, str] = Field(default_factory=dict)
     headcount: int | None = None
-    budget_usd: float | None = None
+    budget_usd: Decimal | None = None
     goals: list[GoalSpec] = Field(default_factory=list)
 
 

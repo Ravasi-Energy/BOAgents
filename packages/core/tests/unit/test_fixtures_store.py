@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -29,7 +30,7 @@ def _insert(name: str = "acme", **over: object) -> int:
         docs_json="{}",
         industry="Widgets",
         stage="Seed",
-        arr=1000000.0,
+        arr=Decimal("1000000"),
         headcount=10,
         founding_year=2020,
         mission="make widgets",
@@ -111,10 +112,12 @@ def test_get_missing_returns_none(db: Path) -> None:
 
 
 def test_arr_currency_roundtrip(db: Path) -> None:
-    """ARR + ISO currency insert and list back identically."""
-    _insert(arr=6000.0, arr_currency="EUR")
+    """ARR + ISO currency insert and list back identically — the column is
+    TEXT now (D07): the exact decimal string round-trips, never a float."""
+    _insert(arr=Decimal("12345678901234567890.12"), arr_currency="EUR")
     row = fx_store.list_fixtures(db)[0]
-    assert row["arr"] == 6000.0
+    assert row["arr"] == "12345678901234567890.12"
+    assert not isinstance(row["arr"], float)
     assert row["arr_currency"] == "EUR"
 
     full = fx_store.get_fixture("acme", db)
@@ -123,7 +126,7 @@ def test_arr_currency_roundtrip(db: Path) -> None:
 
 def test_arr_currency_defaults_none(db: Path) -> None:
     """Fixtures without a currency keep NULL — unknown stays unknown."""
-    _insert(arr=6000.0)
+    _insert(arr=Decimal("6000"))
     assert fx_store.list_fixtures(db)[0]["arr_currency"] is None
 
 
@@ -178,5 +181,59 @@ def test_arr_currency_migration_idempotent(tmp_path: Path) -> None:
     assert "arr_currency" in cols
     row = fx_store.list_fixtures(db)[0]
     assert row["display_name"] == "Legacy Co"
-    assert row["arr"] == 6000.0
+    assert row["arr"] == "6000.0"  # REAL→TEXT rebuild keeps the stored repr
     assert row["arr_currency"] is None  # historical row stays unknown
+
+
+def test_arr_real_to_text_migration(tmp_path: Path) -> None:
+    """A DB that already has arr REAL (post arr_currency) is rebuilt to TEXT
+    without losing rows — same float column the departments fix handled."""
+    db = tmp_path / "mid.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(
+        """
+        CREATE TABLE generated_fixtures (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            display_name TEXT NOT NULL,
+            scenario_description TEXT NOT NULL DEFAULT '',
+            profile_yaml TEXT NOT NULL DEFAULT '',
+            people_yaml TEXT NOT NULL DEFAULT '',
+            departments_yaml TEXT NOT NULL DEFAULT '',
+            memory_json TEXT NOT NULL DEFAULT '{}',
+            docs_json TEXT NOT NULL DEFAULT '{}',
+            dept_summary_json TEXT NOT NULL DEFAULT '[]',
+            people_summary_json TEXT NOT NULL DEFAULT '[]',
+            industry TEXT NOT NULL DEFAULT '',
+            stage TEXT NOT NULL DEFAULT '',
+            arr REAL,
+            arr_currency TEXT,
+            headcount INTEGER,
+            founding_year INTEGER,
+            mission TEXT NOT NULL DEFAULT '',
+            doc_count INTEGER NOT NULL DEFAULT 0,
+            scenario_count INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0, 1))
+        );
+        INSERT INTO generated_fixtures
+            (name, display_name, arr, arr_currency, created_at, updated_at)
+        VALUES ('mid', 'Mid Co', 6000.25, 'EUR', 't', 't');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    fx_store.initialize_db(db)
+
+    cols = {
+        r[1]: r[2]
+        for r in sqlite3.connect(str(db)).execute(
+            "PRAGMA table_info(generated_fixtures)"
+        )
+    }
+    assert cols["arr"].upper() == "TEXT"
+    row = fx_store.list_fixtures(db)[0]
+    assert row["arr"] == "6000.25"
+    assert row["arr_currency"] == "EUR"

@@ -5,6 +5,7 @@ Covers: seed idempotency, CRUD on departments and Goals, and the additive
 """
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -152,7 +153,7 @@ def test_update_department_partial(db: Path) -> None:
         title="Growth & Marketing",
         authority_level=AuthorityLevel.AUTO_EXECUTE,
         headcount=4,
-        budget_usd=12_500.0,
+        budget_usd=Decimal("12500.50"),
     )
     assert modified is True
     state = store.get_department("marketing")
@@ -160,7 +161,9 @@ def test_update_department_partial(db: Path) -> None:
     assert state.config.title == "Growth & Marketing"
     assert state.config.authority_level == AuthorityLevel.AUTO_EXECUTE
     assert state.headcount == 4
-    assert state.budget_usd == 12_500.0
+    # Exact-money contract (D07): Decimal back, never a float.
+    assert state.budget_usd == Decimal("12500.50")
+    assert not isinstance(state.budget_usd, float)
 
 
 def test_watched_entities_round_trip_and_migration(db: Path) -> None:
@@ -191,6 +194,55 @@ def test_watched_entities_round_trip_and_migration(db: Path) -> None:
 def test_get_department_returns_none_for_unknown(db: Path) -> None:
     store.seed_default_departments()
     assert store.get_department("does-not-exist") is None
+
+
+def test_budget_usd_real_to_text_migration(tmp_path: Path) -> None:
+    """A DB created when budget_usd was REAL is rebuilt to TEXT (D07) — the
+    stored float converts to its repr text, rows and other columns survive."""
+    import sqlite3
+
+    db = tmp_path / "old_budget.db"
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.executescript("""
+            CREATE TABLE departments (
+                slug TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                specialist_key TEXT,
+                charter_mission TEXT NOT NULL DEFAULT '',
+                charter_scope_json TEXT NOT NULL DEFAULT '[]',
+                charter_out_of_scope_json TEXT NOT NULL DEFAULT '[]',
+                authority_level TEXT NOT NULL DEFAULT 'propose_only',
+                head_person_id INTEGER,
+                head_persona_slug TEXT,
+                cadences_json TEXT NOT NULL DEFAULT '{}',
+                headcount INTEGER,
+                budget_usd REAL,
+                slack_channel_id TEXT,
+                discord_channel_id TEXT,
+                telegram_chat_id TEXT,
+                watched_entities_json TEXT NOT NULL DEFAULT '[]',
+                updated_at TEXT NOT NULL
+            );
+            INSERT INTO departments
+              (slug, title, charter_mission, budget_usd, updated_at)
+            VALUES ('finance', 'Finance', 'Steward capital', 12500.75, 't');
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+
+    store.initialize_db(db)
+
+    cols = {
+        r[1]: r[2]
+        for r in sqlite3.connect(str(db)).execute("PRAGMA table_info(departments)")
+    }
+    assert cols["budget_usd"].upper() == "TEXT"
+    state = store.get_department("finance", db)
+    assert state is not None
+    assert state.budget_usd == Decimal("12500.75")
+    assert not isinstance(state.budget_usd, float)
 
 
 def test_goal_lifecycle(db: Path) -> None:

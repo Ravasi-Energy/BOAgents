@@ -73,6 +73,27 @@ def test_patch_authority_and_headcount(client: TestClient) -> None:
     assert data["headcount"] == 3
 
 
+def test_patch_budget_exact_money_contract(client: TestClient) -> None:
+    """D07/F3: budget_usd travels as an exact decimal — a JSON string or
+    number lands as string in the response and TEXT in the store; values
+    with >2 fractional digits are refused, nothing is written."""
+    resp = client.patch(
+        "/departments/finance", json={"budget_usd": "1234.56"}
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["budget_usd"] == "1234.56"
+    assert not isinstance(data["budget_usd"], float)
+
+    # >2 fractional digits refused — no silent rounding, state untouched.
+    denied = client.patch(
+        "/departments/finance", json={"budget_usd": "1234.567"}
+    )
+    assert denied.status_code == 422
+    after = client.get("/departments/finance").json()
+    assert after["budget_usd"] == "1234.56"
+
+
 def test_patch_rejects_invalid_authority(client: TestClient) -> None:
     resp = client.patch(
         "/departments/finance",

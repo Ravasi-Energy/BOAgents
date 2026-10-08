@@ -230,10 +230,7 @@ class Culture(BaseModel):
 
 
 class Financials(BaseModel):
-    # NOTE: burn_rate_monthly stays float — the PD probes compare it with a
-    # plain float literal (== 1234.56); only annual_revenue_arr carries the
-    # Decimal contract (BUGHUNT-02 C8, exact-money field).
-    burn_rate_monthly: float | None = None
+    burn_rate_monthly: Decimal | None = None
     burn_rate_currency: str | None = None
     runway_months: float | None = None
     key_metrics: dict[str, Any] = Field(default_factory=dict)

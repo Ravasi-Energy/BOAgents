@@ -339,7 +339,7 @@ export interface CompanyProfile {
   org_structure: { departments: string[]; leadership_team: string[] };
   strategic_priorities: { current_year: string[]; north_star_metric: string };
   culture: { values: string[]; operating_principles: string[] };
-  financials: { burn_rate_monthly: number | null; burn_rate_currency?: string | null; runway_months: number | null; key_metrics: Record<string, unknown> };
+  financials: { burn_rate_monthly: string | number | null; burn_rate_currency?: string | null; runway_months: number | null; key_metrics: Record<string, unknown> };
   /** External dependencies the research watch policy treats as company data. */
   vendors: string[];
   tickers: string[];
@@ -1893,7 +1893,7 @@ export interface FixtureSummary {
   display_name: string;
   industry: string;
   stage: string;
-  arr: number | null;
+  arr: string | number | null;
   arr_currency?: string | null;
   headcount: number | null;
   founding_year: number | null;
@@ -2130,7 +2130,7 @@ export interface DepartmentState {
   config: DepartmentConfig;
   goals: Goal[];
   headcount: number | null;
-  budget_usd: number | null;
+  budget_usd: string | number | null;
   member_person_ids: number[];
   updated_at: string;
 }
@@ -2154,7 +2154,7 @@ export interface DepartmentPatch {
   cadences?: Record<string, string>;
   head_person_id?: number | null;
   headcount?: number | null;
-  budget_usd?: number | null;
+  budget_usd?: string | number | null;
   slack_channel_id?: string | null;
   discord_channel_id?: string | null;
   telegram_chat_id?: string | null;

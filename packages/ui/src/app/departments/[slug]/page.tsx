@@ -18,6 +18,8 @@ import {
   type Person,
   type PeriodType,
 } from "@/lib/api";
+import { Money } from "@/lib/Money";
+import { parseMoneyInput } from "@/lib/money-format";
 import { formatRelativeTime } from "@/lib/relativeTime";
 
 // Auto-refresh cadence for the detail page. The `dept_cadence` scheduler
@@ -559,7 +561,10 @@ export default function DepartmentDetailPage() {
     setSettingsErr(null);
     try {
       const headcountNum = settingsForm.headcount.trim() !== "" ? Number(settingsForm.headcount) : undefined;
-      const budgetNum = settingsForm.budget_usd.trim() !== "" ? Number(settingsForm.budget_usd) : undefined;
+      // Exact-money transport (D07): send the canonical decimal string, never
+      // a float — the backend refuses >2 fractional digits instead of rounding.
+      const budgetRaw = settingsForm.budget_usd.trim();
+      const budgetNum = budgetRaw !== "" ? parseMoneyInput(budgetRaw) : undefined;
       const updated = await updateDepartment(slug, {
         authority_level: settingsForm.authority_level,
         charter: {
@@ -906,7 +911,7 @@ export default function DepartmentDetailPage() {
                         ? [["Head", people.find((p) => p.id === dept.config.head_person_id)?.full_name ?? `Person #${dept.config.head_person_id}`]]
                         : []),
                       ...(dept.headcount != null ? [["Headcount", String(dept.headcount)]] : []),
-                      ...(dept.budget_usd != null ? [["Budget", `$${dept.budget_usd.toLocaleString()}`]] : []),
+                      ...(dept.budget_usd != null ? [["Budget", <Money key="budget" amount={dept.budget_usd} currency="USD" />]] : []),
                       ...(dept.config.slack_channel_id ? [["Slack channel", dept.config.slack_channel_id]] : []),
                       ...(dept.config.discord_channel_id ? [["Discord channel", dept.config.discord_channel_id]] : []),
                       ...(dept.config.telegram_chat_id ? [["Telegram chat", dept.config.telegram_chat_id]] : []),

@@ -293,6 +293,28 @@ def test_class8_profile_float_1005(tmp_path: Path) -> None:
     assert stored == Decimal("1.005")
 
 
+def test_class8_profile_legacy_burn_float_yaml(tmp_path: Path) -> None:
+    """A profile.yaml written before the Decimal contract may still hold a
+    raw float literal; it must load exact and never be re-emitted as a
+    lossy float."""
+    from openexecutive.memory.company_profile import CompanyProfile
+
+    path = tmp_path / "profile.yaml"
+    path.write_text(
+        "company:\n  name: Firma\n  financials:\n"
+        "    burn_rate_monthly: 1234.56\n    burn_rate_currency: RON\n",
+        encoding="utf-8",
+    )
+    loaded = CompanyProfile.load_from_yaml(path)
+    stored = loaded.financials.burn_rate_monthly
+    assert not isinstance(stored, float)
+    assert stored == Decimal("1234.56")
+    loaded.save_to_yaml(path)
+    reloaded = CompanyProfile.load_from_yaml(path)
+    assert reloaded.financials.burn_rate_monthly == Decimal("1234.56")
+    assert "1234.56" in path.read_text(encoding="utf-8")
+
+
 def test_class8_mixed_currency_budget(bo_db: Path) -> None:
     from openexecutive.bo.routing.catalog import CatalogEntry, Cost, Quality
     from openexecutive.bo.routing.engine import Policy, TaskContext, recommend

@@ -19,6 +19,7 @@ ne-pierdere rămâne identică.
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -530,7 +531,7 @@ def _write_profile(path: Path, **over: Any) -> None:
             "key_metrics": {"clienti": 3},
         },
     )
-    data = profile.model_dump()
+    data = profile.model_dump(mode="json")
     data.update(over)
     path.write_text(yaml.safe_dump({"company": data}), encoding="utf-8")
 
@@ -578,7 +579,7 @@ def test_pd4_company_profile_partial_financials(tmp_path: Path, monkeypatch: pyt
         f"runway={fin.runway_months} metrics={fin.key_metrics}"
     )
     assert fin.runway_months == 12
-    assert fin.burn_rate_monthly == 1234.56
+    assert fin.burn_rate_monthly == Decimal("1234.56")
     assert fin.burn_rate_currency == "RON"
     assert fin.key_metrics == {"clienti": 3}
 

@@ -215,12 +215,15 @@ class CultureData(BaseModel):
 
 
 class FinancialsData(BaseModel):
-    burn_rate_monthly: float | None = None
+    burn_rate_monthly: Decimal | None = None
     burn_rate_currency: str | None = None
     runway_months: float | None = None
     key_metrics: dict = Field(default_factory=dict)
 
     _check_ccy = field_validator("burn_rate_currency")(_iso_currency)
+    _check_burn_decimals = field_validator("burn_rate_monthly")(
+        _money_max_two_decimals
+    )
 
 
 class CompanyProfileResponse(BaseModel):

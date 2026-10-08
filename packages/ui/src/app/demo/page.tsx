@@ -22,7 +22,7 @@ import {
 const RESET_CONFIRM_TOKEN = "RESET";
 
 // Legacy fixture ARR has no currency field. Do not invent USD from its old label.
-function formatARR(arr: number | null, currency?: string | null) {
+function formatARR(arr: string | number | null, currency?: string | null) {
   if (arr == null) return "—";
   return <Money amount={arr} currency={currency} />;
 }

@@ -18,13 +18,17 @@ codebase (see ``memory/episodic.py``).
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 DB_PATH = Path(os.environ.get("EPISODIC_DB_PATH", "./episodic_memory.db"))
 
@@ -71,7 +75,7 @@ def initialize_db(db_path: Path | None = None) -> None:
                 people_summary_json TEXT NOT NULL DEFAULT '[]',
                 industry TEXT NOT NULL DEFAULT '',
                 stage TEXT NOT NULL DEFAULT '',
-                arr REAL,
+                arr TEXT,
                 arr_currency TEXT,
                 headcount INTEGER,
                 founding_year INTEGER,
@@ -98,6 +102,71 @@ def initialize_db(db_path: Path | None = None) -> None:
             conn.execute(
                 "ALTER TABLE generated_fixtures ADD COLUMN arr_currency TEXT"
             )
+        _migrate_arr_text(conn)
+
+
+def _migrate_arr_text(conn: sqlite3.Connection) -> None:
+    """Rebuild ``generated_fixtures.arr`` REAL → TEXT (exact decimal string).
+
+    Money must not round-trip through binary floats (D07/F3); the column now
+    stores the canonical decimal text. REAL affinity would coerce a bound
+    string back to float, so the fix is a table rebuild. Existing REAL values
+    convert via CAST to their shortest-repr text — the honest bound of what a
+    float column ever recorded.
+    """
+    cols = conn.execute("PRAGMA table_info(generated_fixtures)").fetchall()
+    arr_col = next((c for c in cols if c["name"] == "arr"), None)
+    if arr_col is None or arr_col["type"].upper() == "TEXT":
+        return
+    logger.info("fixtures: migrating arr column to TEXT")
+    if conn.in_transaction:
+        conn.commit()
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.executescript("""
+            BEGIN;
+            CREATE TABLE generated_fixtures_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                display_name TEXT NOT NULL,
+                scenario_description TEXT NOT NULL DEFAULT '',
+                profile_yaml TEXT NOT NULL DEFAULT '',
+                people_yaml TEXT NOT NULL DEFAULT '',
+                departments_yaml TEXT NOT NULL DEFAULT '',
+                memory_json TEXT NOT NULL DEFAULT '{}',
+                docs_json TEXT NOT NULL DEFAULT '{}',
+                dept_summary_json TEXT NOT NULL DEFAULT '[]',
+                people_summary_json TEXT NOT NULL DEFAULT '[]',
+                industry TEXT NOT NULL DEFAULT '',
+                stage TEXT NOT NULL DEFAULT '',
+                arr TEXT,
+                arr_currency TEXT,
+                headcount INTEGER,
+                founding_year INTEGER,
+                mission TEXT NOT NULL DEFAULT '',
+                doc_count INTEGER NOT NULL DEFAULT 0,
+                scenario_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0, 1))
+            );
+            INSERT INTO generated_fixtures_new SELECT
+                id, name, display_name, scenario_description,
+                profile_yaml, people_yaml, departments_yaml,
+                memory_json, docs_json, dept_summary_json,
+                people_summary_json, industry, stage,
+                CAST(arr AS TEXT), arr_currency, headcount, founding_year,
+                mission, doc_count, scenario_count, created_at, updated_at,
+                archived
+            FROM generated_fixtures;
+            DROP TABLE generated_fixtures;
+            ALTER TABLE generated_fixtures_new RENAME TO generated_fixtures;
+            CREATE INDEX idx_generated_fixtures_archived
+                ON generated_fixtures(archived);
+            COMMIT;
+        """)
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
 
 
 def fixture_name_exists(name: str, db_path: Path | None = None) -> bool:
@@ -134,7 +203,7 @@ def insert_fixture(
     people_summary_json: str = "[]",
     industry: str = "",
     stage: str = "",
-    arr: float | None = None,
+    arr: Decimal | None = None,
     arr_currency: str | None = None,
     headcount: int | None = None,
     founding_year: int | None = None,
@@ -174,7 +243,7 @@ def insert_fixture(
                 people_summary_json,
                 industry,
                 stage,
-                arr,
+                str(arr) if arr is not None else None,
                 arr_currency,
                 headcount,
                 founding_year,

@@ -151,7 +151,14 @@ def list_fixtures() -> list[dict[str, Any]]:
                 "display_name": profile.name,
                 "industry": profile.industry,
                 "stage": profile.stage,
-                "arr": profile.annual_revenue_arr,
+                # Exact-money transport (D07): serialize Decimal as its
+                # canonical string, same shape the generated-fixture list
+                # emits from its TEXT column.
+                "arr": (
+                    str(profile.annual_revenue_arr)
+                    if profile.annual_revenue_arr is not None
+                    else None
+                ),
                 "arr_currency": profile.annual_revenue_arr_currency,
                 "headcount": profile.headcount,
                 "founding_year": profile.founding_year,
@@ -1445,7 +1452,7 @@ def _dump_departments(dept_path: Path) -> int:
         if s.headcount is not None:
             row["headcount"] = s.headcount
         if s.budget_usd is not None:
-            row["budget_usd"] = s.budget_usd
+            row["budget_usd"] = str(s.budget_usd)
         if s.goals:
             row["goals"] = [
                 {

@@ -8,6 +8,7 @@ Phase 3 lands the People model.
 """
 from __future__ import annotations
 
+from decimal import Decimal
 from enum import StrEnum
 from typing import Literal
 
@@ -113,6 +114,6 @@ class DepartmentState(BaseModel):
     config: DepartmentConfig
     goals: list[Goal] = Field(default_factory=list)
     headcount: int | None = None
-    budget_usd: float | None = None
+    budget_usd: Decimal | None = None
     member_person_ids: list[int] = Field(default_factory=list)
     updated_at: str = ""

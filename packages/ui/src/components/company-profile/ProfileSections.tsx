@@ -1,7 +1,7 @@
 "use client";
 import { profileDelta } from "@/lib/p0-edit";
 import { Money } from "@/lib/Money";
-import { moneyInputValue, parseMoneyInput, parseMoneyNumber, moneyCurrency } from "@/lib/money-format";
+import { moneyInputValue, parseMoneyInput, moneyCurrency } from "@/lib/money-format";
 
 // The company-profile section editors, extracted from app/company-profile/page.tsx
 // so the onboarding draft-review screen can reuse the exact editing surface the
@@ -613,7 +613,7 @@ function FinancialsSection({ profile, saving, onSave, pending, persisted }: Sect
   const saveMoney = async (payload: object) => {
     try {
       const base=editBase.current;
-      const amount=burn === moneyInputValue(base.burn_rate_monthly) ? base.burn_rate_monthly : parseMoneyNumber(burn);
+      const amount=burn === moneyInputValue(base.burn_rate_monthly) ? base.burn_rate_monthly : parseMoneyInput(burn);
       const patch={ ...payload, financials: { ...base, runway_months: runway ? parseFloat(runway) : null, burn_rate_monthly: amount, burn_rate_currency: moneyCurrency(burnCurrency) } };
       setMoneyError("");
       await onSave(persisted ? profileDelta(patch,{financials:base}) as Partial<CompanyProfile> : patch);
@@ -635,8 +635,8 @@ function FinancialsSection({ profile, saving, onSave, pending, persisted }: Sect
         }
       })}
       viewContent={
-        <div className="grid grid-cols-2 gap-x-8 gap-y-4">
-          <div><FieldLabel>Monthly Burn</FieldLabel><FieldValue>{profile.financials.burn_rate_monthly != null ? <><Money amount={profile.financials.burn_rate_monthly} currency={profile.financials.burn_rate_currency} /> / lună</> : undefined}</FieldValue></div>
+        <div className="grid grid-cols-1 gap-x-8 gap-y-4 sm:grid-cols-2">
+          <div className="min-w-0 break-words"><FieldLabel>Monthly Burn</FieldLabel><FieldValue>{profile.financials.burn_rate_monthly != null ? <><Money amount={profile.financials.burn_rate_monthly} currency={profile.financials.burn_rate_currency} /> / lună</> : undefined}</FieldValue></div>
           <div><FieldLabel>Runway</FieldLabel><FieldValue>{profile.financials.runway_months != null ? `${profile.financials.runway_months} months` : undefined}</FieldValue></div>
         </div>
       }

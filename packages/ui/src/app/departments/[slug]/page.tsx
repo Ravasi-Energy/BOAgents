@@ -19,7 +19,7 @@ import {
   type PeriodType,
 } from "@/lib/api";
 import { Money } from "@/lib/Money";
-import { parseMoneyInput } from "@/lib/money-format";
+import { parseMoneyInput, moneyInputValue } from "@/lib/money-format";
 import { formatRelativeTime } from "@/lib/relativeTime";
 
 // Auto-refresh cadence for the detail page. The `dept_cadence` scheduler
@@ -502,7 +502,7 @@ export default function DepartmentDetailPage() {
           mission: d.config.charter.mission,
           cadences: { ...d.config.cadences },
           headcount: d.headcount != null ? String(d.headcount) : "",
-          budget_usd: d.budget_usd != null ? String(d.budget_usd) : "",
+          budget_usd: moneyInputValue(d.budget_usd),
           head_person_id: d.config.head_person_id,
           slack_channel_id: d.config.slack_channel_id ?? "",
           discord_channel_id: d.config.discord_channel_id ?? "",
@@ -629,7 +629,7 @@ export default function DepartmentDetailPage() {
                           mission: dept.config.charter.mission,
                           cadences: { ...dept.config.cadences },
                           headcount: dept.headcount != null ? String(dept.headcount) : "",
-                          budget_usd: dept.budget_usd != null ? String(dept.budget_usd) : "",
+                          budget_usd: moneyInputValue(dept.budget_usd),
                           head_person_id: dept.config.head_person_id,
                           slack_channel_id: dept.config.slack_channel_id ?? "",
                           discord_channel_id: dept.config.discord_channel_id ?? "",
@@ -800,7 +800,8 @@ export default function DepartmentDetailPage() {
                       <label className="text-xs text-fg-muted flex flex-col gap-1">
                         Budget (USD)
                         <input
-                          type="number"
+                          type="text"
+                          inputMode="decimal"
                           min={0}
                           value={settingsForm.budget_usd}
                           onChange={(e) =>

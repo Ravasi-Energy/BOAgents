@@ -38,6 +38,7 @@ test("Romanian input/save/reload preserves major units, currency and editable pr
     assert.equal(formatMoney(saved.amount, saved.currency, decimals), formatMoney("6000.25", currency, decimals));
   }
   assert.equal(parseMoneyInput(moneyInputValue("12345678901234567890.12")), "12345678901234567890.12");
+  assert.throws(() => parseMoneyInput(moneyInputValue("12345678901234567890.123456789")), /2 zecimale/);
   assert.equal(parseMoneyNumber("6.000,25"), 6000.25);
   assert.throws(() => parseMoneyNumber("12.345.678.901.234.567.890,12"));
   assert.equal(parseMoneyInput(""), null);

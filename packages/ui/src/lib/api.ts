@@ -1,3 +1,4 @@
+import { moneyChanged } from "./money-event.ts";
 const API_BASE = "/api/backend";
 
 export type CommitteePhase = "drafting" | "reviewing" | "finalizing";
@@ -1928,7 +1929,7 @@ export async function loadFixture(name: string): Promise<FixtureLoadResult> {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(err.detail ?? "Failed to load fixture");
   }
-  return res.json() as Promise<FixtureLoadResult>;
+  const data=await res.json() as FixtureLoadResult; moneyChanged(); return data;
 }
 
 export interface FixtureStatus {
@@ -1974,7 +1975,7 @@ export async function unloadFixture(): Promise<UnloadResult> {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(err.detail ?? "Failed to unload fixture");
   }
-  return res.json() as Promise<UnloadResult>;
+  const data=await res.json() as UnloadResult; moneyChanged(); return data;
 }
 
 export interface ResetResult {
@@ -2940,7 +2941,7 @@ export async function activateClient(
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(err.detail ?? "Failed to activate client");
   }
-  return res.json();
+  const data=await res.json(); moneyChanged(); return data;
 }
 
 export async function saveActiveClient(): Promise<{ slug: string; saved: boolean }> {

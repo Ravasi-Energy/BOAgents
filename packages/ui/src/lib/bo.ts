@@ -1,3 +1,4 @@
+import { moneyChanged } from "./money-event.ts";
 // Typed client for the /bo surface (BOAgents Valul 1). Errors carry the HTTP
 // status and the machine-readable `error` code so pages can render the
 // required states (forbidden, conflict, invalid, not_found) instead of a
@@ -81,6 +82,9 @@ export function putBoSetting(
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ value, expected_version: expectedVersion, ...(remove?.length ? {remove} : {}) }),
+  }).then((result) => {
+    if (key === "bo.ui.money_display_decimals") moneyChanged();
+    return result as { result: string; applied: boolean; setting: BoSetting };
   });
 }
 

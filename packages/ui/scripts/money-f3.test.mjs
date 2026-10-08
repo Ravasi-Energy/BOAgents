@@ -33,3 +33,6 @@ test("F3 unknown/missing ISO code never becomes RON", () => {
 
 import {requiredMoneyInput} from "../src/lib/money-format.ts";
 test("F3 mandate/run budget editor never sends empty/third-fraction or float",()=>{ assert.equal(requiredMoneyInput("6.000,25"),"6000.25");for(const value of ["","1,005"])assert.throws(()=>requiredMoneyInput(value));assert.equal(JSON.parse(JSON.stringify({budget_limit:requiredMoneyInput("12.345.678.901.234.567.890,12")})).budget_limit,"12345678901234567890.12"); });
+
+import {serverMoney} from '../src/lib/money-server.ts';
+test('F3 authoritative server0/2, scope/role/version, missing/invalid never fallback2',()=>{for(const value of [0,2])assert.deepEqual(serverMoney({tenant:'alpha',role:'viewer',settings:[{key:'bo.ui.money_display_decimals',value,version:3}]}),{tenant:'alpha',role:'viewer',value,version:3});for(const data of [null,{}, {tenant:'alpha',role:'admin',settings:[]},{tenant:'alpha',role:'admin',settings:[{key:'bo.ui.money_display_decimals',value:1,version:3}]},{tenant:'alpha',role:'admin',settings:[{key:'bo.ui.money_display_decimals',value:0,version:-1}]}])assert.throws(()=>serverMoney(data));});

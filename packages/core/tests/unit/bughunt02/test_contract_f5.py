@@ -33,6 +33,7 @@ from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -379,8 +380,7 @@ def _f5_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     from openexecutive.bo import db as bo_db
     from openexecutive.clients import slots
     from openexecutive.departments import store as dept_store
-    from openexecutive.memory import episodic
-    from openexecutive.memory import honcho_client
+    from openexecutive.memory import episodic, honcho_client
     from openexecutive.people import store as people_store
 
     company = tmp_path / "company"
@@ -391,10 +391,16 @@ def _f5_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
         mcp_servers_config_path=company / "mcp_servers.json",
         honcho_workspace_id="openexec-f5",
     )
-    monkeypatch.setattr(episodic, "DB_PATH", tmp_path / "episodic.db")
+    # snapshot_user_state's episodic dump binds `db_path=DB_PATH` at def
+    # time — monkeypatching the module attr does NOT redirect it. Anchor
+    # the process CWD at tmp_path so the bound default `./episodic_memory.db`
+    # lands inside the sandbox, and use that SAME file for the monkeypatched
+    # path so lazy and bound readers see one schema.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(episodic, "DB_PATH", tmp_path / "episodic_memory.db")
     monkeypatch.setattr(people_store, "DB_PATH", tmp_path / "people.db")
     monkeypatch.setattr(dept_store, "DB_PATH", tmp_path / "depts.db")
-    episodic.initialize_db(tmp_path / "episodic.db")
+    episodic.initialize_db(tmp_path / "episodic_memory.db")
     people_store.initialize_db(tmp_path / "people.db")
     dept_store.initialize_db(tmp_path / "depts.db")
     monkeypatch.setattr(bo_db, "DB_PATH", tmp_path / "bo.db")

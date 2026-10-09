@@ -479,13 +479,30 @@ def cmd_probe(args) -> dict:
         pol = copy.deepcopy(cur["policy"])
         pol["allowedActions"] = [
             a for a in pol["allowedActions"] if a != "effect.intent"]
+        # put_policy îmbină listele prin UNIUNE (delta + remove explicit,
+        # BUGHUNT-01 G-P0-1): un doc fără acțiune nu o scoate — scoaterea
+        # se cere pe câmpul remove, subset al uniunii curente
         s, d = _http(
             "PUT", f"{base}/v1/exec-policies?tenant={tenant}", admin,
-            {"policy": pol, "expectedRev": cur["rev"],
+            {"policy": pol,
+             "remove": {"allowedActions": ["effect.intent"]},
+             "expectedRev": cur["rev"],
              "expectedSha256": cur["contentSha256"],
              "reason": "probă VAL4-03: drepturi reduse"})
+        if s not in (200, 201):
+            # PUT esuat = setup esuat, nu defect de produs — fara asta
+            # un 422/409 ar lasa politica larga si efectul ar trece,
+            # iar gate-ul ar acuza produsul in locul sondei
+            return {"scenario": scenario, "policy_put": [s, d],
+                    "error": "restrângerea politicii a eșuat — "
+                             "proba nu a măsurat nimic"}
+        work = _work_result(tenant)
+        # remove-ul e real acum: politica ramane restransa fara
+        # restaurare — urmatoarea proba care emite mandat cu
+        # effect.intent ar fi respinsa mandate_outside_policy
+        restaurata = _ensure_policy(base, tenant, admin)
         return {"scenario": scenario, **r, "policy_put": [s, d],
-                **_work_result(tenant)}
+                "politica_restaurata": restaurata, **work}
 
     if scenario == "authority-invalid":
         # Autoritatea răspunde 200 dar cu un corp invalid (fără status)

@@ -28,8 +28,9 @@ Legătura Guardian — EXPLICITĂ și stabilă (VAL4-03):
   (endpointul pe care produsul îl „vede" — gate-ul îl poate redirecționa
   spre un stub de autoritate), apoi GATE_BASE ca fallback → endpointul
   de autorizare; BO_GUARDIAN_ADMIN_TOKEN (implicit „exadmin",
-  credențialul sintetic execpolicy al gate-ului) → emiterea mandatului
-  și stratul de drepturi efective în probe.
+  credențialul sintetic execpolicy al gate-ului) → emiterea mandatului;
+  stratul de drepturi efective îl primește ca valoare a ref-ului
+  provisionat BO_GUARDIAN_POLICY_TOKEN în probele policy_*.
   Rezolvarea guardian_ref: --guardian-ref → BO_GUARDIAN_MANDATE_REF →
   „mnd-gate-val402" (ID fix al sondei, doar dacă e ACTIVE) → mandat
   emis proaspăt „mnd-a01-*" (ID-ul întors de Guardian). NICIODATĂ
@@ -187,8 +188,15 @@ def _configure_guardian(
     _set(tenant, "bo.exec.guardian_secret_ref", "BO_TELEMETRY_TOKEN")
     _set(tenant, "bo.exec.guardian_auth_required", bool(bound))
     if policy_check:
+        # Credențialul execpolicy al sondei e provisionat sub numele
+        # builtin BO_GUARDIAN_POLICY_TOKEN (valoarea = jetonul admin
+        # sintetic, execpolicy:read); un nume neprovisionat ca
+        # BO_GUARDIAN_ADMIN_TOKEN e refuzat de validatorul SecretRef.
+        # Atribuire explicită — o valoare goală/străină preexistentă ar
+        # dezactiva silențios stratul de drepturi sau ar schimba motivul.
+        os.environ["BO_GUARDIAN_POLICY_TOKEN"] = _admin_token()
         _set(tenant, "bo.exec.guardian_policy_secret_ref",
-             "BO_GUARDIAN_ADMIN_TOKEN")
+             "BO_GUARDIAN_POLICY_TOKEN")
 
 
 def _mandate(tenant: str, actor: str, guardian_ref: str | None):
@@ -576,6 +584,18 @@ def cmd_probe(args) -> dict:
             return {"scenario": scenario,
                     "error": "mandatul Guardian nu a fost emis"}
         _configure_guardian(tenant, base, bound=True)
+        # Numele SecretRef trebuie provisionat prin allow-listul
+        # operatorului — altfel _set însuși e refuzat. Numele e legal,
+        # dar nu are valoare în mediu → credențial absent = „fără token".
+        refs = [e.strip() for e in
+                os.environ.get("BO_GUARDIAN_SECRET_REFS", "").split(",")
+                if e.strip()]
+        # numele trebuie provisionat NEȚINTIT (@tenant îl rezervă doar
+        # acelui tenant și nu satisface calea curentă)
+        if "BO_TOKEN_INEXISTENT_PROBE" not in {
+                e for e in refs if "@" not in e}:
+            os.environ["BO_GUARDIAN_SECRET_REFS"] = ",".join(
+                [*refs, "BO_TOKEN_INEXISTENT_PROBE"])
         _set(tenant, "bo.exec.guardian_secret_ref",
              "BO_TOKEN_INEXISTENT_PROBE")
         saved = os.environ.pop("BO_TELEMETRY_TOKEN", None)

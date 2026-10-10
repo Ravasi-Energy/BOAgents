@@ -38,3 +38,16 @@ verificabilă prin `rapoarte/BO-A01/MANIFEST.sha256`.
 `rapoarte/BO-A01/MATRICE-PR-LANTURI.md` — lanțul PR6→PR7→PR11→main
 (BOAgents) și PR16→PR17→PR20→main (Hire), commituri, CI și ordinea
 logică de propagare. Ramura de livrare: `codex/livrare-completa`.
+
+## Închidere F5 (CONTROL-F5-DOSAR-20261010-235953)
+
+- `rapoarte/BO-A01/PUBLICARE-WHITELIST-F5.json` — whitelist final pe
+  headurile remote (Hire `3f30640`, BOAgents `8c7f6a4`): 121 fișiere,
+  0 nepotriviri.
+- `rapoarte/BO-A01/DOSAR-F5.md` — addendumul de închidere: 4PG în CI
+  (artefact `pg-junit-f5` al rulării `38087062579`, 42 testcase, cele 4
+  `test_setari_servicii_pg` PASSED, 0 skip), proba Mac pe baza dedicată
+  (`verificari/f5/pg-mac-junit.xml`, 4/4 PASS), referința canonică.
+- `docs/bo01-f5/REFERINTA-CANONICA.json` (în acest repo și în Hire) —
+  punctează importul canonic A02: Guardian `97ba6e7`, `docs/bo01-f5/`,
+  745 poziții, hashuri manifest/pachet din decizie.

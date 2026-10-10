@@ -1,0 +1,13 @@
+{
+  "tip": "referinta-canonica",
+  "repo": "Ravasi-Energy/Guardian",
+  "path": "docs/bo01-f5/",
+  "commit": "97ba6e72bb7baf8306046851d311d73b1e70e870",
+  "branch": "codex/livrare-completa",
+  "remote_sha_confirmat": "97ba6e72bb7baf8306046851d311d73b1e70e870",
+  "manifest_sha256": "ce0c1010be8d35e3ed12fcdd210043e06ff75c77e169148ba5288194d5d33269",
+  "package_sha256": "e900bacb23d732a81e98a48f1fe54c44b3ea3c134f098e364a51abc50bb2c36a",
+  "fisiere": 744,
+  "pozitii_total": 745,
+  "nota": "Locul canonic unic al pachetului durabil BO01 F5. Acest dosar refera commitul Guardian care contine pachetul; copiile de aici nu sunt canonice."
+}

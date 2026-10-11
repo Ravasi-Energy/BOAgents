@@ -73,3 +73,18 @@ logică de propagare. Ramura de livrare: `codex/livrare-completa`.
   `apeluri_http: 0`, `efect: zero`.
 - `rapoarte/BO-A01/EVIDENTE-F5.json` — `mapare_canonica`: cele 23
   ID-uri canonice (B-R-1..12, H-R-1/2/4..12) → dosar/probă/commit.
+
+### Runneri v2 + regresie CI (CONTROL-F5-RUNNER, commit `ecdee71`)
+
+- Runneri canonici mutati in repo: `tools/val4/proba_extern_oblio.py`
+  (sha256 `48166c0129615fb005438d1ea5a46fc45a443ce01f3ab41ef9a9dd0c6449d605`),
+  `tools/val4/proba_extern_s3.py` (`903c09997f0c91fadf0648f3480d7f0a30ea8efaac6e8ea972a502d6b7a1cff8`).
+  Copiile din `instrumente-f5/` sunt derivate, identice la hash.
+- Regresie: `packages/core/tests/unit/test_f5_extern_runneri.py` —
+  17 probe (cele 3 cazuri reproduse de coordonator + matricea completa
+  de preflight/transport/proces); colectata in jobul `python-test`.
+- CI `38147947861` pe `ecdee71`: SUCCESS — 4324 teste, 0 fail, 0 error;
+  artefact `junit-unit-ecdee71e…`, cele 17 probe runneri nominale PASS.
+- Dovada Mac: `instrumente-f5/extern/junit-runneri-mac.xml` 17/17;
+  proba negativa pe copii: `probe-negative-extern-v2.log` 7/7 exit=2.
+- HOLD-urile Oblio/S3 raman HOLD — fara acces de test autorizat.

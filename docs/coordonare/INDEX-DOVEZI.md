@@ -88,3 +88,14 @@ logică de propagare. Ramura de livrare: `codex/livrare-completa`.
 - Dovada Mac: `instrumente-f5/extern/junit-runneri-mac.xml` 17/17;
   proba negativa pe copii: `probe-negative-extern-v2.log` 7/7 exit=2.
 - HOLD-urile Oblio/S3 raman HOLD — fara acces de test autorizat.
+
+### Runneri v3 — adaptorul Oblio REAL (CONTROL-F5-RUNNER-V2, commit `6874775`)
+
+- Defect remediar: `KeyError: cif_emitent` la --emit cu adaptorul real —
+  payload dupa schema `_corp_proforma` (cif_emitent/client.nume/moneda/
+  serie), validare inainte de HTTP.
+- Fixtura `tools/val4/fixtura_hire/` = adaptorul real byte-identic
+  (PIN.json, Hire@3f30640); test de drift Mac vs checkoutul real.
+- 22 probe: Mac 22/22 (`junit-runneri-mac-v2.xml`); CI `38158608146`
+  SUCCESS — 21 PASS + drift skip explicit; junit artifact per SHA.
+- S3: snapshot ales dupa `paths`=sursele curente + `time`, nu ultimul.

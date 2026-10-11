@@ -72,7 +72,15 @@ jobs:
         run: cd packages/core && uv sync --extra dev
 
       - name: Run unit tests
-        run: cd packages/core && uv run pytest tests/unit/ -v --tb=short
+        run: cd packages/core && uv run pytest tests/unit/ -v --tb=short --junitxml=/tmp/junit-unit.xml
+
+      - name: Upload unit JUnit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-unit-${{ github.sha }}
+          path: /tmp/junit-unit.xml
+          if-no-files-found: warn
 
   ui-typecheck:
     name: UI type check

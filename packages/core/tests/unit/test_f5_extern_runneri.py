@@ -12,6 +12,8 @@ import sys
 import textwrap
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = os.path.abspath(os.path.join(
     os.path.dirname(__file__), "..", "..", "..", ".."))
 TOOLS = os.path.join(REPO_ROOT, "tools", "val4")
@@ -20,50 +22,17 @@ sys.path.insert(0, TOOLS)
 import proba_extern_oblio as oblio_r  # noqa: E402
 import proba_extern_s3 as s3_r  # noqa: E402
 
+FIXTURA_HIRE = os.path.join(TOOLS, "fixtura_hire")
+# Checkoutul real Hire (doar Mac) — in CI lipseste si hash-driftul se sare.
+HIRE_REAL = os.path.realpath(os.path.join(
+    REPO_ROOT, "..", "..", "BO-A03", "Hire-val4-01", "backend"))
 
-def _mk_hire_backend(root):
-    """Backend minimal: acelasi layout ca checkoutul Hire real."""
-    p = os.path.join(root, "hire", "connectors", "serviciu", "providers")
-    os.makedirs(p)
-    for f in (os.path.join(root, "hire", "__init__.py"),
-              os.path.join(root, "hire", "connectors", "__init__.py"),
-              os.path.join(root, "hire", "connectors", "serviciu",
-                           "__init__.py"),
-              os.path.join(p, "__init__.py")):
-        Path(f).write_text("")
-    with open(os.path.join(p, "oblio.py"), "w") as f:
-        f.write(textwrap.dedent('''
-            import json, urllib.request
-            class EroareFurnizor(Exception): pass
-            class AdaptorOblio:
-                def __init__(self, base_url, client_id, secret_ref):
-                    self._base = base_url.rstrip("/")
-                    self._secret_ref = secret_ref
-                def _autentifica(self):
-                    import os
-                    sec = os.environ.get("CONECTOR_SECRET_" +
-                        self._secret_ref.upper().replace("-", "_"))
-                    if sec == "valoare-gresita-deliberat":
-                        raise EroareFurnizor("Oblio 401: secret invalid")
-                    r = urllib.request.urlopen(urllib.request.Request(
-                        self._base + "/api/authorize/token", method="POST",
-                        data=json.dumps({"client_secret": sec}).encode()))
-                    return json.loads(r.read())["access_token"]
-                def documente(self, tenant_id):
-                    self._autentifica()
-                    r = urllib.request.urlopen(urllib.request.Request(
-                        self._base + "/api/docs/proforma", method="GET"))
-                    return json.loads(r.read()).get("data") or []
-                def executa(self, cap, parametri, cheie_idempotenta, cont=None):
-                    self._autentifica()
-                    r = urllib.request.urlopen(urllib.request.Request(
-                        self._base + "/api/docs/proforma", method="POST",
-                        data=b"{}"))
-                    return {"provider_ref": "TEST-1"}
-                def cauta(self, ref, tenant_id):
-                    return "gasit"
-        '''))
-    return root
+
+def _mk_hire_backend(_root=None):
+    """Adaptorul Hire REAL — copie byte-identica vendoruita in
+    tools/val4/fixtura_hire (PIN.json), nu o implementare falsa.
+    Identitatea cu checkoutul real e verificata pe Mac prin hash."""
+    return FIXTURA_HIRE
 
 
 class _RaspFals:
@@ -84,14 +53,17 @@ class _RaspFals:
 
 # ---------------------------------------------------------------- Oblio
 
-def _argv_oblio(zona, backend, out=None, emit=False):
+def _argv_oblio(zona, backend=None, out=None, emit=False, client_nume="Client Sintetic SRL"):
     a = ["--base-url", "https://www.oblio.eu", "--client-id", "test-id",
-         "--secret-ref", "OBLIO_TEST", "--hire-backend", backend,
+         "--secret-ref", "OBLIO_TEST",
+         "--hire-backend", backend or FIXTURA_HIRE,
          "--zona", os.path.join(zona, "extern")]
     if out:
         a += ["--out", out]
     if emit:
-        a += ["--emit", "--firma-cui", "RO123"]
+        a += ["--emit", "--firma-cui", "RO12345678"]
+        if client_nume:
+            a += ["--client-nume", client_nume]
     return a
 
 
@@ -148,44 +120,142 @@ def test_oblio_emit_fara_cui_refuzat(tmp_path, capsys, monkeypatch):
 
 
 def test_oblio_pozitiv_transport_instrumentat(tmp_path, capsys, monkeypatch):
-    """Preflight cu destinatie autorizata: tot lantul trece pe transport
-    instrumentat — autentificare, listare, emitere, readback, refuz auth."""
+    """Adaptorul Hire REAL pe transport instrumentat la limita externa:
+    auth → listare → emitere proforma cu schema reala (cif_emitent,
+    client.nume, moneda, serie) → readback EXACT al referintei emise."""
     monkeypatch.setenv("CONECTOR_SECRET_OBLIO_TEST", "x")
-    be = _mk_hire_backend(str(tmp_path / "be"))
 
     apeluri = []
+    corpi = []
+
+    import urllib.error
 
     def fals(req, *a, **kw):
         apeluri.append((req.get_method(), req.full_url))
+        corp = req.data or b"{}"
+        if b"valoare-gresita-deliberat" in corp:
+            raise urllib.error.HTTPError(
+                req.full_url, 401, "Unauthorized", {}, None)
         if "authorize/token" in req.full_url:
+            corpi.append(json.loads(corp))
             return _RaspFals({"access_token": "tok"})
-        return _RaspFals({"data": [{"id": 1, "seriesName": "TEST",
-                                    "number": "1"}]})
+        if req.get_method() == "POST" and "docs/proforma" in req.full_url:
+            corpi.append(json.loads(req.data))
+            # raspuns ca Oblio: ref = serie-numar, cerut la readback
+            return _RaspFals({"seriesName": "PROBA", "number": "7",
+                              "id": 7007, "link": "x"})
+        return _RaspFals({"data": [{"seriesName": "PROBA", "number": "7",
+                                    "id": 7007}]})
 
     monkeypatch.setattr(oblio_r, "_urlopen_real", fals)
-    a = _argv_oblio(str(tmp_path), be, emit=True)
-    cod = oblio_r.main(a)
+    cod = oblio_r.main(_argv_oblio(str(tmp_path), emit=True))
     out = json.loads(capsys.readouterr().out)
-    assert cod == 0 and out["verdict"] == "PASS"
-    assert out["proforme_emise"] == 1 and out["apeluri_http"] >= 3
+    assert cod == 0 and out["verdict"] == "PASS", out
+    assert out["proforme_emise"] == 1 and out["apeluri_http"] >= 4
     assert all(u.startswith("https://") for _m, u in apeluri)
+    # contractul de request REAL: schema adaptorului, nu nume inventate
+    emis = [c for c in corpi if "products" in c]
+    assert len(emis) == 1
+    assert emis[0]["cif"] == "RO12345678"
+    assert emis[0]["client"]["name"] == "Client Sintetic SRL"
+    assert emis[0]["client"].get("email") in (None, "")
+    assert emis[0]["currency"] == "RON" and emis[0]["seriesName"] == "PROBA"
+    assert emis[0]["document"] == "proforma"
+    assert emis[0]["idempotency"].startswith("proba-extern-")
+    # readback exact al referintei emise
+    pas = [p for p in out["pasi"] if p["pas"].startswith("readback")]
+    assert pas and all(p["ok"] and p["detalii"] == "gasit" for p in pas)
+    # tokenul si secretul nu ajung in raport
+    assert "tok" not in json.dumps(out) and "client_secret" not in json.dumps(out)
+
+
+def test_oblio_emit_fara_client_refuza_inainte_http(tmp_path, capsys,
+                                                   monkeypatch):
+    """Regresia coordonatorului: --emit cu date incomplete trebuie REFUZ
+    inainte de HTTP — nu KeyError 'cif_emitent'/'client.nume' dupa auth."""
+    monkeypatch.setenv("CONECTOR_SECRET_OBLIO_TEST", "x")
+    apeluri = []
+
+    def fals(req, *a, **kw):
+        apeluri.append(req.full_url)
+        return _RaspFals({"access_token": "tok"})
+
+    monkeypatch.setattr(oblio_r, "_urlopen_real", fals)
+    # fara --client-nume → refuz de validare, zero trafic
+    cod = oblio_r.main(_argv_oblio(str(tmp_path), emit=True, client_nume=""))
+    out = json.loads(capsys.readouterr().out)
+    assert cod == 2 and out["verdict"] == "REFUZ"
+    assert apeluri == [] and out["apeluri_http"] == 0
 
 
 def test_oblio_secret_gresit_clasat_auth(tmp_path, capsys, monkeypatch):
-    """Refuzul pe secret gresit trebuie clasat 'auth', nu outage."""
+    """Refuzul 401 vine DIN TRANSPORT (adaptor real), nu din cod local —
+    trebuie clasat 'auth', nu outage/raspuns invalid."""
+    import urllib.error
+
     monkeypatch.setenv("CONECTOR_SECRET_OBLIO_TEST", "x")
-    be = _mk_hire_backend(str(tmp_path / "be"))
+
     def fals(req, *a, **kw):
+        corp = req.data or b"{}"
+        if b"valoare-gresita-deliberat" in corp:
+            raise urllib.error.HTTPError(
+                req.full_url, 401, "Unauthorized", {}, None)
         if "authorize/token" in req.full_url:
             return _RaspFals({"access_token": "tok"})
         return _RaspFals({"data": []})
 
     monkeypatch.setattr(oblio_r, "_urlopen_real", fals)
-    cod = oblio_r.main(_argv_oblio(str(tmp_path), be))
+    cod = oblio_r.main(_argv_oblio(str(tmp_path)))
     out = json.loads(capsys.readouterr().out)
     assert cod == 0 and out["verdict"] == "PASS"
     pas = [p for p in out["pasi"] if p["pas"] == "refuz pe secret gresit"]
     assert pas and pas[0]["ok"] and "auth" in pas[0]["detalii"]
+
+
+def test_oblio_outage_clasat_distinct(tmp_path, capsys, monkeypatch):
+    """Outage-ul (URLError) nu se claseaza auth si nu devine PASS."""
+    import urllib.error
+
+    monkeypatch.setenv("CONECTOR_SECRET_OBLIO_TEST", "x")
+
+    def fals(req, *a, **kw):
+        raise urllib.error.URLError("simulated outage")
+
+    monkeypatch.setattr(oblio_r, "_urlopen_real", fals)
+    cod = oblio_r.main(_argv_oblio(str(tmp_path)))
+    out = json.loads(capsys.readouterr().out)
+    assert cod == 1 and out["verdict"] == "FAIL"
+    pas = [p for p in out["pasi"] if p["pas"] == "lant adaptor"]
+    assert pas and not pas[0]["ok"] and "outage" in pas[0]["detalii"]
+
+
+def test_fixtura_hire_hash_pin():
+    """Fixture-ul vendoruit este byte-identic cu pinul consemnat —
+    nu o 'implementare aproximativa' a adaptorului."""
+    pin = json.loads(Path(FIXTURA_HIRE, "PIN.json").read_text())
+    for rel, sha in pin["sha256"].items():
+        assert sha_fisier_local(Path(FIXTURA_HIRE, rel)) == sha, rel
+
+
+def sha_fisier_local(p):
+    import hashlib
+    return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+@pytest.mark.skipif(
+    not os.path.isfile(os.path.join(
+        HIRE_REAL, "hire", "connectors", "serviciu", "providers", "oblio.py")),
+    reason="checkoutul Hire real exista numai pe Mac — drift-hash local")
+def test_fixtura_hire_drift_vs_checkout_real():
+    """Pe Mac: copiile vendoruite raman byte-identice cu adaptorul real —
+    orice drift intre fixtura si produs cade aici."""
+    for rel in ("connectors/base.py",
+                "connectors/serviciu/providers/baza.py",
+                "connectors/serviciu/providers/oblio.py",
+                "connectors/serviciu/secrete.py"):
+        a = Path(FIXTURA_HIRE, "hire", rel)
+        b = Path(HIRE_REAL, "hire", rel)
+        assert a.read_bytes() == b.read_bytes(), f"drift: {rel}"
 
 
 # ------------------------------------------------------------------- S3
@@ -292,7 +362,7 @@ def test_s3_pozitiv_preflight_si_spy(tmp_path, capsys, monkeypatch):
         echo "$@" >> "{spy_log}"
         echo "BACKUP_EXTRA_ARGS=$BACKUP_EXTRA_ARGS" >> "{spy_log}"
         case "$*" in
-          *"snapshots"*) echo '[{{"id":"snap123"}}]';;
+          *"snapshots"*) echo '[{{"id":"snap123","time":"2026-10-11T17:00:00Z","paths":["{surse_r}"]}},{{"id":"snap-old","time":"2026-01-01T00:00:00Z","paths":["/alt/cineva"]}}]';;
           *"restore"*) eval "tgt=\\$$#"; mkdir -p "$tgt";
                        cp "{surse_r}"/* "$tgt/" 2>/dev/null;;
           *"check"*) exit 0;;
@@ -307,8 +377,30 @@ def test_s3_pozitiv_preflight_si_spy(tmp_path, capsys, monkeypatch):
     assert cod == 0 and out["verdict"] == "PASS", out
     # env sanitizat: --evil-din-env nu trece la subprocese
     assert "--evil-din-env" not in log
-    # restore pe id-ul exact al snapshotului, nu 'latest'
-    assert "restore snap123" in log and "latest" not in log.replace("snap123", "")
+    # restore pe id-ul exact legat de sursele curente, nu 'latest' si
+    # nu snapshotul cuiva (paths diferit)
+    assert "restore snap123" in log and "restore snap-old" not in log
+    assert "latest" not in log.replace("snap123", "")
+
+
+def test_s3_snapshot_strain_refuzat(tmp_path, capsys, monkeypatch):
+    """Lista de snapshoturi fara niciunul legat de sursele curente → FAIL,
+    nu restore pe id arbitrar."""
+    _s3_env(monkeypatch)
+    spy_continut = textwrap.dedent("""\
+        #!/bin/sh
+        case "$*" in
+          *"snapshots"*) echo '[{"id":"snap-foreign","paths":["/alt/bucket"]}]';;
+        esac
+        exit 0
+    """)
+    pf, spy, ad = _fixturi_s3(tmp_path, restic_continut=spy_continut)
+    os.chdir(tmp_path)
+    cod = s3_r.main(_argv_s3(str(tmp_path), extra=["--restic-bin", spy]))
+    out = json.loads(capsys.readouterr().out)
+    assert cod == 1 and out["verdict"] == "FAIL"
+    pas = [p for p in out["pasi"] if "snapshots" in p["pas"]]
+    assert pas and not pas[0]["ok"]
 
 
 def test_s3_init_esuat_fara_check_esueaza(tmp_path, capsys, monkeypatch):

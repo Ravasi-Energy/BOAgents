@@ -213,14 +213,22 @@ def main(argv=None) -> int:
         if r.returncode == 0:
             try:
                 snap = json.loads(r.stdout)
-                if isinstance(snap, list) and snap:
-                    snap_id = snap[-1].get("id") or snap[-1].get("short_id")
+                if isinstance(snap, list):
+                    # Snapshotul creat de ACEASTA executie: paths contine
+                    # sursele curente (realpath), nu orice ultim element.
+                    surse_real = os.path.realpath(surse)
+                    ale_nostre = [s for s in snap
+                                  if isinstance(s, dict)
+                                  and surse_real in (s.get("paths") or [])]
+                    if ale_nostre:
+                        nou = max(ale_nostre, key=lambda s: s.get("time") or "")
+                        snap_id = nou.get("id") or nou.get("short_id")
             except Exception:
                 pass
         pas("snapshots exitcode+lista+identificator", bool(snap_id),
-            f"rc={r.returncode} id={snap_id}")
+            f"rc={r.returncode} id={snap_id} (legat de sursele curente)")
         if not snap_id:
-            raise RuntimeError("niciun snapshot identificat")
+            raise RuntimeError("niciun snapshot asociat surselor curente")
 
         r = ruleaza([args.restic_bin, "-r", args.repository,
                      "restore", snap_id, "--target",

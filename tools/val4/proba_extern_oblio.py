@@ -84,7 +84,13 @@ def main(argv=None) -> int:
     p.add_argument("--secret-ref", required=True,
                    help="numele referintei; valoarea sta in CONECTOR_SECRET_<ref>")
     p.add_argument("--firma-cui", default="",
-                   help="CUI al firmei de test (obligatoriu cu --emit)")
+                   help="CUI al firmei de test = cif_emitent (obligatoriu cu --emit)")
+    p.add_argument("--client-nume", default="",
+                   help="numele clientului sintetic (obligatoriu cu --emit)")
+    p.add_argument("--moneda", default="RON",
+                   help="moneda ISO4217 explicita (ex. RON) — fara implicit din adaptor")
+    p.add_argument("--serie", default="PROBA",
+                   help="seria de test a documentelor emise")
     p.add_argument("--emit", action="store_true",
                    help="emite cel mult 5 proforme de test (fara = read-only)")
     p.add_argument("--max-proforme", type=int, default=1)
@@ -96,6 +102,7 @@ def main(argv=None) -> int:
                    help="director de iesire; implicit <zona>/oblio")
     args = p.parse_args(argv)
 
+    _apeluri_http["n"] = 0
     urllib.request.urlopen = _urlopen_numarat
 
     out = args.out or os.path.join(args.zona, "oblio")
@@ -105,8 +112,13 @@ def main(argv=None) -> int:
         return refuza("base-url fara https — nu se trimite nimic")
     if args.max_proforme < 1 or args.max_proforme > _MAX_PROFORME:
         return refuza(f"--max-proforme in afara 1..{_MAX_PROFORME}")
-    if args.emit and not args.firma_cui:
-        return refuza("--emit cere --firma-cui (firma de test)")
+    if not re.fullmatch(r"[A-Z]{3}", args.moneda or ""):
+        return refuza("--moneda nu e ISO4217 (3 litere mari)")
+    if args.emit:
+        if not args.firma_cui:
+            return refuza("--emit cere --firma-cui (cif_emitent, firma de test)")
+        if not args.client_nume:
+            return refuza("--emit cere --client-nume (clientul sintetic)")
     if not in_zona(out, args.zona):
         return refuza("--out in afara zonei proprii (sibling/traversal/symlink)")
     if not os.path.isdir(args.hire_backend):
@@ -150,21 +162,37 @@ def main(argv=None) -> int:
     try:
         adaptor = AdaptorOblio(args.base_url, args.client_id, args.secret_ref)
         docs = adaptor.documente("proba-extern")
-        pas("autentificare+listare", isinstance(docs, list), f"{len(docs)} intrari")
+        # Adaptorul real intoarce SourceDocument, nu dicturi: fiecare
+        # intrare trebuie sa aiba external_id — nu ajunge "lista goala ok".
+        pas("autentificare+listare",
+            isinstance(docs, list)
+            and all(getattr(d, "external_id", None) is not None
+                    for d in docs),
+            f"{len(docs)} intrari")
 
-        ref_emis = None
         if args.emit:
+            refs = []
             for i in range(args.max_proforme):
+                # Schema reala a adaptorului: cif_emitent, client.nume,
+                # moneda ISO4217 explicita, produse cu nume+pret.
                 r = adaptor.executa("oblio.write", {
-                    "firma_cui": args.firma_cui,
-                    "produse": [{"nume": f"proba-extern-{i+1}", "pret": "1.00"}],
+                    "cif_emitent": args.firma_cui,
+                    "client": {"nume": args.client_nume},
+                    "moneda": args.moneda,
+                    "serie": args.serie,
+                    "produse": [{"nume": f"proba-extern-{i+1}",
+                                 "pret": "1.00", "cantitate": "1",
+                                 "unitate": "buc",
+                                 "cota_tva": "Normala"}],
                 }, cheie_idempotenta=f"proba-extern-{args.firma_cui}-{i+1}")
-                ref_emis = r.get("provider_ref")
+                refs.append(r.get("provider_ref"))
                 raport["proforme_emise"] += 1
-            pas("emitere proforma", raport["proforme_emise"] == args.max_proforme,
-                f"{raport['proforme_emise']} emise, ref {ref_emis}")
-            gasit = adaptor.cauta(ref_emis, "proba-extern") if ref_emis else "lipsa"
-            pas("readback document emis", gasit == "gasit", gasit)
+            pas("emitere proforme", all(refs) and len(refs) == args.max_proforme,
+                f"{len(refs)} ref-uri: {refs}")
+            # Readback EXACT per document emis — niciodata doar ultimul.
+            for ref in refs:
+                gasit = adaptor.cauta(ref, "proba-extern")
+                pas(f"readback {ref}", gasit == "gasit", gasit)
 
         # refuz: adaptor cu secret gresit — trebuie esec AUTH, nu outage
         os.environ[nume_secret + "_GRESIT"] = "valoare-gresita-deliberat"

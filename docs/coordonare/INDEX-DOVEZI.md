@@ -51,3 +51,14 @@ logică de propagare. Ramura de livrare: `codex/livrare-completa`.
 - `docs/bo01-f5/REFERINTA-CANONICA.json` (în acest repo și în Hire) —
   punctează importul canonic A02: Guardian `97ba6e7`, `docs/bo01-f5/`,
   745 poziții, hashuri manifest/pachet din decizie.
+
+### Închidere F5 — dosar + HOLD-uri (CONTROL-F5-20261011)
+
+- `rapoarte/BO-A01/EVIDENTE-F5.json` — reconcilierea nominală: 17
+  rânduri cerință→rută/apelant→rol/tenant→SHA→regresie→probă→
+  readback/efect/restart/concurență→CI.
+- `rapoarte/BO-A01/HOLD-EXTERN-F5.md` — tabel precis HOLD-OBLIO-1 și
+  HOLD-S3-1: probă lipsă, SecretRef necesar, comandă+limită, rezultat
+  așteptat. Acces de test autorizat: inexistent.
+- Gate A02 atașat: `gate-f5-final-97ba6e7.{log,manifest.json}` —
+  GATE-EXEC-OK 46/0 pe pinii finali (a896da1/3f30640/97ba6e7).

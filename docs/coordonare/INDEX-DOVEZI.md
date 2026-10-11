@@ -62,3 +62,14 @@ logică de propagare. Ramura de livrare: `codex/livrare-completa`.
   așteptat. Acces de test autorizat: inexistent.
 - Gate A02 atașat: `gate-f5-final-97ba6e7.{log,manifest.json}` —
   GATE-EXEC-OK 46/0 pe pinii finali (a896da1/3f30640/97ba6e7).
+
+### HOLD-uri — runneri executabili (CONTROL-F5-FINAL)
+
+- `agenti/BO-A01/instrumente-f5/proba-extern-oblio.py` (sha256
+  `6c276cee3547b8e82c5f538947da74a1806aa4b3230c9a39d86227afeef1166e`) și
+  `proba-extern-s3.py` (`95b51719719d4b3c21a7d97c59bad60ebfc6f0e4af365f19c88acddc62530e3d`)
+  — parametrizați prin SecretRef/env; refuz înainte de trafic/efect.
+- `instrumente-f5/extern/probe-negative-extern.log` — 6/6 refuzuri,
+  `apeluri_http: 0`, `efect: zero`.
+- `rapoarte/BO-A01/EVIDENTE-F5.json` — `mapare_canonica`: cele 23
+  ID-uri canonice (B-R-1..12, H-R-1/2/4..12) → dosar/probă/commit.

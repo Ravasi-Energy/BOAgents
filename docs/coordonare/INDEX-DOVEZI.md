@@ -99,3 +99,29 @@ logică de propagare. Ramura de livrare: `codex/livrare-completa`.
 - 22 probe: Mac 22/22 (`junit-runneri-mac-v2.xml`); CI `38158608146`
   SUCCESS — 21 PASS + drift skip explicit; junit artifact per SHA.
 - S3: snapshot ales dupa `paths`=sursele curente + `time`, nu ultimul.
+
+### Proba pe disc restic — pachet SC00 (F5-PREDARE-COMPLETA-SC00, commit `3e8d0b9`)
+
+- `tools/val4/proba_disc_restic.py` — runner portabil: backup→restore
+  prin adaptorul de productie `backups/restic-backup.sh` (vendoruit
+  byte-identic Hire@3f30640, PIN.json sha256 `04a8a4aa…`), repository
+  local dedicat cu marcaj `.proba-disc-f5`.
+- `test_f5_proba_disc.py` — **30 probe**: containment/symlink/suprapunere,
+  repo strain/valid-strain/fisier/dedicat, director pregatit, zona
+  radacina/fisier, retentie (format/interval/0-0/unicode), hash adaptor
+  (gresit/gol), newline in cai, marcaj gresit, cache symlink, restic/
+  password lipsa, env-sanitizare spy, init→check, backup/restore/
+  snapshot esuat → FAIL, pozitiv spy + **lant real** restic+adaptor +
+  refolosire repo real + drift vs checkout Hire (Mac-only).
+- Mac: **30/30 PASS** (`predare-sc00/probe-locale-mac/junit-disc-mac.xml`);
+  proba reala pe copia din pachet PASS — `PROBA-PE-DISC-mac.json`.
+- CI `38374430167` SUCCESS pe `3e8d0b9` — 27 PASS + 3 skip oneste
+  (restic real si checkoutul Hire lipsesc in CI).
+- Pachetul `agenti/BO-A01/instrumente-f5/predare-sc00/` (MANIFEST 7/7):
+  README cu comanda exacta Linux, template raport SC00 cu etichetele
+  PROBĂ PE DISC / S3 NEEXECUTAT/HOLD. Executia reala: SC00 pe server.
+- 2 runde review adversarial intern; constatari remediate inainte de
+  predare (check-invalid, bare-name which, repo refolosit fara marcaj,
+  pin-sha gol, injectie newline, symlink cache).
+- H-R-8 Oblio: AMANAT explicit de Stefan. Componenta S3 a H-R-10:
+  HOLD distinct — proba pe disc nu o acopera.

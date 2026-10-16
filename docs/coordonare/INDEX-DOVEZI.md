@@ -125,3 +125,26 @@ logică de propagare. Ramura de livrare: `codex/livrare-completa`.
   pin-sha gol, injectie newline, symlink cache).
 - H-R-8 Oblio: AMANAT explicit de Stefan. Componenta S3 a H-R-10:
   HOLD distinct — proba pe disc nu o acopera.
+
+### F6 — inchidere functionala BOAgents (decizia Stefan 16.10, commit `8bad411`)
+
+- Inventar atomic: `coordonare/rapoarte/BO-A01/F6-F8/MATRICE-F6-BOAGENTS.md/.json`
+  — 66 randuri criteriu→cod→ruta→rol→proba pe BO-BOT-001/002/003,
+  BO-SET-001, BO-INT-001, BO-HIRE-001, BO-R02, BO-R03, BO-R04, BO-R05
+  (producator), PILOT-VAL5, RA13-A02-01.
+- Contracte publice: `docs/f6/CONTRACTE.md` — rute reale, rol minim,
+  tenant, CAS, refuzuri, coduri verdict (deblocant BO01/A02).
+- Remedieri: `8b97cd1` — `CURRENCY_MISMATCH` declarat in REASONS +
+  regresie emis⊆declarat (`test_currency_mismatch_refused_and_declared`,
+  86/86 PASS routing); `8bad411` — drift `bo_agents.json`
+  (verify-authority→authority, +audit-intents/+audit-requeue, chei 49→50,
+  router 11→15) + fisierul de contracte.
+- Proba Mac pe `8bad411`: **548/548 PASS** bo/* + bughunt02 in 141s —
+  `coordonare/rapoarte/BO-A01/F6-F8/probe-mac/junit-bo-surface-8bad411.xml`.
+- Intrebari de domeniu catre coordonator:
+  `coordonare/rapoarte/BO-A01/F6-F8/INTREBARI-DOMENIU-F6.md`
+  (Q-F6-01 limite concurenta/entitlement BoBot; Q-F6-02 activarea
+  generica a pachetului kind=bobot — pilotul are activare, bobotul
+  generic nu are conventie de artefact ratificata).
+- CI pe `8b97cd1` anulat de `8bad411` (concurrency pe non-main, conform
+  mandatului); CI `38952876547` pe `8bad411` — in desfasurare.

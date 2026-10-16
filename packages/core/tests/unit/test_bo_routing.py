@@ -185,6 +185,20 @@ class TestEngine:
         assert d.decision == "ROUTE"
         assert d.cost_estimate is None
 
+    def test_currency_mismatch_refused_and_declared(self) -> None:
+        """A policy cap carries a currency; an entry priced in any other
+        currency is refused (CURRENCY_MISMATCH) — and every reason the
+        engine emits must be declared in the exported REASONS set."""
+        from openexecutive.bo.routing.engine import REASONS
+
+        eur = _entry(cost=Cost("10.00", "10.00", "EUR", "2027-12-31"))
+        p = _policy(max_estimated_cost=Decimal("0.05"), cost_currency="USD")
+        d = recommend([eur], p, CTX)
+        assert d.decision == "REFUSE"
+        assert "CURRENCY_MISMATCH" in d.reasons
+        assert "CURRENCY_MISMATCH" in REASONS
+        assert set(d.reasons) <= set(REASONS)
+
     def test_model_disabled(self) -> None:
         d = recommend([_entry(state="DISABLED")], _policy(), CTX)
         assert "MODEL_DISABLED" in d.reasons

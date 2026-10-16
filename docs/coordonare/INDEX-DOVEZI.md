@@ -147,4 +147,7 @@ logică de propagare. Ramura de livrare: `codex/livrare-completa`.
   generica a pachetului kind=bobot — pilotul are activare, bobotul
   generic nu are conventie de artefact ratificata).
 - CI pe `8b97cd1` anulat de `8bad411` (concurrency pe non-main, conform
-  mandatului); CI `38952876547` pe `8bad411` — in desfasurare.
+  mandatului); CI `38952876547` pe `8bad411` — **SUCCESS**: 4360 teste,
+  0 fail/error, 5 skip oneste (restic real/checkout Hire lipsesc in CI +
+  workflows_meta preexistent); 913 cazuri bo/* verzi. JUnit CI:
+  `F6-F8/probe-ci/junit-unit-8bad411.xml` sha256 `db1fa97b…`.

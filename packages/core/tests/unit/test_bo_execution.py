@@ -291,10 +291,75 @@ class TestSubmission:
             TENANT, "bo.exec.budget_cap", "4.00 USD",
             expected_version=0, actor="test",
         )
-        m = _mandate(budget_limit="50")
-        _run(m, budget="4")  # la plafon — permis
+        m = _mandate(budget_limit="50", budget_currency="USD")
+        _run(m, budget="4")  # la plafon — permis (moștenește USD din mandat)
         with pytest.raises(MandateValidationError):
             _run(m, budget="4.01")  # peste plafonul tenantului
+
+    def test_tenant_budget_cap_currency_mismatch_refuses(self, db: Path) -> None:
+        """v2 AB-01/02: plafonul „4.00 USD“ nu se compară mut cu sume
+        denominate altfel — EUR refuzat ca CURRENCY_MISMATCH, iar suma
+        fără monedă e refuzată pentru că nu poate fi comparată."""
+        _enable()
+        settings_store.set_value(
+            TENANT, "bo.exec.budget_cap", "4.00 USD",
+            expected_version=0, actor="test",
+        )
+        m_eur = _mandate(budget_limit="50", budget_currency="EUR")
+        with pytest.raises(MandateValidationError, match="plafon"):
+            _run(m_eur, budget="1")
+        m_none = _mandate(budget_limit="50")
+        with pytest.raises(MandateValidationError, match="plafon"):
+            _run(m_none, budget="1", budget_currency="EUR")
+        # fără monedă deloc + plafon denominat → blocat până la clarificare
+        with pytest.raises(MandateValidationError, match="fără monedă"):
+            _run(m_none, budget="1")
+        # aceeași monedă → comparabil și permis
+        _run(m_none, budget="4", budget_currency="USD")
+
+    def test_mandate_budget_currency_persists_and_intersects(
+        self, db: Path,
+    ) -> None:
+        """budget_currency se persistă, se moștenește la copilul care o
+        omite și respinge o monedă divergentă (intersecție, nu conversie)."""
+        parent = _mandate(budget_limit="50", budget_currency="USD")
+        assert parent.budget_currency == "USD"
+        child = _mandate(
+            parent=parent, allowed_resources=["synth.counter"],
+            budget_limit="5", concurrency_limit=1, max_steps=5,
+            max_depth=2,
+        )
+        assert child.budget_currency == "USD"  # moștenită
+        with pytest.raises(MandateValidationError, match="moneda"):
+            _mandate(
+                parent=parent, allowed_resources=["synth.counter"],
+                budget_limit="5", concurrency_limit=1, max_steps=5,
+                max_depth=2, budget_currency="EUR",
+            )
+        with pytest.raises(MandateValidationError, match="ISO-4217"):
+            _mandate(budget_limit="10", budget_currency="ZZZ")
+
+    def test_run_budget_currency_persists_and_rejects_mismatch(
+        self, db: Path,
+    ) -> None:
+        _enable()
+        m = _mandate(
+            budget_limit="50", budget_currency="USD", concurrency_limit=10,
+        )
+        run = _run(m, budget="1", budget_currency="USD")
+        assert run["budget_currency"] == "USD"
+        run_inherit = _run(m, budget="1")  # omite → moștenește USD
+        assert run_inherit["budget_currency"] == "USD"
+        with pytest.raises(MandateValidationError, match="diferă"):
+            _run(m, budget="1", budget_currency="EUR")
+
+    def test_budget_float_and_bool_refused(self, db: Path) -> None:
+        """v2 §4-5: float/bool nu sunt contract de bani — refuz la
+        validator (defense în depth, API refuză și ea)."""
+        with pytest.raises(MandateValidationError):
+            _mandate(budget_limit=4.5)  # type: ignore[arg-type]
+        with pytest.raises(MandateValidationError):
+            _mandate(budget_limit=True)  # type: ignore[arg-type]
 
     def test_effect_attempt_cap_forces_reconciliation(self, db: Path) -> None:
         """Peste bo.exec.max_effect_attempts o intrare SUBMITTED nu mai
@@ -1820,3 +1885,25 @@ class TestRetention:
         )
         with pytest.raises(store.NotFoundError):
             store.get_run(TENANT, run["run_id"])
+
+
+class TestChainCurrencyInvariant:
+    """v2: lanțul de mandate nu poate amesteca rezervări cu și fără monedă —
+    agregatul de buget al lanțului ar compara mere cu lei."""
+
+    def test_child_currency_mismatch_and_inherit(self, db: Path) -> None:
+        parent = _mandate(budget_limit="50", budget_currency="USD")
+        child = _mandate(parent=parent, allowed_resources=["synth.counter"],
+                         allowed_actions=["increment"])  # moștenește USD
+        assert child.budget_currency == "USD"
+        with pytest.raises(MandateValidationError, match="diferă"):
+            _mandate(parent=parent, allowed_resources=["synth.counter"],
+                     allowed_actions=["increment"], budget_currency="EUR")
+
+    def test_currency_cannot_appear_under_dimensionless_parent(
+        self, db: Path
+    ) -> None:
+        parent = _mandate()  # fără budget_currency → nedeterminat
+        with pytest.raises(MandateValidationError, match="nedeterminat"):
+            _mandate(parent=parent, allowed_resources=["synth.counter"],
+                     allowed_actions=["increment"], budget_currency="USD")

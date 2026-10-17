@@ -20,6 +20,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -172,30 +173,57 @@ _USAGE_INT_FIELDS: tuple[str, ...] = (
 )
 
 
-def _zero_usage() -> dict[str, float | int]:
-    return {**{k: 0 for k in _USAGE_INT_FIELDS}, "cost_usd": 0.0}
+def _zero_usage() -> dict[str, Any]:
+    return {
+        **{k: 0 for k in _USAGE_INT_FIELDS},
+        "cost_usd": 0.0,
+        "cost": {"amount": "0", "currency": "USD"},
+    }
 
 
-def _row_to_usage(row: sqlite3.Row) -> dict[str, float | int]:
+def _usage_cost_obj(cost: Decimal) -> dict[str, Any]:
+    """The v2 money contract: exact decimal string + explicit currency.
+    USD is the provider's billing contract (OpenRouter usage.cost), not a
+    default — it is asserted, never assumed."""
+    return {"amount": format(cost.normalize(), "f"), "currency": "USD"}
+
+
+def _row_to_usage(row: sqlite3.Row, cost: Decimal) -> dict[str, Any]:
     # On an empty match the totals query still returns one row (COUNT(*)=0) but
-    # every SUM(...) column is SQL NULL — the `or 0` / `or 0.0` coalescing is
-    # what zeroes those out, so this stays correct with no caller-side None.
-    out: dict[str, float | int] = {k: int(row[k] or 0) for k in _USAGE_INT_FIELDS}
-    out["cost_usd"] = float(row["cost_usd"] or 0.0)
+    # every SUM(...) column is SQL NULL — the `or 0` coalescing is what zeroes
+    # those out, so this stays correct with no caller-side None. `cost_usd`
+    # stays a float for the legacy field; `cost` carries the exact value.
+    out: dict[str, Any] = {k: int(row[k] or 0) for k in _USAGE_INT_FIELDS}
+    out["cost_usd"] = float(cost)
+    out["cost"] = _usage_cost_obj(cost)
     return out
 
 
+def _as_cost_decimal(value: Any) -> Decimal:
+    """One stored cost → Decimal. Exact for the canonical string form;
+    shortest-round-trip for legacy float rows; 0 for missing/garbled
+    (the documented coalescing, unchanged)."""
+    if value is None:
+        return Decimal(0)
+    try:
+        return Decimal(str(value))
+    except InvalidOperation:
+        return Decimal(0)
+
+
 # SUM expression shared by every usage_summary() query. Token fields cast to
-# INTEGER and cost to REAL; COALESCE(..., 0) tolerates NULL/garbled JSON the
-# same way _compute_cost_summary's _as_int does in the per-session path.
+# INTEGER; COALESCE(..., 0) tolerates NULL/garbled JSON the same way
+# _compute_cost_summary's _as_int does in the per-session path. Money is
+# deliberately NOT summed in SQL — CAST AS REAL is float arithmetic, which
+# loses digits; costs are accumulated in Decimal per row by
+# usage_summary() instead (REGULA-SUME-VALUTE-V2).
 _USAGE_SUM_COLS = """
     COUNT(*) AS calls,
     SUM(COALESCE(CAST(json_extract(details_json,'$.input_tokens') AS INTEGER),0)) AS input_tokens,
     SUM(COALESCE(CAST(json_extract(details_json,'$.cache_read_input_tokens') AS INTEGER),0)) AS cache_read_input_tokens,
     SUM(COALESCE(CAST(json_extract(details_json,'$.cache_creation_input_tokens') AS INTEGER),0)) AS cache_creation_input_tokens,
     SUM(COALESCE(CAST(json_extract(details_json,'$.output_tokens') AS INTEGER),0)) AS output_tokens,
-    SUM(COALESCE(CAST(json_extract(details_json,'$.web_search_requests') AS INTEGER),0)) AS web_search_requests,
-    SUM(COALESCE(CAST(json_extract(details_json,'$.cost_usd') AS REAL),0)) AS cost_usd
+    SUM(COALESCE(CAST(json_extract(details_json,'$.web_search_requests') AS INTEGER),0)) AS web_search_requests
 """
 
 
@@ -699,13 +727,45 @@ class AuditLogger:
                 f"FROM audit_log {where} GROUP BY source ORDER BY input_tokens DESC",
                 params,
             ).fetchall()
+            # Exact money: costs are accumulated per row in Decimal, never
+            # via SUM(... AS REAL) — float addition drops digits on the
+            # small per-call amounts this table holds (REGULA-SUME-VALUTE-V2).
+            # Reads both the canonical string form and legacy float rows.
+            cost_rows = conn.execute(
+                "SELECT substr(ts,1,10) AS day, "
+                "COALESCE(json_extract(details_json,'$.model'),'unknown') AS model, "
+                "COALESCE(actor,'unknown') AS source, "
+                "json_extract(details_json,'$.cost_usd') AS cost "
+                f"FROM audit_log {where}",
+                params,
+            ).fetchall()
+
+        totals_cost = Decimal(0)
+        day_cost: dict[str, Decimal] = {}
+        model_cost: dict[str, Decimal] = {}
+        source_cost: dict[str, Decimal] = {}
+        for r in cost_rows:
+            c = _as_cost_decimal(r["cost"])
+            totals_cost += c
+            day_cost[r["day"]] = day_cost.get(r["day"], Decimal(0)) + c
+            model_cost[r["model"]] = model_cost.get(r["model"], Decimal(0)) + c
+            source_cost[r["source"]] = source_cost.get(
+                r["source"], Decimal(0)
+            ) + c
 
         return {
-            "totals": _row_to_usage(totals_row),
-            "by_day": [{"day": r["day"], **_row_to_usage(r)} for r in by_day_rows],
-            "by_model": [{"model": r["model"], **_row_to_usage(r)} for r in by_model_rows],
+            "totals": _row_to_usage(totals_row, totals_cost),
+            "by_day": [
+                {"day": r["day"], **_row_to_usage(r, day_cost.get(r["day"], Decimal(0)))}
+                for r in by_day_rows
+            ],
+            "by_model": [
+                {"model": r["model"], **_row_to_usage(r, model_cost.get(r["model"], Decimal(0)))}
+                for r in by_model_rows
+            ],
             "by_source": [
-                {"source": r["source"], **_row_to_usage(r)} for r in by_source_rows
+                {"source": r["source"], **_row_to_usage(r, source_cost.get(r["source"], Decimal(0)))}
+                for r in by_source_rows
             ],
         }
 

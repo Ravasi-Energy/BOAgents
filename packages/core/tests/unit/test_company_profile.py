@@ -1,6 +1,7 @@
 """Unit tests for CompanyProfile."""
 import builtins
 import tempfile
+from decimal import Decimal
 from pathlib import Path
 
 from openexecutive.memory.company_profile import CompanyProfile
@@ -105,7 +106,7 @@ def test_prompt_block_includes_financials():
         financials=Financials(burn_rate_monthly=300000.0, runway_months=8.0),
     )
     block = profile.to_prompt_block()
-    assert "300,000" in block
+    assert "300.000" in block
     assert "8.0 months" in block
 
 
@@ -292,11 +293,30 @@ def test_prompt_block_money_rendering():
         name="A",
         financials={"burn_rate_monthly": 2500, "burn_rate_currency": "RON"},
     )
-    assert "**ARR**: $6,000" in usd.to_prompt_block()
-    assert "**ARR**: EUR 6,000" in eur.to_prompt_block()
+    assert "**ARR**: 6.000 USD" in usd.to_prompt_block()
+    assert "**ARR**: 6.000 €" in eur.to_prompt_block()
     arr_line = next(line for line in unknown.to_prompt_block().splitlines() if line.startswith("**ARR**"))
-    assert arr_line == "**ARR**: 6,000"  # no $ claim for unknown currency
-    assert "Monthly burn: RON 2,500" in burn.to_prompt_block()
+    # currency unknown is labelled, never defaulted to "$"/USD (v2 §2)
+    assert arr_line == "**ARR**: 6.000 (valută necunoscută)"
+    assert "Monthly burn: 2.500 lei" in burn.to_prompt_block()
+
+
+def test_fmt_amount_v2_contract():
+    """REGULA-SUME-VALUTE-V2 §1-3: Romanian format, exact decimals kept,
+    label per the currency table, unknown labelled — never "$", never
+    silently truncated, negative zero as zero."""
+    from openexecutive.memory.company_profile import _fmt_amount
+
+    assert _fmt_amount(6000, "RON") == "6.000 lei"
+    assert _fmt_amount(6000, "EUR") == "6.000 €"
+    assert _fmt_amount(6000, "USD") == "6.000 USD"
+    assert _fmt_amount(6000, "JPY") == "6.000 JPY"
+    assert _fmt_amount(Decimal("6000.25"), "EUR") == "6.000,25 €"
+    assert _fmt_amount(Decimal("1.234"), "KWD") == "1,234 KWD"
+    assert _fmt_amount(Decimal("0.05"), "RON") == "0,05 lei"
+    assert _fmt_amount(-6000, "EUR") == "-6.000 €"
+    assert _fmt_amount(Decimal("-0.00"), "USD") == "0,00 USD"
+    assert _fmt_amount(6000, None) == "6.000 (valută necunoscută)"
 
 
 def test_api_models_validate_currency():

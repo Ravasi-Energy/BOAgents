@@ -162,3 +162,23 @@ def test_conflict_does_not_write(db: Path) -> None:
                         expected_version=0, actor="b@test")
     assert store.get_effective_value(
         "tenant-a", "bo.bobot.simulation.max_steps") == 10
+
+
+def test_cost_cap_rejects_invented_currency(db: Path) -> None:
+    """v2 §2: „10.00 ZZZ“ are forma corectă dar nu e monedă reală —
+    refuzat contra listei ISO-4217 (înainte trecea regexul gol)."""
+    import pytest
+
+    from openexecutive.bo.settings.registry import SettingValidationError
+
+    for bad in ("10.00 ZZZ", "10.00 ABC", "10.00 lei"):
+        with pytest.raises(SettingValidationError):
+            store.set_value(
+                "tenant-a", "bo.exec.budget_cap", bad,
+                expected_version=0, actor="admin@test",
+            )
+    store.set_value(
+        "tenant-a", "bo.exec.budget_cap", "10.00 EUR",
+        expected_version=0, actor="admin@test",
+    )
+    assert store.get_effective_value("tenant-a", "bo.exec.budget_cap") == "10.00 EUR"

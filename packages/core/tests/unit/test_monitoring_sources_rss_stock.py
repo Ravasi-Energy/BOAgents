@@ -511,3 +511,68 @@ async def test_rss_bozo_with_entries_still_emits(
     # feedparser will return at least one entry from this; bozo=True but
     # entries is non-empty → must surface.
     assert len(signals) >= 1
+
+
+def _yahoo_payload_ccy(*, price: float, prev_close: float, ccy: str | None) -> bytes:
+    return json.dumps({
+        "chart": {
+            "result": [{
+                "meta": {
+                    "symbol": "T",
+                    "regularMarketPrice": price,
+                    "chartPreviousClose": prev_close,
+                    **({"currency": ccy} if ccy else {}),
+                },
+            }],
+            "error": None,
+        },
+    }).encode()
+
+
+@pytest.mark.asyncio
+async def test_stock_uses_source_currency_not_dollar_sign(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v2: moneda vine din meta Yahoo — un ticker RON nu se afișează „$“."""
+    async def fake_fetch(url: str, max_bytes: int) -> bytes:
+        return _yahoo_payload_ccy(price=110.0, prev_close=100.0, ccy="RON")
+
+    monkeypatch.setattr(
+        "openexecutive.monitoring.sources.stock.fetch_bounded", fake_fetch
+    )
+    monkeypatch.setattr(
+        "openexecutive.monitoring.sources.stock.validate_target_url",
+        lambda u: (True, ""),
+    )
+    src = StockSource()
+    item = _make_item(signal_type="stock", target="SNP", config={"display_name": "Petrom"})
+    signals = await src.poll(item)
+    assert len(signals) == 1
+    assert "110.00 RON" in signals[0].normalized_summary
+    assert "$" not in signals[0].normalized_summary
+    assert signals[0].raw_payload["currency"] == "RON"
+
+
+@pytest.mark.asyncio
+async def test_stock_unknown_currency_labelled_not_dollared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fără monedă din sursă (sau cod non-ISO precum GBp) → etichetă
+    „valută necunoscută“, niciodată „$“ presupus."""
+    for ccy in (None, "GBp"):
+        async def fake_fetch(url: str, max_bytes: int, ccy=ccy) -> bytes:
+            return _yahoo_payload_ccy(price=110.0, prev_close=100.0, ccy=ccy)
+
+        monkeypatch.setattr(
+            "openexecutive.monitoring.sources.stock.fetch_bounded", fake_fetch
+        )
+        monkeypatch.setattr(
+            "openexecutive.monitoring.sources.stock.validate_target_url",
+            lambda u: (True, ""),
+        )
+        src = StockSource()
+        item = _make_item(signal_type="stock", target="X", config={})
+        signals = await src.poll(item)
+        assert len(signals) == 1
+        assert "valută necunoscută" in signals[0].normalized_summary
+        assert "$" not in signals[0].normalized_summary

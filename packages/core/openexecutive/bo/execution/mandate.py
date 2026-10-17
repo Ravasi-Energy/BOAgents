@@ -56,6 +56,7 @@ class Mandate:
     created_by: str
     created_at: str
     guardian_ref: str | None = None
+    budget_currency: str | None = None
 
 
 def _validate_token(v: Any, *, label: str) -> str:
@@ -80,6 +81,11 @@ def _validate_token_set(v: Any, *, label: str, max_items: int = 64) -> frozenset
 def _validate_budget(v: Any) -> Decimal:
     if isinstance(v, bool):
         raise MandateValidationError("bugetul: valoare invalidă")
+    if isinstance(v, float):
+        raise MandateValidationError(
+            "bugetul: float JSON nu este o reprezentare exactă — "
+            "folosiți șir zecimal (ex. „100.00“) sau întreg"
+        )
     try:
         amount = Decimal(str(v))
     except (InvalidOperation, ValueError) as exc:
@@ -87,6 +93,21 @@ def _validate_budget(v: Any) -> Decimal:
     if amount.is_nan() or amount.is_infinite() or not (Decimal("0") < amount <= Decimal("1000000")):
         raise MandateValidationError("bugetul: în afara intervalului (0, 1000000]")
     return amount
+
+
+def _validate_budget_currency(v: Any) -> str | None:
+    """Optional ISO-4217 currency for the budget amount. ``None`` stays
+    dimensionless (legacy abstract budgets) — never defaulted to a
+    currency that was not declared (REGULA-SUME-VALUTE-V2)."""
+    if v is None:
+        return None
+    from openexecutive.memory.company_profile import ISO_4217_CODES
+
+    if not isinstance(v, str) or v not in ISO_4217_CODES:
+        raise MandateValidationError(
+            "moneda bugetului: așteptat cod ISO-4217 valid (ex. USD, EUR, RON)"
+        )
+    return v
 
 
 def _validate_expiry(v: Any) -> str:
@@ -127,6 +148,7 @@ def validate_mandate_fields(
     max_steps: Any,
     max_depth: Any,
     expires_at: Any,
+    budget_currency: Any = None,
 ) -> dict[str, Any]:
     """Normalize + validate one mandate request (root or child fields)."""
     return {
@@ -137,6 +159,7 @@ def validate_mandate_fields(
             allowed_actions, label="acțiuni permise"
         ),
         "budget_limit": _validate_budget(budget_limit),
+        "budget_currency": _validate_budget_currency(budget_currency),
         "concurrency_limit": _validate_int_field(
             concurrency_limit, minimum=1, maximum=64, label="concurența"
         ),
@@ -188,6 +211,23 @@ def check_child_intersection(
     if fields["budget_limit"] > parent.budget_limit:
         raise MandateValidationError(
             "bugetul copilului depășește mandatul părinte"
+        )
+    # Currency intersects like the amount: a child cannot spend in a
+    # different currency than the parent's budget (REGULA-SUME-VALUTE-V2 —
+    # no implicit conversion and no mixed-currency ledgers). A child that
+    # omits the currency inherits the parent's declared one.
+    if parent.budget_currency is not None:
+        if fields["budget_currency"] is None:
+            fields["budget_currency"] = parent.budget_currency
+        elif fields["budget_currency"] != parent.budget_currency:
+            raise MandateValidationError(
+                "moneda bugetului copilului diferă de cea a mandatului părinte"
+            )
+    elif fields["budget_currency"] is not None:
+        raise MandateValidationError(
+            "moneda nu poate apărea în lanț — mandatul părinte este "
+            "nedeterminat ca valută (agregatele de lanț ar amesteca "
+            "rezervări cu și fără monedă)"
         )
     if fields["concurrency_limit"] > parent.concurrency_limit:
         raise MandateValidationError(

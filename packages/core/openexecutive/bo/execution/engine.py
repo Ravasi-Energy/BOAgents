@@ -95,6 +95,7 @@ def submit_execution(
     correlation_id: str | None,
     actor: str,
     parent_run_id: str | None = None,
+    budget_currency: str | None = None,
     db_path: Path | None = None,
 ) -> dict[str, Any]:
     """Create a PENDING run under a mandate. Budget + concurrency are
@@ -106,20 +107,11 @@ def submit_execution(
         from openexecutive.bo.execution.mandate import MandateValidationError
 
         raise MandateValidationError("budget_amount: valoare invalidă")
-    cap_raw = str(
-        _setting(tenant, "bo.exec.budget_cap", "", db_path)
-    ).strip()
-    if cap_raw:
-        cap_amount = Decimal(cap_raw.split()[0])
-        if budget_amount > cap_amount:
-            from openexecutive.bo.execution.mandate import (
-                MandateValidationError,
-            )
+    from openexecutive.bo.execution.mandate import (
+        MandateValidationError,
+        _validate_budget_currency,
+    )
 
-            raise MandateValidationError(
-                f"budget_amount {budget_amount} depășește plafonul "
-                f"tenantului ({cap_raw})"
-            )
     mandate = store.get_mandate(tenant, mandate_id, db_path=db_path)
     # The whole chain must be active at submission too (not only per step).
     try:
@@ -127,6 +119,40 @@ def submit_execution(
             assert_active(link)
     except (MandateRevokedError, MandateExpiredError) as exc:
         raise store.InvalidStateError(str(exc)) from exc
+    # Currency resolution (REGULA-SUME-VALUTE-V2): the run's declared
+    # currency wins, otherwise it inherits the mandate's. A run that
+    # declares a different currency than its mandate is refused — no
+    # implicit conversion, no mixed-currency reservations.
+    run_ccy = _validate_budget_currency(budget_currency)
+    if mandate.budget_currency is not None:
+        if run_ccy is None:
+            run_ccy = mandate.budget_currency
+        elif run_ccy != mandate.budget_currency:
+            raise MandateValidationError(
+                f"moneda bugetului runului ({run_ccy}) diferă de cea a "
+                f"mandatului ({mandate.budget_currency})"
+            )
+    cap_raw = str(
+        _setting(tenant, "bo.exec.budget_cap", "", db_path)
+    ).strip()
+    if cap_raw:
+        cap_parts = cap_raw.split()
+        cap_amount = Decimal(cap_parts[0])
+        cap_ccy = cap_parts[1] if len(cap_parts) > 1 else None
+        # The cap is denominated; a dimensionless or differently
+        # denominated budget cannot be compared to it (no silent
+        # cross-currency comparison — same class as routing C8).
+        if cap_ccy is not None and run_ccy != cap_ccy:
+            raise MandateValidationError(
+                f"budget_amount fără monedă compatibilă — plafonul "
+                f"tenantului este denominat în {cap_ccy} "
+                f"(primit: {run_ccy or 'fără monedă'})"
+            )
+        if budget_amount > cap_amount:
+            raise MandateValidationError(
+                f"budget_amount {budget_amount} depășește plafonul "
+                f"tenantului ({cap_raw})"
+            )
     if len(steps) > int(_setting(tenant, "bo.exec.max_steps", 50, db_path)):
         from openexecutive.bo.execution.mandate import MandateValidationError
         raise MandateValidationError("numărul de pași depășește bo.exec.max_steps")
@@ -139,6 +165,7 @@ def submit_execution(
         budget_amount=budget_amount, slots=slots,
         correlation_id=correlation_id or f"corr_{uuid.uuid4().hex[:20]}",
         actor=actor, parent_run_id=parent_run_id, db_path=db_path,
+        budget_currency=run_ccy,
     )
     _emit_checkpoint(
         tenant, run, mandate, step=0, state="PENDING", db_path=db_path,

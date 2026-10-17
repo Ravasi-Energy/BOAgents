@@ -24,6 +24,7 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Iterator
 from contextvars import ContextVar
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from openexecutive.audit.logger import log_event
@@ -77,9 +78,19 @@ def usage_counts(message: Any) -> dict[str, Any] | None:
     ):
         return None
     raw_cost = getattr(usage, "cost", None)
+    # Exact money (REGULA-SUME-VALUTE-V2): the provider-reported cost is
+    # stored as a canonical decimal string, never a float — a float is
+    # not an authoritative money representation and sums in REAL lose
+    # digits. ``Decimal(str(x))`` preserves the shortest-round-trip form
+    # for values already parsed as float, and the full precision when the
+    # provider sends a string/Decimal.
     try:
-        cost_usd = float(raw_cost) if raw_cost is not None else None
-    except (TypeError, ValueError):
+        cost_usd = (
+            format(Decimal(str(raw_cost)).normalize(), "f")
+            if raw_cost is not None
+            else None
+        )
+    except (InvalidOperation, ValueError):
         cost_usd = None
     server = getattr(usage, "server_tool_use", None)
     return {

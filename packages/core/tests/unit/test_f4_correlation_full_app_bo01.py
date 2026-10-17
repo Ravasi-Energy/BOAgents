@@ -14,7 +14,8 @@ def test_f4_correlation_identical_replay_one_run_changed_payload_conflict(full_a
         assert result.status_code==200,result.text
     mandate=client.post('/bo/execution/mandates',headers=h,json={
         'allowed_resources':['synth.counter'],'allowed_actions':['increment'],
-        'budget_limit':'100','concurrency_limit':2,'max_steps':10,'max_depth':1,
+        'budget_limit':'100','budget_currency':'USD','concurrency_limit':2,
+        'max_steps':10,'max_depth':1,
         'expires_at':(datetime.now(timezone.utc)+timedelta(hours=1)).isoformat()})
     assert mandate.status_code==201,mandate.text
     body={'mandate_id':mandate.json()['mandate']['mandate_id'],'steps':[{'action':'increment','resource':'synth.counter','payload':{'amount':1}}],'budget_amount':'5','correlation_id':'bo01-f4-replay'}
@@ -29,3 +30,65 @@ def test_f4_correlation_identical_replay_one_run_changed_payload_conflict(full_a
     print(json.dumps({'first':first.status_code,'replay':second.status_code,'sameRun':first.json()['run']['run_id'],'changedStatus':third.status_code,'changedBody':third.json(),'before':before,'after':after}))
     assert third.status_code==409,third.text
     assert after==before
+
+
+def _mandate_body(**over):
+    body={'allowed_resources':['synth.counter'],'allowed_actions':['increment'],
+        'budget_limit':'100','concurrency_limit':2,'max_steps':10,'max_depth':1,
+        'expires_at':(datetime.now(timezone.utc)+timedelta(hours=1)).isoformat()}  # noqa: UP017
+    body.update(over)
+    return body
+
+
+def test_money_boundary_rejects_float_and_invented_currency(full_app):  # noqa: F811
+    """v2 §4-5: float JSON nu e reprezentare exactă; ZZZ nu e ISO real."""
+    client,headers,*_=full_app
+    h=headers('admin')
+    settings=client.get('/bo/settings',headers=h).json()['settings']
+    s=next(x for x in settings if x['key']=='bo.exec.enabled')
+    r=client.put('/bo/settings/bo.exec.enabled',headers=h,
+        json={'expected_version':s['version'],'value':True})
+    assert r.status_code==200,r.text
+    r=client.post('/bo/execution/mandates',headers=h,
+        json=_mandate_body(budget_limit=100.5))
+    assert r.status_code==422,r.text
+    r=client.post('/bo/execution/mandates',headers=h,
+        json=_mandate_body(budget_limit='100',budget_currency='ZZZ'))
+    assert r.status_code==422,r.text
+    r=client.post('/bo/execution/mandates',headers=h,
+        json=_mandate_body(budget_limit='100',budget_currency='usd'))
+    assert r.status_code==422,r.text  # minuscule ≠ cod ISO
+    ok=client.post('/bo/execution/mandates',headers=h,
+        json=_mandate_body(budget_limit='100',budget_currency='USD'))
+    assert ok.status_code==201,ok.text
+    assert ok.json()['mandate']['budget_currency']=='USD'
+    mid=ok.json()['mandate']['mandate_id']
+    steps=[{'action':'increment','resource':'synth.counter','payload':{'amount':1}}]
+    r=client.post('/bo/execution/runs',headers=h,
+        json={'mandate_id':mid,'steps':steps,'budget_amount':5.5})
+    assert r.status_code==422,r.text
+    r=client.post('/bo/execution/runs',headers=h,
+        json={'mandate_id':mid,'steps':steps,'budget_amount':'5',
+              'budget_currency':'EUR'})
+    assert r.status_code in (400,409,422),r.text  # mismatch cu mandatul USD
+
+
+def test_dimensionless_budget_refused_under_denominated_cap(full_app):  # noqa: F811
+    """v2 §2: fără monedă nu se compară cu un cap denominat — refuz clar,
+    nu comparație mută."""
+    client,headers,*_=full_app
+    h=headers('admin')
+    settings=client.get('/bo/settings',headers=h).json()['settings']
+    for key,value in [('bo.exec.enabled',True),('bo.exec.budget_cap','100 USD')]:
+        s=next(x for x in settings if x['key']==key)
+        r=client.put('/bo/settings/'+key,headers=h,
+            json={'expected_version':s['version'],'value':value})
+        assert r.status_code==200,r.text
+    ok=client.post('/bo/execution/mandates',headers=h,
+        json=_mandate_body(budget_limit='100'))  # fără monedă: admis (adimensional)
+    assert ok.status_code==201,ok.text
+    mid=ok.json()['mandate']['mandate_id']
+    steps=[{'action':'increment','resource':'synth.counter','payload':{'amount':1}}]
+    r=client.post('/bo/execution/runs',headers=h,
+        json={'mandate_id':mid,'steps':steps,'budget_amount':'5'})
+    assert r.status_code in (400,409,422),r.text

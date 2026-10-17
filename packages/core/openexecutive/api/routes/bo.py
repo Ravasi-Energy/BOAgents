@@ -22,8 +22,9 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
+from openexecutive.api.models import _iso_currency
 from openexecutive.bo import identity as bo_identity
 from openexecutive.bo.bots import examples as bot_examples
 from openexecutive.bo.bots import service as bot_service
@@ -625,24 +626,43 @@ def flush_routing_observations(ident: BoIdentity) -> Any:
 # Delegated execution (VAL4-01)
 # --------------------------------------------------------------------------- #
 
+def _money_field(v: Any) -> Any:
+    """Money at the API boundary: canonical decimal string or integer —
+    a JSON float is not an exact money representation (v2 §4-5)."""
+    if isinstance(v, (bool, float)):
+        raise ValueError(
+            "sumă monetară: folosiți șir zecimal canonic (ex. „100.00“) "
+            "sau întreg, nu număr cu virgulă mobilă"
+        )
+    return v
+
+
 class _MandateCreate(BaseModel):
     parent_mandate_id: str | None = None
     guardian_ref: str | None = Field(default=None, min_length=1, max_length=128)
     allowed_resources: list[str] = Field(min_length=1, max_length=64)
     allowed_actions: list[str] = Field(min_length=1, max_length=64)
-    budget_limit: str | float | int
+    budget_limit: str | int
+    budget_currency: str | None = None
     concurrency_limit: int = Field(ge=1, le=64)
     max_steps: int = Field(ge=1, le=500)
     max_depth: int = Field(ge=0, le=16)
     expires_at: str = Field(min_length=10, max_length=40)
 
+    _check_money = field_validator("budget_limit", mode="before")(_money_field)
+    _check_ccy = field_validator("budget_currency")(_iso_currency)
+
 
 class _RunCreate(BaseModel):
     mandate_id: str = Field(min_length=1, max_length=80)
     steps: list[dict[str, Any]] = Field(min_length=1, max_length=500)
-    budget_amount: str | float | int
+    budget_amount: str | int
+    budget_currency: str | None = None
     parent_run_id: str | None = None
     correlation_id: str | None = Field(default=None, max_length=80)
+
+    _check_money = field_validator("budget_amount", mode="before")(_money_field)
+    _check_ccy = field_validator("budget_currency")(_iso_currency)
 
 
 class _RevokeBody(BaseModel):
@@ -695,6 +715,7 @@ def _mandate_json(m: Any) -> dict[str, Any]:
         "allowed_resources": sorted(m.allowed_resources),
         "allowed_actions": sorted(m.allowed_actions),
         "budget_limit": str(m.budget_limit),
+        "budget_currency": m.budget_currency,
         "concurrency_limit": m.concurrency_limit,
         "max_steps": m.max_steps,
         "max_depth": m.max_depth,
@@ -741,6 +762,7 @@ def create_mandate(body: _MandateCreate, ident: BoIdentity) -> Any:
             "allowed_resources": body.allowed_resources,
             "allowed_actions": body.allowed_actions,
             "budget_limit": body.budget_limit,
+            "budget_currency": body.budget_currency,
             "concurrency_limit": body.concurrency_limit,
             "max_steps": body.max_steps,
             "max_depth": body.max_depth,
@@ -794,6 +816,7 @@ def submit_run(body: _RunCreate, ident: BoIdentity) -> Any:
         budget_amount=budget,
         correlation_id=body.correlation_id,
         actor=ident.actor, parent_run_id=body.parent_run_id,
+        budget_currency=body.budget_currency,
     )
     return {"run": run}
 

@@ -107,6 +107,7 @@ def initialize_db(db_path: Path | None = None) -> None:
                 allowed_resources   TEXT NOT NULL,
                 allowed_actions     TEXT NOT NULL,
                 budget_limit        TEXT NOT NULL,
+                budget_currency     TEXT,
                 concurrency_limit   INTEGER NOT NULL,
                 max_steps           INTEGER NOT NULL,
                 max_depth           INTEGER NOT NULL,
@@ -121,15 +122,16 @@ def initialize_db(db_path: Path | None = None) -> None:
             )
             """
         )
-        if "guardian_ref" not in {
-            r[1] for r in conn.execute(
-                "PRAGMA table_info(bo_exec_mandates)"
-            ).fetchall()
-        }:
-            conn.execute(
-                "ALTER TABLE bo_exec_mandates "
-                "ADD COLUMN guardian_ref TEXT"
-            )
+        for col, ddl in (
+            ("guardian_ref", "ALTER TABLE bo_exec_mandates ADD COLUMN guardian_ref TEXT"),
+            ("budget_currency", "ALTER TABLE bo_exec_mandates ADD COLUMN budget_currency TEXT"),
+        ):
+            if col not in {
+                r[1] for r in conn.execute(
+                    "PRAGMA table_info(bo_exec_mandates)"
+                ).fetchall()
+            }:
+                conn.execute(ddl)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS bo_exec_runs (
@@ -141,6 +143,7 @@ def initialize_db(db_path: Path | None = None) -> None:
                 steps_json        TEXT NOT NULL,
                 current_step      INTEGER NOT NULL DEFAULT 0,
                 budget_reserved   TEXT NOT NULL,
+                budget_currency   TEXT,
                 concurrency_slots INTEGER NOT NULL,
                 policy_version    INTEGER NOT NULL,
                 correlation_id    TEXT NOT NULL,
@@ -158,6 +161,15 @@ def initialize_db(db_path: Path | None = None) -> None:
             )
             """
         )
+        if "budget_currency" not in {
+            r[1] for r in conn.execute(
+                "PRAGMA table_info(bo_exec_runs)"
+            ).fetchall()
+        }:
+            conn.execute(
+                "ALTER TABLE bo_exec_runs "
+                "ADD COLUMN budget_currency TEXT"
+            )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS bo_exec_runs_claimable "
             "ON bo_exec_runs (tenant, state, lease_until)"
@@ -295,6 +307,7 @@ def _mandate_from_row(row: Any) -> Mandate:
         created_by=row["created_by"],
         created_at=row["created_at"],
         guardian_ref=row["guardian_ref"],
+        budget_currency=row["budget_currency"],
     )
 
 
@@ -363,6 +376,7 @@ def create_mandate(
         created_by=actor,
         created_at=_now(),
         guardian_ref=guardian_ref,
+        budget_currency=v["budget_currency"],
     )
     with get_conn(db_path) as conn:
         conn.execute(
@@ -370,16 +384,18 @@ def create_mandate(
             INSERT INTO bo_exec_mandates (
                 tenant, mandate_id, parent_mandate_id, principal_ref, depth,
                 allowed_resources, allowed_actions, budget_limit,
-                concurrency_limit, max_steps, max_depth, expires_at,
-                policy_version, guardian_ref, created_by, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                budget_currency, concurrency_limit, max_steps, max_depth,
+                expires_at, policy_version, guardian_ref, created_by,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 tenant, mandate.mandate_id, mandate.parent_mandate_id,
                 mandate.principal_ref, mandate.depth,
                 json.dumps(sorted(mandate.allowed_resources)),
                 json.dumps(sorted(mandate.allowed_actions)),
-                str(mandate.budget_limit), mandate.concurrency_limit,
+                str(mandate.budget_limit), v["budget_currency"],
+                mandate.concurrency_limit,
                 mandate.max_steps, mandate.max_depth, mandate.expires_at,
                 mandate.policy_version, guardian_ref, actor,
                 mandate.created_at,
@@ -390,6 +406,7 @@ def create_mandate(
         "parent": mandate.parent_mandate_id,
         "depth": mandate.depth,
         "budget_limit": str(mandate.budget_limit),
+        "budget_currency": mandate.budget_currency,
         "policy_version": mandate.policy_version,
     }, actor=actor)
     return mandate
@@ -498,6 +515,7 @@ def _run_from_row(row: Any) -> dict[str, Any]:
         "steps": json.loads(row["steps_json"]),
         "current_step": int(row["current_step"]),
         "budget_reserved": row["budget_reserved"],
+        "budget_currency": row["budget_currency"],
         "concurrency_slots": int(row["concurrency_slots"]),
         "policy_version": int(row["policy_version"]),
         "correlation_id": row["correlation_id"],
@@ -522,6 +540,7 @@ def submit_run(
     budget_amount: Decimal,
     slots: int,
     correlation_id: str,
+    budget_currency: str | None = None,
     actor: str,
     parent_run_id: str | None = None,
     db_path: Path | None = None,
@@ -563,7 +582,7 @@ def submit_run(
         # hard 409 — the durable run stays untouched.
         existing = conn.execute(
             "SELECT run_id, mandate_id, parent_run_id, steps_json, "
-            "budget_reserved FROM bo_exec_runs "
+            "budget_reserved, budget_currency FROM bo_exec_runs "
             "WHERE tenant = ? AND correlation_id = ?",
             (tenant, correlation_id),
         ).fetchone()
@@ -573,6 +592,7 @@ def submit_run(
                 or (existing["parent_run_id"] or None) != parent_run_id
                 or json.loads(existing["steps_json"]) != steps
                 or Decimal(existing["budget_reserved"]) != budget_amount
+                or existing["budget_currency"] != budget_currency
             ):
                 raise PayloadConflictError(
                     f"correlation_id {correlation_id!r} este deja folosit "
@@ -587,14 +607,16 @@ def submit_run(
             """
             INSERT INTO bo_exec_runs (
                 tenant, run_id, mandate_id, parent_run_id, state, steps_json,
-                current_step, budget_reserved, concurrency_slots,
+                current_step, budget_reserved, budget_currency,
+                concurrency_slots,
                 policy_version, correlation_id, created_by, created_at,
                 updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 tenant, run_id, mandate.mandate_id, parent_run_id,
-                RUN_PENDING, json.dumps(steps), str(budget_amount), slots,
+                RUN_PENDING, json.dumps(steps), str(budget_amount),
+                budget_currency, slots,
                 mandate.policy_version, correlation_id, actor, now, now,
             ),
         )

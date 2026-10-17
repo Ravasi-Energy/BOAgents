@@ -194,14 +194,36 @@ def _currency_code(v: str | None) -> str | None:
     return v
 
 
+_CCY_LABEL = {"RON": "lei", "EUR": "€", "USD": "USD"}
+
+
 def _fmt_amount(amount: float | Decimal, currency: str | None) -> str:
-    """Amount + explicit currency; unknown currency renders the bare number
-    rather than silently claiming USD."""
-    if currency == "USD":
-        return f"${amount:,.0f}"
-    if currency:
-        return f"{currency} {amount:,.0f}"
-    return f"{amount:,.0f}"
+    """Amount + explicit currency in Romanian display format (v2 §1-2):
+    dot thousands, comma decimals, one space before the currency label,
+    every significant decimal preserved — no silent truncation. An
+    unknown currency is labelled as such, never defaulted (USD → ``USD``,
+    not the ambiguous ``$``; RON → ``lei``; EUR → ``€``; other valid
+    codes → the ISO code itself)."""
+    d = Decimal(str(amount))
+    if d == 0:
+        d = abs(d)  # negative zero displays as zero, keeping the currency
+    int_part, _, frac = format(d, "f").partition(".")
+    sign = "-" if int_part.startswith("-") else ""
+    digits = int_part.lstrip("-")
+    grouped = _group_thousands(digits)
+    text = sign + grouped + ("," + frac if frac else "")
+    label = _CCY_LABEL.get(currency or "", currency)
+    return f"{text} {label}" if label else f"{text} (valută necunoscută)"
+
+
+def _group_thousands(digits: str) -> str:
+    """``6000000`` → ``6.000.000`` — Romanian thousands separator."""
+    out: list[str] = []
+    while len(digits) > 3:
+        out.append(digits[-3:])
+        digits = digits[:-3]
+    out.append(digits)
+    return ".".join(reversed(out))
 
 
 class TargetCustomer(BaseModel):

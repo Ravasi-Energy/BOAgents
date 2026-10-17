@@ -38,6 +38,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -124,7 +125,7 @@ class StockSource:
         if snapshot is None:
             return []
 
-        price, prev_close = snapshot
+        price, prev_close, ccy = snapshot
         change_pct = ((price - prev_close) / prev_close) * 100.0
         display_name = item.config_json.get("display_name") or ticker
 
@@ -137,9 +138,13 @@ class StockSource:
 
         severity = _severity_for_move(abs(change_pct))
         direction = "up" if change_pct >= 0 else "down"
+        # Currency comes from the exchange data; when the source does not
+        # name it we say so rather than printing a wrong "$" (v2 §2).
+        ccy_label = ccy or "valută necunoscută"
         summary = (
             f"{display_name} ({ticker}) {direction} {abs(change_pct):.1f}% "
-            f"vs prev close (${price:.2f} from ${prev_close:.2f})"
+            f"vs prev close ({price:.2f} {ccy_label} from "
+            f"{prev_close:.2f} {ccy_label})"
         )
 
         return [Signal(
@@ -153,6 +158,7 @@ class StockSource:
                 "ticker": ticker,
                 "price": price,
                 "previous_close": prev_close,
+                "currency": ccy,
                 "change_pct": round(change_pct, 4),
                 "source_endpoint": url,
             },
@@ -208,9 +214,12 @@ def _looks_like_ticker(s: str) -> bool:
     return all(c in allowed for c in s)
 
 
+_CCY_RE = re.compile(r"^[A-Z]{3}$")
+
+
 def _extract_snapshot(
     payload: dict[str, Any], ticker: str,
-) -> tuple[float, float] | None:
+) -> tuple[float, float, str | None] | None:
     """Return (price, previous_close) from a Yahoo Chart response.
 
     The Chart API embeds the snapshot in ``chart.result[0].meta``. When
@@ -234,7 +243,13 @@ def _extract_snapshot(
     if price is None or prev is None or prev == 0:
         return None
     try:
-        return float(price), float(prev)
+        # The quote's currency comes from the same meta block — a ticker
+        # is not implicitly USD (v2: currency from the data, not assumed).
+        # Yahoo codes like "GBp" (pence) are not ISO-4217 and stay
+        # unknown rather than being guessed at.
+        ccy_raw = meta.get("currency")
+        ccy = ccy_raw if isinstance(ccy_raw, str) and _CCY_RE.match(ccy_raw) else None
+        return float(price), float(prev), ccy
     except (TypeError, ValueError):
         return None
 

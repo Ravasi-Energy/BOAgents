@@ -65,7 +65,8 @@ def main():
             service.change_activation(identity, row["id"], True, 0, "Aprobare explicită fixture sintetic")
             mandate = store.create_mandate(args.tenant, {
                 "allowed_actions": ["diagnose"], "allowed_resources": ["synth.erp"],
-                "budget_limit": "100", "concurrency_limit": 2, "max_steps": 1, "max_depth": 2,
+                "budget_limit": "100", "budget_currency": "USD",
+                "concurrency_limit": 2, "max_steps": 1, "max_depth": 2,
                 "expires_at": (datetime.now(UTC) + timedelta(days=1)).isoformat()},
                 parent=None, principal_ref="synthetic-admin", policy_version=1, actor=identity.actor,
                 max_depth_cap=3, guardian_ref=os.environ.get("BO_PILOT_GUARDIAN_MANDATE"))

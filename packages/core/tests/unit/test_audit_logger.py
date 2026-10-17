@@ -235,6 +235,7 @@ def test_usage_summary_empty_db_returns_zeros(tmp_path: Path) -> None:
         "output_tokens": 0,
         "web_search_requests": 0,
         "cost_usd": 0.0,
+        "cost": {"amount": "0", "currency": "USD"},
     }
     assert s["by_day"] == []
     assert s["by_model"] == []
@@ -345,3 +346,20 @@ def test_usage_summary_respects_time_window(tmp_path: Path) -> None:
     )
     assert windowed["totals"]["calls"] == 1
     assert windowed["totals"]["input_tokens"] == 99
+
+
+def test_usage_summary_cost_exact_decimal_and_currency(audit: AuditLogger) -> None:
+    """v2 §4: 0.1+0.2 în REAL dă 0.30000000000000004 — suma se face în
+    Decimal și expune {amount,currency} exact lângă câmpul float legacy."""
+    audit.log("cache_event", "c1", actor="executive",
+              details={"model": "m", "input_tokens": 1, "cost_usd": "0.1"})
+    audit.log("cache_event", "c2", actor="executive",
+              details={"model": "m", "input_tokens": 1, "cost_usd": "0.2"})
+    audit.log("cache_event", "c3", actor="specialist",
+              details={"model": "m2", "input_tokens": 1, "cost_usd": 0.15})
+    s = audit.usage_summary()
+    assert s["totals"]["cost"] == {"amount": "0.45", "currency": "USD"}
+    assert s["totals"]["cost_usd"] == pytest.approx(0.45)  # legacy float
+    by_src = {r["source"]: r for r in s["by_source"]}
+    assert by_src["executive"]["cost"]["amount"] == "0.3"  # nu 0.30000000000000004
+    assert by_src["specialist"]["cost"]["amount"] == "0.15"

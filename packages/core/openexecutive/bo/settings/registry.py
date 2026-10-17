@@ -218,6 +218,15 @@ def _validate_cost_cap(v: Any) -> str:
         raise SettingValidationError(
             "Plafonul de cost: format „<sumă> <monedă>“, ex. „0.05 USD“"
         )
+    # Shape alone is not enough: a well-formed but invented code (ZZZ)
+    # is not a currency and money must never carry one (v2 §2).
+    from openexecutive.memory.company_profile import ISO_4217_CODES
+
+    if v.rsplit(" ", 1)[-1] not in ISO_4217_CODES:
+        raise SettingValidationError(
+            "Plafonul de cost: cod monetar necunoscut "
+            "(așteptat ISO-4217 valid, ex. USD, EUR, RON)"
+        )
     return v
 
 

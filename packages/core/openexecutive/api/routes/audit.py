@@ -115,13 +115,22 @@ class CostSummary(TokenCounts):
     per_turn: list[TurnCost]
 
 
+class MoneyAmount(BaseModel):
+    """The v2 money contract: exact value in main units as a canonical
+    decimal string, plus explicit ISO-4217 currency."""
+    amount: str
+    currency: str
+
+
 class UsageTotals(TokenCounts):
     """Token + cost totals over a window, summed across all `cache_event` rows.
 
-    `cost_usd` is the actual OpenRouter-charged amount captured per call; rows
-    that predate cost capture (or non-OpenRouter calls) contribute 0, so the
-    figure accrues from go-live rather than being a back-estimated guess."""
+    `cost` is the authoritative money field (exact decimal string + ISO
+    currency, computed in Decimal). `cost_usd` is the legacy float mirror —
+    same USD contract (OpenRouter-charged), kept for existing consumers;
+    rows that predate cost capture contribute 0."""
     cost_usd: float
+    cost: MoneyAmount
 
 
 class UsageByDay(UsageTotals):

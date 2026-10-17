@@ -998,3 +998,157 @@ class TestRoutes:
             "to_version": "1.0.0", "artifact_set_digest": "sha256:" + "a" * 64,
             "expires_at": (datetime.now(UTC) - timedelta(hours=1)).isoformat()})
         assert r.status_code == 422
+
+    def test_activate_route_end_to_end(self, client, tmp_path: Path) -> None:
+        """AC4 pe ruta reală: import → promote → activate → draft legat."""
+        self._enable_api(client)
+        _bobot_pkg(tmp_path / "pkg")
+        r = client.post("/bo/packages/import", headers=self.ADMIN_H,
+                        json={"source_dir": str(tmp_path / "pkg")})
+        assert r.status_code == 200, r.text
+        imp_id = r.json()["id"]
+        r = client.post(f"/bo/packages/{imp_id}/promote", headers=self.ADMIN_H)
+        assert r.status_code == 200, r.text
+        r = client.post(f"/bo/packages/{imp_id}/activate", headers=self.ADMIN_H)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["package_state"] == "DRAFT"
+        assert body["definition_state"] == "draft"
+        assert body["definition"]["source_import_id"] == imp_id
+        # idempotent pe rută: același digest → aceeași definiție
+        r2 = client.post(f"/bo/packages/{imp_id}/activate", headers=self.ADMIN_H)
+        assert r2.status_code == 200
+        assert r2.json()["idempotent"] is True
+        assert r2.json()["definition"]["id"] == body["definition"]["id"]
+        # fără DRAFT → 409
+        _bobot_pkg(tmp_path / "pkg2", package_id="pkg.doi")
+        r3 = client.post("/bo/packages/import", headers=self.ADMIN_H,
+                         json={"source_dir": str(tmp_path / "pkg2")})
+        imp2 = r3.json()["id"]
+        r4 = client.post(f"/bo/packages/{imp2}/activate", headers=self.ADMIN_H)
+        assert r4.status_code == 409
+
+
+# --------------------------------------------------------------------------- #
+# AC4: activarea generică — bobot.json → definiție draft legată de digest
+# --------------------------------------------------------------------------- #
+
+def _bobot_pkg(dest: Path, content: dict[str, Any] | None = None,
+               **m: Any) -> dict[str, Any]:
+    from openexecutive.bo.bots import examples
+    bobot = content if content is not None else examples.HEARTBEAT_STALE["content"]
+    return write_pkg(
+        dest,
+        files={"bobot.json": json.dumps(bobot).encode(), "docs/r.md": b"doc\n"},
+        **m)
+
+
+def _to_draft(ident: Identity, src: Path, db_path: Path) -> dict[str, Any]:
+    imp = _import(ident, src, db_path)
+    assert imp["status"] == "QUARANTINED", imp
+    return service.promote_to_draft(ident, imp["id"], db_path=db_path)
+
+
+class TestActivateBoBot:
+    """AC4: POST /bo/packages/{import_id}/activate — re-verificare completă,
+    materializare idempotentă în draft, publicare separată, zero efecte."""
+
+    def test_activate_materializes_bound_draft(
+            self, db_path: Path, qroot: Path, tmp_path: Path) -> None:
+        _enable(db_path)
+        _bobot_pkg(tmp_path / "pkg")
+        imp = _to_draft(ADMIN, tmp_path / "pkg", db_path)
+        r = service.activate_bobot(ADMIN, imp["id"], db_path=db_path)
+        d = r["definition"]
+        assert r["idempotent"] is False
+        assert r["package_state"] == "DRAFT"
+        assert r["definition_state"] == "draft"
+        assert d["kind"] == "BOT"
+        assert d["source_import_id"] == imp["id"]
+        assert d["source_artifact_set_digest"] == imp["artifact_set_digest"]
+        # publicarea rămâne acțiune separată — draft v1, nimic activ
+        assert d["draft_version"] == 1
+        assert d["active_version_no"] is None
+
+    def test_activate_idempotent_same_digest(
+            self, db_path: Path, qroot: Path, tmp_path: Path) -> None:
+        _enable(db_path)
+        _bobot_pkg(tmp_path / "pkg")
+        imp = _to_draft(ADMIN, tmp_path / "pkg", db_path)
+        r1 = service.activate_bobot(ADMIN, imp["id"], db_path=db_path)
+        r2 = service.activate_bobot(ADMIN, imp["id"], db_path=db_path)
+        assert r2["idempotent"] is True
+        assert r2["definition"]["id"] == r1["definition"]["id"]
+
+    def test_activate_requires_draft(
+            self, db_path: Path, qroot: Path, tmp_path: Path) -> None:
+        _enable(db_path)
+        _bobot_pkg(tmp_path / "pkg")
+        imp = _import(ADMIN, tmp_path / "pkg", db_path)
+        with pytest.raises(store.StateError):
+            service.activate_bobot(ADMIN, imp["id"], db_path=db_path)
+
+    def test_activate_kind_mismatch(
+            self, db_path: Path, qroot: Path, tmp_path: Path) -> None:
+        _enable(db_path)
+        write_pkg(tmp_path / "pkg", kind="agent")
+        imp = _to_draft(ADMIN, tmp_path / "pkg", db_path)
+        with pytest.raises(PackageReject, match="KIND_NOT_ALLOWED"):
+            service.activate_bobot(ADMIN, imp["id"], db_path=db_path)
+
+    def test_activate_trust_revoked_after_import_refuses(
+            self, db_path: Path, qroot: Path, tmp_path: Path) -> None:
+        _enable(db_path)
+        _bobot_pkg(tmp_path / "pkg")
+        imp = _to_draft(ADMIN, tmp_path / "pkg", db_path)
+        # revocarea cheii DUPĂ import → activarea re-verifică și refuză
+        doc = _registry_doc()
+        doc["keys"][0]["status"] = "revoked"
+        settings_store.set_value(
+            ADMIN.tenant, "bo.packages.trust_store_json", json.dumps(doc),
+            expected_version=1, actor=ADMIN.actor, db_path=db_path)
+        with pytest.raises(PackageReject):
+            service.activate_bobot(ADMIN, imp["id"], db_path=db_path)
+
+    def test_activate_drifted_artifact_refuses(
+            self, db_path: Path, qroot: Path, tmp_path: Path) -> None:
+        _enable(db_path)
+        _bobot_pkg(tmp_path / "pkg")
+        imp = _to_draft(ADMIN, tmp_path / "pkg", db_path)
+        stored = Path(imp["stored_path"])
+        (stored / "bobot.json").write_bytes(b'{"manipulat": true}')
+        # re-verificarea pe copia stocată prinde driftul înainte de parse
+        with pytest.raises(PackageReject, match="ARTIFACT_(MODIFIED|DRIFT)"):
+            service.activate_bobot(ADMIN, imp["id"], db_path=db_path)
+
+    def test_activate_missing_bobot_json_refuses(
+            self, db_path: Path, qroot: Path, tmp_path: Path) -> None:
+        _enable(db_path)
+        write_pkg(tmp_path / "pkg")  # fără bobot.json în artifactDigests
+        imp = _to_draft(ADMIN, tmp_path / "pkg", db_path)
+        with pytest.raises(PackageReject, match="INVALID_MANIFEST"):
+            service.activate_bobot(ADMIN, imp["id"], db_path=db_path)
+
+    def test_activate_invalid_bobot_v1_refuses(
+            self, db_path: Path, qroot: Path, tmp_path: Path) -> None:
+        _enable(db_path)
+        bad = {"schema_version": "bo.bobot.v1", "trigger": {"type": "x"},
+               "steps": [{"id": "s1", "type": "shell", "command": "rm -rf /"}]}
+        _bobot_pkg(tmp_path / "pkg", content=bad)
+        imp = _to_draft(ADMIN, tmp_path / "pkg", db_path)
+        with pytest.raises(PackageReject, match="INVALID_MANIFEST"):
+            service.activate_bobot(ADMIN, imp["id"], db_path=db_path)
+
+    def test_activate_tenant_isolation(
+            self, db_path: Path, qroot: Path, tmp_path: Path) -> None:
+        _enable(db_path)
+        _bobot_pkg(tmp_path / "pkg")
+        imp = _to_draft(ADMIN, tmp_path / "pkg", db_path)
+        service.activate_bobot(ADMIN, imp["id"], db_path=db_path)
+        other = OTHER_TENANT
+        with pytest.raises(store.NotFoundError):
+            service.get_import(other, imp["id"], db_path=db_path)
+        from openexecutive.bo.bots import store as bots_store
+        assert bots_store.find_definition_by_source(
+            "tenant-b", imp["id"], db_path=db_path) is None
+

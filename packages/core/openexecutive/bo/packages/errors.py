@@ -32,6 +32,7 @@ class PackageReject(Exception):
         "VERSION_CONFLICT",
         "APPROVAL_INVALID",
         "KIND_NOT_ALLOWED",
+        "LIMIT_EXCEEDED",
         # store
         "INVALID_REGISTRY",
         "REGISTRY_UNAVAILABLE",

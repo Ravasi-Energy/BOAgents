@@ -458,6 +458,15 @@ def promote_package(import_id: str, ident: BoIdentity) -> Any:
     return pkg_service.promote_to_draft(ident, import_id)
 
 
+@router.post("/packages/{import_id}/activate")
+def activate_package(import_id: str, ident: BoIdentity) -> Any:
+    """DRAFT + kind=bobot → materialize bobot.json into a tenant draft
+    BoBot definition bound to (import_id, artifactSetDigest). Re-verifies
+    signature/trust/revocation/digest/compat on the stored copy; idempotent
+    on the same digest. Publishing stays a separate CAS action (AC4)."""
+    return pkg_service.activate_bobot(ident, import_id)
+
+
 @router.get("/packages-approvals")
 def list_package_approvals(ident: BoIdentity) -> Any:
     return {"approvals": pkg_service.list_approvals(ident)}

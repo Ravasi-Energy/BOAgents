@@ -69,6 +69,7 @@ Chei necunoscute → 422; valori invalide → 422; conflict versiune → 409.
 | POST | `/bo/packages/import` | admin | `{source_dir≤1024}` — verificare `bo.package.v1` completă (§4) apoi copie în carantină; răspunsul are întotdeauna `verdict`; respingerile se persistă ca `REJECTED` |
 | GET | `/bo/packages/{import_id}` | viewer | import + verdict |
 | POST | `/bo/packages/{import_id}/promote` | admin | QUARANTINED→DRAFT după re-verificarea copiei stocate (drift) |
+| POST | `/bo/packages/{import_id}/activate` | admin | DRAFT + `kind=bobot` → re-verificare completă (semnătură/trust/revocare/digest/compatibilitate/capabilități) + materializare `bobot.json` (`bo.bobot.v1`) în definiție draft legată de `(import_id, artifactSetDigest)`; idempotent pe același digest; stările pachet/definiție distincte în răspuns; publicarea rămâne acțiune CAS separată; zero efecte/cod arbitrar |
 | GET | `/bo/packages-approvals` | viewer | aprobări downgrade tenant |
 | POST | `/bo/packages-approvals` (201) | admin | `{package_id, from_version, to_version, artifact_set_digest, expires_at RFC3339}` — legată, expirantă, unică |
 | POST | `/bo/packages-approvals/{approval_id}/revoke` | admin | revocare |
@@ -138,13 +139,13 @@ administrat; schema închisă respinge chei necunoscute și câmpuri PII.
 
 ## Contracte lipsă / întrebări de domeniu (la coordonator)
 
-- **F6-BO-G3 — activarea pachetului `kind=bobot`**: ciclul implementat se
-  oprește la `DRAFT`; nu există rută care să materializeze artefactul verificat
-  ca proiect de `AutomationDefinition` legat de `artifactSetDigest`. Propunere:
-  `POST /bo/packages/{import_id}/activate` pe `DRAFT` + `kind=bobot`, care creează
-  o definiție în starea `draft` (nu active) citind artefactul `bobot.json`
-  (conținut `bo.bobot.v1`) din copia de carantină re-verificată. Necesită
-  decizia de contract pentru numele artefactului.
-- **F6-BO-G2 — limite comerciale BoBot**: lipsesc chei administrate pentru
-  concurența simulărilor și numărul maxim de definiții (chei noi = schimbare
-  de schemă administrată, nu se inventează unilateral).
+- **F6-BO-G3 — activarea pachetului `kind=bobot`**: **REZOLVAT (AC4, spec
+  0002)** — `POST /bo/packages/{import_id}/activate` materializează
+  `bobot.json` (`bo.bobot.v1`) într-o definiție draft legată de
+  `(import_id, artifactSetDigest)`, după re-verificarea completă a copiei
+  stocate; publicarea rămâne acțiune CAS separată.
+- **F6-BO-G2 — limite comerciale BoBot**: **REZOLVAT (AC3, spec 0002)** —
+  `bo.bobot.simulation.max_concurrent` (1..32, impl. 1, lease atomic cu
+  TTL+renewal+reclaim) și `bo.bobot.max_definitions` (1..10000, impl. 100,
+  COUNT atomic în tranzacția INSERT); efectivul = min(plafon tehnic,
+  entitlement versionat).

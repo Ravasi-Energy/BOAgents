@@ -57,6 +57,10 @@ def initialize_db(db_path: Path | None = None) -> None:
                 kind TEXT NOT NULL,
                 owner TEXT NOT NULL,
                 scope TEXT NOT NULL DEFAULT 'tenant',
+                -- Provenance binding for package-materialized drafts (AC4):
+                -- which verified import + artifact set produced this draft.
+                source_import_id TEXT,
+                source_artifact_set_digest TEXT,
                 status TEXT NOT NULL DEFAULT 'draft',
                 draft_version INTEGER NOT NULL DEFAULT 1,
                 active_version_no INTEGER,
@@ -66,6 +70,9 @@ def initialize_db(db_path: Path | None = None) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_bo_bot_def_tenant
                 ON bo_bot_definitions(tenant, status);
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_bo_bot_def_source
+                ON bo_bot_definitions(tenant, source_import_id)
+                WHERE source_import_id IS NOT NULL;
 
             CREATE TABLE IF NOT EXISTS bo_bot_versions (
                 id TEXT PRIMARY KEY,
@@ -145,6 +152,19 @@ def initialize_db(db_path: Path | None = None) -> None:
             );
             """
         )
+        # Expand: provenance columns on databases created before AC4 —
+        # data is preserved, no destructive migration.
+        cols = {r[1] for r in conn.execute(
+            "PRAGMA table_info(bo_bot_definitions)")}
+        for name, ddl in (
+            ("source_import_id",
+             "ALTER TABLE bo_bot_definitions ADD COLUMN source_import_id TEXT"),
+            ("source_artifact_set_digest",
+             "ALTER TABLE bo_bot_definitions "
+             "ADD COLUMN source_artifact_set_digest TEXT"),
+        ):
+            if name not in cols:
+                conn.execute(ddl)
 
 
 # --------------------------------------------------------------------- #
@@ -158,6 +178,8 @@ def _definition_from_row(row: Any) -> dict[str, Any]:
         "name": row["name"],
         "description": row["description"],
         "kind": row["kind"],
+        "source_import_id": row["source_import_id"],
+        "source_artifact_set_digest": row["source_artifact_set_digest"],
         "owner": row["owner"],
         "scope": row["scope"],
         "status": row["status"],
@@ -173,6 +195,8 @@ def create_definition(
     tenant: str, *, name: str, description: str, kind: str,
     owner: str, draft_content_json: str, content_hash: str,
     schema_version: str, max_definitions: int,
+    source_import_id: str | None = None,
+    source_artifact_set_digest: str | None = None,
     db_path: Path | None = None,
 ) -> dict[str, Any]:
     """Create a definition + its first draft version (v1, status=draft).
@@ -197,10 +221,12 @@ def create_definition(
             """
             INSERT INTO bo_bot_definitions
                 (id, tenant, name, description, kind, owner, scope, status,
-                 draft_version, active_version_no, created_by, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'tenant', 'draft', 1, NULL, ?, ?, ?)
+                 draft_version, active_version_no, created_by, created_at, updated_at,
+                 source_import_id, source_artifact_set_digest)
+            VALUES (?, ?, ?, ?, ?, ?, 'tenant', 'draft', 1, NULL, ?, ?, ?, ?, ?)
             """,
-            (def_id, tenant, name, description, kind, owner, owner, now, now),
+            (def_id, tenant, name, description, kind, owner, owner, now, now,
+             source_import_id, source_artifact_set_digest),
         )
         conn.execute(
             """
@@ -218,6 +244,21 @@ def create_definition(
             (def_id, 1, draft_content_json),
         )
     return get_definition(tenant, def_id, db_path=db_path)
+
+
+def find_definition_by_source(
+    tenant: str, source_import_id: str, db_path: Path | None = None,
+) -> dict[str, Any] | None:
+    """The draft definition materialized from a package import (AC4) —
+    or None. Bound by (tenant, source_import_id); the artifact digest is
+    re-compared by the caller for the idempotency decision."""
+    with get_conn(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM bo_bot_definitions "
+            "WHERE tenant = ? AND source_import_id = ?",
+            (tenant, source_import_id),
+        ).fetchone()
+    return _definition_from_row(row) if row else None
 
 
 def get_definition(tenant: str, def_id: str, db_path: Path | None = None) -> dict[str, Any]:

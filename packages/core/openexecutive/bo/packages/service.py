@@ -259,6 +259,145 @@ def promote_to_draft(identity: Identity, import_id: str,
     return store.get_import(identity.tenant, import_id, db_path=db_path)
 
 
+BOBOT_ARTIFACT = "bobot.json"
+
+
+def activate_bobot(identity: Identity, import_id: str,
+                   *, db_path: Path | None = None) -> dict[str, Any]:
+    """DRAFT + kind=bobot → explicit materialization into a tenant draft
+    BoBot definition (AC4 / spec 0002).
+
+    Re-runs the full verify pipeline on the stored copy — signature, trust
+    store, revocation, digests, compatibility, capabilities — so a trust
+    revoked or an artifact drifted *after* the original import is refused
+    here, not at some later implicit step. ``bobot.json`` (the contract
+    convention at the artifact root) is validated against the closed-world
+    ``bo.bobot.v1`` grammar; the result is a DRAFT definition bound to
+    ``(import_id, artifact_set_digest)``. Publishing the bot stays a
+    separate CAS action; nothing here executes effects or arbitrary code.
+    Idempotent: repeating the same action on the same digest returns the
+    already-materialized draft instead of duplicating it.
+    """
+    require(identity, "packages:write")
+    from openexecutive.bo.bots import service as bots_service
+    from openexecutive.bo.bots import store as bots_store
+
+    row = store.get_import(identity.tenant, import_id, db_path=db_path)
+    if row["kind"] != "bobot":
+        raise PackageReject(
+            "KIND_NOT_ALLOWED",
+            "activarea generică materializează doar pachete kind=bobot")
+    if row["status"] != "DRAFT":
+        raise store.StateError(
+            f"status {row['status']} nu permite activarea — cere DRAFT")
+
+    stored = Path(row["stored_path"] or "")
+    m = validate_manifest(load_manifest(stored / MANIFEST_NAME))
+    if artifact_set_digest(m["artifactDigests"]) != row["artifact_set_digest"]:
+        raise PackageReject("ARTIFACT_DRIFT", "manifestul stocat diferă")
+
+    registry = _trust_registry(identity, db_path)
+    verdict = verify_package(
+        stored, registry,
+        tenant_ref=identity.tenant,
+        installed=store.list_installed(identity.tenant, db_path=db_path),
+        approvals=[], consumed_approvals=set(),
+        host_version=BO_PRODUCT_VERSION,
+        operator_max_bytes=int(_setting(
+            identity, "bo.packages.max_package_bytes", db_path)),
+        operator_rollback_requires_approval=bool(_setting(
+            identity, "bo.packages.rollback_requires_approval", db_path)))
+    if not verdict.accepted:
+        _audit(identity.tenant, identity.actor,
+               "bo_package_activate_rejected",
+               f"activare refuzată {row['package_id']}@{row['version']}: "
+               f"{verdict.code}", verdict.to_dict())
+        raise PackageReject(verdict.code, verdict.detail or verdict.code)
+
+    # Artifact drift: every declared file is re-hashed before parsing —
+    # a file changed inside quarantine refuses as ARTIFACT_DRIFT.
+    for rel, declared in m["artifactDigests"].items():
+        h = hashlib.sha256((stored / rel).read_bytes()).hexdigest()
+        if f"sha256:{h}" != declared:
+            raise PackageReject(
+                "ARTIFACT_DRIFT", f"{rel} modificat în carantină")
+    if BOBOT_ARTIFACT not in m["artifactDigests"]:
+        raise PackageReject(
+            "INVALID_MANIFEST",
+            f"pachetul kind=bobot nu declară {BOBOT_ARTIFACT} în "
+            "artifactDigests")
+    try:
+        raw = json.loads((stored / BOBOT_ARTIFACT).read_bytes())
+    except json.JSONDecodeError as exc:
+        raise PackageReject(
+            "INVALID_MANIFEST", f"{BOBOT_ARTIFACT} nu e JSON valid") from exc
+    try:
+        content = bots_service.validate_content(raw)
+    except bots_service.ValidationFailure as exc:
+        raise PackageReject(
+            "INVALID_MANIFEST",
+            f"{BOBOT_ARTIFACT} nu respectă bo.bobot.v1: {exc}") from exc
+
+    # Idempotent materialization: the same import + same digest returns the
+    # existing draft; a different digest under the same import is drift.
+    asd = row["artifact_set_digest"]
+    existing = bots_store.find_definition_by_source(
+        identity.tenant, import_id, db_path=db_path)
+    if existing is not None:
+        if existing["source_artifact_set_digest"] == asd:
+            return {"import": row, "definition": existing,
+                    "idempotent": True, "package_state": row["status"],
+                    "definition_state": existing["status"]}
+        raise PackageReject(
+            "VERSION_CONFLICT",
+            "definiția materializată aparține altui artifactSetDigest")
+
+    canon = bots_service._canonical(content.model_dump(mode="json"))
+    max_defs = bots_store.effective_limit(
+        int(settings_store.get_effective_value(
+            identity.tenant, "bo.bobot.max_definitions", db_path=db_path)),
+        bots_store.MAX_DEFINITIONS_HARD_CAP)
+    try:
+        definition = bots_store.create_definition(
+            identity.tenant,
+            name=str(m["packageId"])[:120],
+            description=(f"Materializat din pachet {m['packageId']}@"
+                         f"{m['version']} (import {import_id})"),
+            kind="BOT",
+            owner=identity.actor,
+            draft_content_json=canon,
+            content_hash=bots_service.content_hash(
+                content.model_dump(mode="json")),
+            schema_version=bots_service.SCHEMA_VERSION,
+            max_definitions=max_defs,
+            source_import_id=import_id,
+            source_artifact_set_digest=asd,
+            db_path=db_path,
+        )
+    except bots_store.LimitExceededError as exc:
+        raise PackageReject("LIMIT_EXCEEDED", str(exc)) from exc
+    except sqlite3.IntegrityError:
+        # Race: two activations of the same import — exactly one wins the
+        # unique (tenant, source_import_id) slot; report the winner's draft.
+        raced = bots_store.find_definition_by_source(
+            identity.tenant, import_id, db_path=db_path)
+        if raced is not None and raced["source_artifact_set_digest"] == asd:
+            return {"import": row, "definition": raced, "idempotent": True,
+                    "package_state": row["status"],
+                    "definition_state": raced["status"]}
+        raise
+
+    _audit(identity.tenant, identity.actor, "bo_package_activated",
+           f"materializat {m['packageId']}@{m['version']} → "
+           f"{definition['id']} (draft)",
+           {"import_id": import_id, "artifact_set_digest": asd,
+            "definition_id": definition["id"]})
+    return {"import": store.get_import(identity.tenant, import_id,
+                                       db_path=db_path),
+            "definition": definition, "idempotent": False,
+            "package_state": row["status"], "definition_state": "draft"}
+
+
 def create_approval(
     identity: Identity,
     *,

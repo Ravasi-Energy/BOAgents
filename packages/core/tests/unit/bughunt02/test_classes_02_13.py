@@ -43,6 +43,7 @@ def _mandate(db: Path):
             "allowed_resources": ["synth.*"],
             "allowed_actions": ["increment"],
             "budget_limit": "10",
+        "budget_currency": "USD",
             "concurrency_limit": 8,
             "max_steps": 5,
             "max_depth": 1,

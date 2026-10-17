@@ -104,6 +104,7 @@ def _exec_setup(out: str) -> None:
         "allowed_resources": ["synth.*"],
         "allowed_actions": ["increment"],
         "budget_limit": "10",
+        "budget_currency": "USD",
         "concurrency_limit": 2,
         "max_steps": 10,
         "max_depth": 2,

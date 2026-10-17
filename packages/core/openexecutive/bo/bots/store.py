@@ -577,3 +577,32 @@ def release_sim_lease(
             "DELETE FROM bo_bot_sim_leases WHERE tenant = ? AND lease_id = ?",
             (tenant, lease_id),
         )
+
+
+def renew_sim_lease(
+    tenant: str, lease_id: str, db_path: Path | None = None,
+) -> None:
+    """Extend a live simulation's slot. Called periodically by the
+    simulator, so a run lasting longer than the TTL never lets its own
+    lease be reclaimed under it — the cap cannot be overshot by a
+    long-running simulation, only by one that actually died."""
+    until = (datetime.now(UTC) + timedelta(seconds=SIM_LEASE_TTL_SECONDS)
+             ).isoformat(timespec="milliseconds")
+    with get_conn(db_path) as conn:
+        conn.execute(
+            "UPDATE bo_bot_sim_leases SET lease_until = ? "
+            "WHERE tenant = ? AND lease_id = ?",
+            (until, tenant, lease_id),
+        )
+
+
+# Hard technical ceilings from spec 0002 — the effective limit is
+# min(hard cap, administered entitlement); a tampered or legacy settings
+# row can never grant more than the technical ceiling.
+SIM_CONCURRENT_HARD_CAP = 32
+MAX_DEFINITIONS_HARD_CAP = 10000
+
+
+def effective_limit(administered: int, hard_cap: int) -> int:
+    """min(plafon tehnic, entitlement) — spec 0002 AC3."""
+    return min(int(administered), hard_cap)

@@ -97,8 +97,10 @@ def create(tenant: str, actor: str, payload: dict[str, Any],
     # AC3: persistent definitions are capped by the administered,
     # versioned setting — counted atomically inside the create
     # transaction, so concurrent creators cannot overshoot it.
-    max_defs = int(settings_store.get_effective_value(
-        tenant, "bo.bobot.max_definitions", db_path=db_path))
+    max_defs = store.effective_limit(
+        int(settings_store.get_effective_value(
+            tenant, "bo.bobot.max_definitions", db_path=db_path)),
+        store.MAX_DEFINITIONS_HARD_CAP)
     try:
         definition = store.create_definition(
             tenant,
@@ -372,8 +374,10 @@ def simulate(
         tenant, "bo.bobot.simulation.max_steps", db_path=db_path))
     retention_days = int(settings_store.get_effective_value(
         tenant, "bo.bobot.simulation.retention_days", db_path=db_path))
-    max_concurrent = int(settings_store.get_effective_value(
-        tenant, "bo.bobot.simulation.max_concurrent", db_path=db_path))
+    max_concurrent = store.effective_limit(
+        int(settings_store.get_effective_value(
+            tenant, "bo.bobot.simulation.max_concurrent", db_path=db_path)),
+        store.SIM_CONCURRENT_HARD_CAP)
     config_version = settings_store.config_version(tenant, db_path=db_path)
     snapshot = _config_snapshot(tenant, db_path)
 
@@ -421,6 +425,11 @@ def simulate(
 
         steps = content.steps
         for idx, step in enumerate(steps):
+            # Keep the slot alive while a long simulation still works —
+            # expiry means "the simulator died", not "the TTL elapsed"
+            # (AC3: no cap overshoot from a run outliving its lease).
+            if idx and idx % 32 == 0:
+                store.renew_sim_lease(tenant, sim_lease, db_path=db_path)
             if gated:
                 step_records.append({
                     "step_id": step.id, "step_type": step.type, "status": "SKIPPED",

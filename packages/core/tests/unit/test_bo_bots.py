@@ -295,8 +295,9 @@ def test_run_records_config_version(db: Path) -> None:
 # AC3: limite administrate, atomice (0002 spec)
 # --------------------------------------------------------------------------- #
 
-def _set(key: str, value: int) -> None:
-    settings_store.set_value(TENANT, key, value, expected_version=0,
+def _set(key: str, value: int, expected_version: int = 0) -> None:
+    settings_store.set_value(TENANT, key, value,
+                             expected_version=expected_version,
                              actor="admin@test")
 
 
@@ -334,4 +335,99 @@ def test_sim_concurrent_lease_refuses_and_recovers(db: Path) -> None:
         conn.execute(
             "UPDATE bo_bot_sim_leases SET lease_until = '2000-01-01T00:00:00.000Z'"
         )
-    store.acquire_sim_lease(TENANT, 1)  # nu ridică — vechiul e expirat
+    l4 = store.acquire_sim_lease(TENANT, 1)  # nu ridică — vechiul e expirat
+    store.release_sim_lease(TENANT, l4)
+
+
+def test_sim_lease_two_writers_race_only_one_wins(db: Path) -> None:
+    """AC3: două procese/scriitori concurenți — BEGIN IMMEDIATE serializează,
+    exact unul câștigă slotul, celălalt e refuzat explicit."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _try():
+        try:
+            return store.acquire_sim_lease(TENANT, 1)
+        except store.LimitExceededError:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = [r for r in pool.map(lambda _: _try(), range(2))]
+    assert sum(r is not None for r in results) == 1
+    with get_conn() as conn:
+        n = conn.execute(
+            "SELECT COUNT(*) FROM bo_bot_sim_leases WHERE tenant = ?",
+            (TENANT,)).fetchone()[0]
+    assert n == 1
+
+
+def test_sim_lease_settings_change_consumed_and_restart_persistent(
+        db: Path) -> None:
+    """AC3: setarea e dată versionată consumată la fiecare acquire; rândul
+    de lease supraviețuiește unei conexiuni noi (restart de proces)."""
+    _set("bo.bobot.simulation.max_concurrent", 2)
+    l1 = store.acquire_sim_lease(TENANT, 2)
+    l2 = store.acquire_sim_lease(TENANT, 2)
+    # restart simulat: conexiune nouă pe același fișier vede sloturile
+    with get_conn() as conn:
+        n = conn.execute(
+            "SELECT COUNT(*) FROM bo_bot_sim_leases WHERE tenant = ?",
+            (TENANT,)).fetchone()[0]
+    assert n == 2
+    # consumatorul recitește setarea la fiecare acquire — CAS downgrade
+    _set("bo.bobot.simulation.max_concurrent", 1, expected_version=1)
+    with pytest.raises(store.LimitExceededError):
+        store.acquire_sim_lease(TENANT, 1)
+    store.release_sim_lease(TENANT, l1)
+    store.release_sim_lease(TENANT, l2)
+
+
+def test_sim_lease_renew_keeps_long_run_alive(db: Path) -> None:
+    """AC3: renewal — un run care depășește TTL-ul nu-și pierde slotul;
+    fără renew, lease-ul expirat e revendicat corect."""
+    lease = store.acquire_sim_lease(TENANT, 1)
+    # trecut TTL fără renew → următorul acquire revendică
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE bo_bot_sim_leases SET lease_until = "
+            "'2000-01-01T00:00:00.000Z' WHERE lease_id = ?", (lease,))
+    l2 = store.acquire_sim_lease(TENANT, 1)
+    # backdate la limita expirării, apoi renew → slotul rămâne viu
+    # (un run lung nu-și pierde slotul; capul nu poate fi depășit)
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE bo_bot_sim_leases SET lease_until = "
+            "'2000-01-01T00:00:00.000Z' WHERE lease_id = ?", (l2,))
+    store.renew_sim_lease(TENANT, l2)
+    with get_conn() as conn:
+        after = conn.execute(
+            "SELECT lease_until FROM bo_bot_sim_leases WHERE lease_id = ?",
+            (l2,)).fetchone()[0]
+    assert after > '2000-01-01T00:00:00.000Z'
+    # și nu este revendicat de un nou acquire — încă ocupă slotul
+    with pytest.raises(store.LimitExceededError):
+        store.acquire_sim_lease(TENANT, 1)
+    store.release_sim_lease(TENANT, l2)
+
+
+def test_simulate_error_releases_lease(db: Path, monkeypatch) -> None:
+    """AC3: slotul se eliberează și la eroare — o simulare care crapă
+    înainte de inserarea runului nu ține slotul (finally)."""
+    _set("bo.bobot.simulation.max_concurrent", 1)
+    d = _created(db)
+    monkeypatch.setattr(store, "insert_run",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
+    with pytest.raises(RuntimeError):
+        service.simulate(TENANT, ACTOR, d["id"],
+                         input_context={}, simulate_draft=True)
+    # slotul e liber — un nou acquire nu mai e refuzat
+    lease = store.acquire_sim_lease(TENANT, 1)
+    store.release_sim_lease(TENANT, lease)
+
+
+def test_effective_limit_min_technical_entitlement(db: Path) -> None:
+    """AC3: efectivul = min(plafon tehnic, entitlement) — un rând de
+    setări peste plafonul tehnic nu acordă drepturi nelimitate."""
+    assert store.effective_limit(500, store.SIM_CONCURRENT_HARD_CAP) == 32
+    assert store.effective_limit(2, store.SIM_CONCURRENT_HARD_CAP) == 2
+    assert store.effective_limit(
+        99999, store.MAX_DEFINITIONS_HARD_CAP) == 10000

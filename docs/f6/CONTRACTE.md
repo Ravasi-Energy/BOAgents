@@ -39,12 +39,12 @@ la conflict; răspunsul neschimbat nu rescrie nimic.
 | Metodă | Rută | Rol | Corp / semantică |
 |---|---|---|---|
 | GET | `/bo/bots` | viewer | listă definiții tenant |
-| POST | `/bo/bots` (201) | admin | `{name≤120, kind=BOT|AI|MIXED, description≤500, content: bo.bobot.v1}` → draft v1 |
+| POST | `/bo/bots` (201) | admin | `{name≤120, kind=BOT|AI|MIXED, description≤500, content: bo.bobot.v1}` → draft v1; refuz 422 peste `bo.bobot.max_definitions` (numărat atomic în tranzacția INSERT) |
 | POST | `/bo/bots/example` (201) | admin | creează exemplul HEARTBEAT_STALE |
 | GET | `/bo/bots/{def_id}` | viewer | detaliu + versiuni |
 | PATCH | `/bo/bots/{def_id}` | admin | `{expected_version≥1, name?, description?, content?, steps_remove?, capability_refs_remove?, policy_refs_remove?}` — omiterea nu șterge; ștergerea cere lista explicită |
 | POST | `/bo/bots/{def_id}/publish` | admin | `{expected_version≥1}` — draft→published imuabil + activ |
-| POST | `/bo/bots/{def_id}/simulate` (201) | operator | `{input?, version_no?, draft?}` — simulare deterministă; run `kind=simulation`, receipts `NOT_EXECUTED` |
+| POST | `/bo/bots/{def_id}/simulate` (201) | operator | `{input?, version_no?, draft?}` — simulare deterministă; run `kind=simulation`, receipts `NOT_EXECUTED`; slot sub `bo.bobot.simulation.max_concurrent` (lease cu TTL, eliberat pe orice ieșire, expirat → revendicat); `PARTIAL` peste `bo.bobot.simulation.max_steps` |
 | GET | `/bo/bots/{def_id}/runs` | viewer | timeline rulări |
 | GET | `/bo/runs/{run_id}` | viewer | rezultat + steps |
 

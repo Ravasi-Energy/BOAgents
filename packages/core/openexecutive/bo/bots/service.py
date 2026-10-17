@@ -94,12 +94,22 @@ def create(tenant: str, actor: str, payload: dict[str, Any],
     description = str(payload.get("description") or "")[:500]
     content = validate_content(payload.get("content") or {})
     canon = _canonical(content.model_dump(mode="json"))
-    definition = store.create_definition(
-        tenant,
-        name=name, description=description, kind=kind, owner=actor,
-        draft_content_json=canon, content_hash=content_hash(content.model_dump(mode="json")),
-        schema_version=SCHEMA_VERSION, db_path=db_path,
-    )
+    # AC3: persistent definitions are capped by the administered,
+    # versioned setting — counted atomically inside the create
+    # transaction, so concurrent creators cannot overshoot it.
+    max_defs = int(settings_store.get_effective_value(
+        tenant, "bo.bobot.max_definitions", db_path=db_path))
+    try:
+        definition = store.create_definition(
+            tenant,
+            name=name, description=description, kind=kind, owner=actor,
+            draft_content_json=canon,
+            content_hash=content_hash(content.model_dump(mode="json")),
+            schema_version=SCHEMA_VERSION, max_definitions=max_defs,
+            db_path=db_path,
+        )
+    except store.LimitExceededError as exc:
+        raise ValidationFailure([str(exc)]) from exc
     _audit(tenant, actor, "bo_bot_create", f"BoBot {definition['id']} creat ({kind})",
            {"definition_id": definition["id"], "kind": kind})
     return definition
@@ -362,6 +372,8 @@ def simulate(
         tenant, "bo.bobot.simulation.max_steps", db_path=db_path))
     retention_days = int(settings_store.get_effective_value(
         tenant, "bo.bobot.simulation.retention_days", db_path=db_path))
+    max_concurrent = int(settings_store.get_effective_value(
+        tenant, "bo.bobot.simulation.max_concurrent", db_path=db_path))
     config_version = settings_store.config_version(tenant, db_path=db_path)
     snapshot = _config_snapshot(tenant, db_path)
 
@@ -370,6 +382,15 @@ def simulate(
     # A corrupt definition is refused (422), never half-simulated.
     content = validate_content(version["content"])
     version_hash = version["hash"]
+
+    # AC3: the concurrency slot is leased BEFORE any work and released on
+    # every exit path — refused explicitly when full, never queued or
+    # permanently held by a crash (expired leases are reclaimed).
+    try:
+        sim_lease = store.acquire_sim_lease(
+            tenant, max_concurrent, db_path=db_path)
+    except store.LimitExceededError as exc:
+        raise SimulationRefused(str(exc)) from exc
 
     # Telemetry: emitted through the injectable adapter — dropped unless an
     # operator configured a transport (default: off). run_id is pre-generated
@@ -382,160 +403,163 @@ def simulate(
         "versionNo": version["version_no"], "runKind": "simulation",
     }, run_ref=run_id, agent_ref=def_id, correlation_id=run_id)
 
-    context = dict(input_context)
-    predicate_result = "NOT_EVALUATED"
-    if content.predicates is not None:
-        predicate_result = evaluate(content.predicates, context).value
+    try:
+        context = dict(input_context)
+        predicate_result = "NOT_EVALUATED"
+        if content.predicates is not None:
+            predicate_result = evaluate(content.predicates, context).value
 
-    step_records: list[dict[str, Any]] = []
-    findings: list[dict[str, Any]] = []
-    stopped = False
-    capped = False
+        step_records: list[dict[str, Any]] = []
+        findings: list[dict[str, Any]] = []
+        stopped = False
+        capped = False
 
-    # A top-level predicate that is not TRUE gates the whole plan — and the
-    # plan records WHY. UNKNOWN is named, never silently treated as FALSE or
-    # coerced into TRUE.
-    gated = predicate_result not in ("NOT_EVALUATED", "TRUE")
+        # A top-level predicate that is not TRUE gates the whole plan — and the
+        # plan records WHY. UNKNOWN is named, never silently treated as FALSE or
+        # coerced into TRUE.
+        gated = predicate_result not in ("NOT_EVALUATED", "TRUE")
 
-    steps = content.steps
-    for idx, step in enumerate(steps):
-        if gated:
+        steps = content.steps
+        for idx, step in enumerate(steps):
+            if gated:
+                step_records.append({
+                    "step_id": step.id, "step_type": step.type, "status": "SKIPPED",
+                    "detail": {"reason": "predicate_not_true", "result": predicate_result},
+                    "receipt": None,
+                })
+                continue
+            if idx >= max_steps:
+                capped = True
+                step_records.append({
+                    "step_id": step.id, "step_type": step.type, "status": "SKIPPED",
+                    "detail": {"reason": "step_limit", "limit": max_steps},
+                    "receipt": None,
+                })
+                continue
+            if stopped:
+                step_records.append({
+                    "step_id": step.id, "step_type": step.type, "status": "SKIPPED",
+                    "detail": {"reason": "gate_stop"}, "receipt": None,
+                })
+                continue
+
+            detail: dict[str, Any] = {}
+            receipt = _sim_receipt(definition["id"], step.id)
+            status = "SIMULATED"
+
+            if step.type == "check":
+                tri = evaluate(step.predicate or {}, context)
+                detail = {"predicate_result": tri.value}
+                if tri is not Tri.TRUE:
+                    status = "SKIPPED"
+                    detail["gate"] = "not_true"
+                    if step.on_false == "stop":
+                        stopped = True
+                        detail["stopped_remaining"] = True
+            elif step.type == "emit_finding":
+                finding = {
+                    "finding_key": step.finding_key,
+                    "category": step.category,
+                    "severity": step.severity,
+                    "message": _render(step.message or "", context),
+                    "effect_status": "NOT_EXECUTED",
+                }
+                findings.append(finding)
+                detail = {"finding": finding}
+            elif step.type == "set_field":
+                seg = (step.path or "").split(".")
+                node = context
+                for part in seg[:-1]:
+                    nxt = node.get(part)
+                    if not isinstance(nxt, dict):
+                        nxt = {}
+                        node[part] = nxt
+                    node = nxt
+                node[seg[-1]] = step.value
+                detail = {"set": step.path, "value": step.value}
+            elif step.type == "notify":
+                detail = {
+                    "channel": step.channel,
+                    "message": _render(step.message or "", context),
+                    "delivered": False,
+                }
+            elif step.type == "note":
+                detail = {"message": _render(step.message or "", context)}
+
             step_records.append({
-                "step_id": step.id, "step_type": step.type, "status": "SKIPPED",
-                "detail": {"reason": "predicate_not_true", "result": predicate_result},
-                "receipt": None,
+                "step_id": step.id, "step_type": step.type, "status": status,
+                "detail": detail, "receipt": receipt,
             })
-            continue
-        if idx >= max_steps:
-            capped = True
-            step_records.append({
-                "step_id": step.id, "step_type": step.type, "status": "SKIPPED",
-                "detail": {"reason": "step_limit", "limit": max_steps},
-                "receipt": None,
-            })
-            continue
-        if stopped:
-            step_records.append({
-                "step_id": step.id, "step_type": step.type, "status": "SKIPPED",
-                "detail": {"reason": "gate_stop"}, "receipt": None,
-            })
-            continue
 
-        detail: dict[str, Any] = {}
-        receipt = _sim_receipt(definition["id"], step.id)
-        status = "SIMULATED"
+        plan = {
+            "version_hash": version_hash,
+            "input": input_context,
+            "predicate_result": predicate_result,
+            "gated_by_predicate": gated,
+            "steps": [
+                {
+                    "step_id": s["step_id"], "type": s["step_type"],
+                    "status": s["status"],
+                    "note": (s["detail"] or {}).get("predicate_result"),
+                }
+                for s in step_records
+            ],
+            "findings": findings,
+        }
+        plan_hash = hashlib.sha256(_canonical(plan).encode("utf-8")).hexdigest()
 
-        if step.type == "check":
-            tri = evaluate(step.predicate or {}, context)
-            detail = {"predicate_result": tri.value}
-            if tri is not Tri.TRUE:
-                status = "SKIPPED"
-                detail["gate"] = "not_true"
-                if step.on_false == "stop":
-                    stopped = True
-                    detail["stopped_remaining"] = True
-        elif step.type == "emit_finding":
-            finding = {
-                "finding_key": step.finding_key,
-                "category": step.category,
-                "severity": step.severity,
-                "message": _render(step.message or "", context),
-                "effect_status": "NOT_EXECUTED",
-            }
-            findings.append(finding)
-            detail = {"finding": finding}
-        elif step.type == "set_field":
-            seg = (step.path or "").split(".")
-            node = context
-            for part in seg[:-1]:
-                nxt = node.get(part)
-                if not isinstance(nxt, dict):
-                    nxt = {}
-                    node[part] = nxt
-                node = nxt
-            node[seg[-1]] = step.value
-            detail = {"set": step.path, "value": step.value}
-        elif step.type == "notify":
-            detail = {
-                "channel": step.channel,
-                "message": _render(step.message or "", context),
-                "delivered": False,
-            }
-        elif step.type == "note":
-            detail = {"message": _render(step.message or "", context)}
+        status_run = "PARTIAL" if capped else "SUCCEEDED"
+        result = {
+            "execution_status": status_run,
+            "predicate_result": predicate_result,
+            "gated_by_predicate": gated,
+            "step_count": len(steps),
+            "steps_evaluated": sum(1 for s in step_records if s["status"] != "SKIPPED"),
+            "step_limit": max_steps,
+            "capped_by_step_limit": capped,
+            "findings": findings,
+            "simulation": True,
+            "external_effects": 0,
+        }
 
-        step_records.append({
-            "step_id": step.id, "step_type": step.type, "status": status,
-            "detail": detail, "receipt": receipt,
-        })
+        run_id = store.insert_run(
+            tenant,
+            definition_id=def_id, version_id=version["id"],
+            version_no=version["version_no"], version_hash=version_hash,
+            kind="simulation", status=status_run,
+            input_json=_canonical(input_context), config_version=config_version,
+            config_snapshot_json=_canonical(snapshot), plan_hash=plan_hash,
+            result_json=_canonical(result), error=None, created_by=actor,
+            run_id=run_id, db_path=db_path,
+        )
+        store.insert_step_runs(run_id, step_records, db_path=db_path)
 
-    plan = {
-        "version_hash": version_hash,
-        "input": input_context,
-        "predicate_result": predicate_result,
-        "gated_by_predicate": gated,
-        "steps": [
-            {
-                "step_id": s["step_id"], "type": s["step_type"],
-                "status": s["status"],
-                "note": (s["detail"] or {}).get("predicate_result"),
-            }
-            for s in step_records
-        ],
-        "findings": findings,
-    }
-    plan_hash = hashlib.sha256(_canonical(plan).encode("utf-8")).hexdigest()
-
-    status_run = "PARTIAL" if capped else "SUCCEEDED"
-    result = {
-        "execution_status": status_run,
-        "predicate_result": predicate_result,
-        "gated_by_predicate": gated,
-        "step_count": len(steps),
-        "steps_evaluated": sum(1 for s in step_records if s["status"] != "SKIPPED"),
-        "step_limit": max_steps,
-        "capped_by_step_limit": capped,
-        "findings": findings,
-        "simulation": True,
-        "external_effects": 0,
-    }
-
-    run_id = store.insert_run(
-        tenant,
-        definition_id=def_id, version_id=version["id"],
-        version_no=version["version_no"], version_hash=version_hash,
-        kind="simulation", status=status_run,
-        input_json=_canonical(input_context), config_version=config_version,
-        config_snapshot_json=_canonical(snapshot), plan_hash=plan_hash,
-        result_json=_canonical(result), error=None, created_by=actor,
-        run_id=run_id, db_path=db_path,
-    )
-    store.insert_step_runs(run_id, step_records, db_path=db_path)
-
-    _emit(tenant, "RunFinished", {
-        "executionStatus": status_run, "verificationStatus": "VERIFIED",
-        "planHash": plan_hash,
-        "durationMs": round((time.monotonic() - started_at) * 1000, 3),
-    }, run_ref=run_id, agent_ref=def_id, correlation_id=run_id)
-    for finding in findings:
-        _emit(tenant, "VerificationFinding", {
-            "findingId": f"{run_id}:{finding['finding_key']}",
-            "category": finding["category"], "severity": finding["severity"],
-            "effectStatus": "NOT_EXECUTED",
-            "ownerRef": opaque_actor_ref(actor),
-            "evidenceRefs": [run_id],
+        _emit(tenant, "RunFinished", {
+            "executionStatus": status_run, "verificationStatus": "VERIFIED",
+            "planHash": plan_hash,
+            "durationMs": round((time.monotonic() - started_at) * 1000, 3),
         }, run_ref=run_id, agent_ref=def_id, correlation_id=run_id)
+        for finding in findings:
+            _emit(tenant, "VerificationFinding", {
+                "findingId": f"{run_id}:{finding['finding_key']}",
+                "category": finding["category"], "severity": finding["severity"],
+                "effectStatus": "NOT_EXECUTED",
+                "ownerRef": opaque_actor_ref(actor),
+                "evidenceRefs": [run_id],
+            }, run_ref=run_id, agent_ref=def_id, correlation_id=run_id)
 
-    swept = store.sweep_simulation_runs(tenant, retention_days, db_path=db_path)
-    if swept:
-        _audit(tenant, actor, "bo_bot_sim_sweep",
-               f"retenție simulări: {swept} rulări șterse (>{retention_days} zile)",
-               {"definition_id": def_id, "swept": swept})
+        swept = store.sweep_simulation_runs(tenant, retention_days, db_path=db_path)
+        if swept:
+            _audit(tenant, actor, "bo_bot_sim_sweep",
+                   f"retenție simulări: {swept} rulări șterse (>{retention_days} zile)",
+                   {"definition_id": def_id, "swept": swept})
 
-    _audit(tenant, actor, "bo_bot_simulate",
-           f"simulare {def_id}@v{version['version_no']} → {status_run}",
-           {"definition_id": def_id, "run_id": run_id, "plan_hash": plan_hash,
-            "status": status_run})
+        _audit(tenant, actor, "bo_bot_simulate",
+               f"simulare {def_id}@v{version['version_no']} → {status_run}",
+               {"definition_id": def_id, "run_id": run_id, "plan_hash": plan_hash,
+                "status": status_run})
+    finally:
+        store.release_sim_lease(tenant, sim_lease, db_path=db_path)
     return store.get_run(tenant, run_id, db_path=db_path)
 
 

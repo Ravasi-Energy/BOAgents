@@ -36,6 +36,11 @@ class ConflictError(Exception):
     """CAS / state conflict → HTTP 409."""
 
 
+class LimitExceededError(Exception):
+    """A configured tenant cap would be exceeded (definitions count or
+    concurrent simulations)."""
+
+
 class StateError(Exception):
     """Illegal state transition (e.g. editing a published version) → 409."""
 
@@ -116,6 +121,18 @@ def initialize_db(db_path: Path | None = None) -> None:
             CREATE INDEX IF NOT EXISTS idx_bo_bot_step_runs_run
                 ON bo_bot_step_runs(run_id, idx);
 
+            -- Simulation slot leases — atomic concurrency cap per tenant.
+            -- Expired rows are reclaimed on each acquire, so a crashed
+            -- simulator never leaves a permanent lock (AC3).
+            CREATE TABLE IF NOT EXISTS bo_bot_sim_leases (
+                lease_id TEXT PRIMARY KEY,
+                tenant TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                lease_until TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_bo_bot_sim_leases_tenant
+                ON bo_bot_sim_leases(tenant, lease_until);
+
             -- Draft-content snapshots keyed by the definitions' CAS counter —
             -- append-only audit/rebase trail; never read to infer a writer's
             -- base (CONTROL R2: the client's declared expected_version is the
@@ -155,14 +172,27 @@ def _definition_from_row(row: Any) -> dict[str, Any]:
 def create_definition(
     tenant: str, *, name: str, description: str, kind: str,
     owner: str, draft_content_json: str, content_hash: str,
-    schema_version: str, db_path: Path | None = None,
+    schema_version: str, max_definitions: int,
+    db_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Create a definition + its first draft version (v1, status=draft)."""
+    """Create a definition + its first draft version (v1, status=draft).
+    The tenant's persistent-definition count is checked inside the same
+    BEGIN IMMEDIATE transaction as the INSERT — concurrent creators
+    cannot overshoot ``max_definitions`` (AC3)."""
     def_id = _new_id("bot")
     ver_id = _new_id("bv")
     now = _now()
     with get_conn(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute(
+            "SELECT COUNT(*) FROM bo_bot_definitions WHERE tenant = ?",
+            (tenant,),
+        ).fetchone()[0]
+        if existing >= max_definitions:
+            raise LimitExceededError(
+                f"limita de definiții BoBot atinsă ({existing}/"
+                f"{max_definitions}) — refuz explicit, fără coadă"
+            )
         conn.execute(
             """
             INSERT INTO bo_bot_definitions
@@ -489,3 +519,61 @@ def sweep_simulation_runs(tenant: str, retention_days: int,
             (tenant, cutoff),
         )
         return cur.rowcount if cur.rowcount is not None else 0
+
+
+# --------------------------------------------------------------------- #
+# Simulation slot leases (AC3)
+# --------------------------------------------------------------------- #
+
+SIM_LEASE_TTL_SECONDS = 300
+
+
+def acquire_sim_lease(
+    tenant: str, max_concurrent: int, db_path: Path | None = None,
+) -> str:
+    """Atomically reserve one simulation slot for the tenant.
+
+    BEGIN IMMEDIATE serializes acquire across threads/processes; leases
+    past ``lease_until`` are reclaimed in the same transaction, so a
+    crashed simulator cannot hold a slot forever. Returns the lease id;
+    raises LimitExceededError when the cap is full.
+    """
+    now = datetime.now(UTC)
+    until = (now + timedelta(seconds=SIM_LEASE_TTL_SECONDS)).isoformat(
+        timespec="milliseconds"
+    )
+    lease_id = _new_id("slease")
+    with get_conn(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "DELETE FROM bo_bot_sim_leases WHERE tenant = ? AND "
+            "lease_until <= ?",
+            (tenant, now.isoformat(timespec="milliseconds")),
+        )
+        active = conn.execute(
+            "SELECT COUNT(*) FROM bo_bot_sim_leases WHERE tenant = ?",
+            (tenant,),
+        ).fetchone()[0]
+        if active >= max_concurrent:
+            raise LimitExceededError(
+                f"limita de simulări concurente atinsă ({active}/"
+                f"{max_concurrent}) — refuz explicit, fără coadă"
+            )
+        conn.execute(
+            "INSERT INTO bo_bot_sim_leases "
+            "(lease_id, tenant, created_at, lease_until) VALUES (?, ?, ?, ?)",
+            (lease_id, tenant, now.isoformat(timespec="milliseconds"), until),
+        )
+    return lease_id
+
+
+def release_sim_lease(
+    tenant: str, lease_id: str, db_path: Path | None = None,
+) -> None:
+    """Release a simulation slot; idempotent (releasing a stale or
+    already-released lease is a no-op)."""
+    with get_conn(db_path) as conn:
+        conn.execute(
+            "DELETE FROM bo_bot_sim_leases WHERE tenant = ? AND lease_id = ?",
+            (tenant, lease_id),
+        )

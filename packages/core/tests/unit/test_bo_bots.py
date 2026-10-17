@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from openexecutive.bo.bots import examples, service, store
+from openexecutive.bo.db import get_conn
 from openexecutive.bo.settings import store as settings_store
 
 from .bo_testkit import capture_audit, use_tmp_db
@@ -288,3 +289,49 @@ def test_run_records_config_version(db: Path) -> None:
     snap = run["config_snapshot"]
     assert snap["bo.ui.language"] == "en"
     assert snap["bo.bobot.simulation.max_steps"] == 50
+
+
+# --------------------------------------------------------------------------- #
+# AC3: limite administrate, atomice (0002 spec)
+# --------------------------------------------------------------------------- #
+
+def _set(key: str, value: int) -> None:
+    settings_store.set_value(TENANT, key, value, expected_version=0,
+                             actor="admin@test")
+
+
+def test_max_definitions_counts_persistent_rows_and_refuses(db: Path) -> None:
+    """AC3: limita numără definițiile persistate ale tenantului în aceeași
+    tranzacție cu INSERT — al treilea create e refuzat, nu căzut în coadă."""
+    _set("bo.bobot.max_definitions", 2)
+    _created(db)
+    _created(db)
+    with pytest.raises(service.ValidationFailure, match="definiții"):
+        _created(db)
+    # izolare tenant: tenant-b are propriul contor
+    d2 = service.create("tenant-b", ACTOR, _payload())
+    assert d2["id"]
+    # plafonul nu șterge definițiile existente
+    assert len(store.list_definitions(TENANT)) == 2
+
+
+def test_sim_concurrent_lease_refuses_and_recovers(db: Path) -> None:
+    """AC3: slotul de simulare e atomic; lease-ul expirat e revendicat —
+    un crash nu lasă blocare permanentă."""
+    _set("bo.bobot.simulation.max_concurrent", 1)
+    lease = store.acquire_sim_lease(TENANT, 1)
+    with pytest.raises(store.LimitExceededError):
+        store.acquire_sim_lease(TENANT, 1)
+    # tenant-b nu e afectat de slotul lui tenant-a
+    store.acquire_sim_lease("tenant-b", 1)
+    # eliberare explicită → slotul revine
+    store.release_sim_lease(TENANT, lease)
+    lease2 = store.acquire_sim_lease(TENANT, 1)
+    # lease expirat (crash simulat) → revendicat automat la următoarea cerere
+    store.release_sim_lease(TENANT, lease2)
+    _lease3 = store.acquire_sim_lease(TENANT, 1)
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE bo_bot_sim_leases SET lease_until = '2000-01-01T00:00:00.000Z'"
+        )
+    store.acquire_sim_lease(TENANT, 1)  # nu ridică — vechiul e expirat

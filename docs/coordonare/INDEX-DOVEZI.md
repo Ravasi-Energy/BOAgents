@@ -169,3 +169,23 @@ logică de propagare. Ramura de livrare: `codex/livrare-completa`.
   `6ed0267d…`.
 - Deschise la coordonator: Q-M2 (budget_usd USD-fix), Q-M3 (semantica
   bugetelor exec); Q-M1 rezolvat (bo.ui.money_display_decimals exista).
+
+## 2026-10-18 — AC3 BoBot + monetar v2.0 continuare (AC5/UI)
+
+- `ded4ac2` — AC5: `budget_currency` obligatoriu la buget declarat (mostenire
+  parinte inainte de obligativitate), cap denominat vs buget fara/diferit ->
+  refuz explicit; UI monetar exact RO + 6 scripturi test noi
+  (money-currencies.ts, usage-money.ts).
+- `63a62d6` — AC3 spec 0002: `bo.bobot.max_definitions` (1..10000, impl. 100)
+  COUNT atomic in tranzactia INSERT; `bo.bobot.simulation.max_concurrent`
+  (1..32, impl. 1) prin `bo_bot_sim_leases` (atomic, TTL 300s, revendicare
+  la expirare, finally-release). `bo_agents.json` 50->52 chei.
+- Probe: 25/25 test_bo_bots (2 regresii AC3 noi), 482/482 suita bo/*,
+  213/213 UI, npm build verde, ruff+mypy curate. JUnit
+  `F6-F8/probe-mac/junit-ac3-bobot-limite.xml` sha256 `525bbb04…`.
+- CI `39043927700` pe `63a62d6` — ESUAT pe 4 fixture bughunt02 fara moneda
+  (pre-AC5); remediate in `6202d93` (budget_currency USD explicit).
+- CI `39044506801` pe `6202d93` — **SUCCESS**: 4376 teste, 0 fail/error,
+  5 skip oneste. JUnit `F6-F8/probe-ci/junit-unit-6202d93.xml` sha256
+  `8048315d…`.
+- Matrice F6: B1-4 PARTIAL->PROBAT; Q-F6-01 marcat REZOLVAT in dosar.

@@ -151,3 +151,21 @@ logică de propagare. Ramura de livrare: `codex/livrare-completa`.
   0 fail/error, 5 skip oneste (restic real/checkout Hire lipsesc in CI +
   workflows_meta preexistent); 913 cazuri bo/* verzi. JUnit CI:
   `F6-F8/probe-ci/junit-unit-8bad411.xml` sha256 `db1fa97b…`.
+
+## 2026-10-17 — Regula monetara v2.0 (BOAgents)
+
+- Dosar `coordonare/rapoarte/BO-A01/F6-F8/`: `MONETAR-V2-INVENTAR.{md,json}`,
+  `ABATERI-MONETARE-V2.md` (AB-01..08 remediate), `MONETAR-V2-PROBE.md`.
+- `7944e9b` — budget_currency expand pe mandate/runuri (mostenire de lant,
+  mismatch refuz, invariant nedeterminat); cap denominat -> refuz cross-ccy;
+  cost_usd exact (sir+Decimal, cost{amount,currency}); _fmt_amount RO;
+  stoc currency din meta; setari contra ISO_4217; float JSON -> 422;
+  pilot/CLI declara USD.
+- Proba Mac: **331/331 PASS** suprafete atinse — JUnit
+  `F6-F8/probe-mac/junit-monetar-v2.xml` sha256 `39a63988…`; mutanti
+  scalare+eticheta RED->PASS in `F6-F8/mutanti/` (restaurati, nu raman in cod).
+- CI `39022895346` pe `7944e9b` — **SUCCESS**: 4373 teste, 0 fail/error,
+  5 skip oneste. JUnit `F6-F8/probe-ci/junit-unit-7944e9b.xml` sha256
+  `6ed0267d…`.
+- Deschise la coordonator: Q-M2 (budget_usd USD-fix), Q-M3 (semantica
+  bugetelor exec); Q-M1 rezolvat (bo.ui.money_display_decimals exista).

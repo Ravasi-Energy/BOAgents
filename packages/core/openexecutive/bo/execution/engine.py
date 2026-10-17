@@ -119,19 +119,25 @@ def submit_execution(
             assert_active(link)
     except (MandateRevokedError, MandateExpiredError) as exc:
         raise store.InvalidStateError(str(exc)) from exc
-    # Currency resolution (REGULA-SUME-VALUTE-V2): the run's declared
-    # currency wins, otherwise it inherits the mandate's. A run that
-    # declares a different currency than its mandate is refused — no
-    # implicit conversion, no mixed-currency reservations.
+    # Currency resolution (REGULA-SUME-VALUTE-V2, AC5): budgets compared
+    # to monetary caps are monetary — a run's declared currency wins,
+    # otherwise it inherits the mandate's. A mandate legacy row without
+    # currency (NULL) stays readable but produces no monetary execution
+    # or comparison. A run declaring a different currency than its
+    # mandate is refused — no implicit conversion, no mixed ledgers.
     run_ccy = _validate_budget_currency(budget_currency)
-    if mandate.budget_currency is not None:
-        if run_ccy is None:
-            run_ccy = mandate.budget_currency
-        elif run_ccy != mandate.budget_currency:
-            raise MandateValidationError(
-                f"moneda bugetului runului ({run_ccy}) diferă de cea a "
-                f"mandatului ({mandate.budget_currency})"
-            )
+    if mandate.budget_currency is None:
+        raise MandateValidationError(
+            "mandatul nu are monedă declarată (legacy NULL) — nu permite "
+            "execuție sau comparație monetară până la clarificare"
+        )
+    if run_ccy is None:
+        run_ccy = mandate.budget_currency
+    elif run_ccy != mandate.budget_currency:
+        raise MandateValidationError(
+            f"moneda bugetului runului ({run_ccy}) diferă de cea a "
+            f"mandatului ({mandate.budget_currency})"
+        )
     cap_raw = str(
         _setting(tenant, "bo.exec.budget_cap", "", db_path)
     ).strip()

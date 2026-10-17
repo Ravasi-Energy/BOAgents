@@ -1835,7 +1835,8 @@ export interface UsageTotals {
   output_tokens: number;
   // Absent on rows written before searches were recorded.
   web_search_requests?: number;
-  cost_usd: number;
+  cost_usd: number; // legacy compatibility mirror, never monetary authority
+  cost: {amount:string;currency:string};
 }
 
 export interface UsageByDay extends UsageTotals {

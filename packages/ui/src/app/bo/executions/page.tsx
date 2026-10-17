@@ -8,8 +8,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useSession } from "next-auth/react";
-import { UnconfiguredMoney } from "@/lib/Money";
-import { requiredMoneyInput, moneyInputValue } from "@/lib/money-format";
+import { Money } from "@/lib/Money";
+import { requiredExecutionBudgetInput, moneyInputValue, moneyCurrency } from "@/lib/money-format";
 import { replayPayload, parseRunDraft, type RunSubmission } from "@/lib/execution-replay";
 import IconBO from "@/components/bo/IconBO";
 import { BoPage, InlineAlert, Pill, StateBlock } from "@/components/bo/ui";
@@ -96,6 +96,11 @@ const BLOCK_HINT: Record<string, string> = {
   mandate_expired: "Mandatul local a expirat.",
   checkpoint_unavailable: "Checkpointul obligatoriu nu a putut fi scris.",
 };
+
+function ExecutionBudget({amount,currency}:{amount:unknown;currency:unknown}){
+ if(currency===null){let text;try{text=moneyInputValue(amount);}catch{text=String(amount)+" — valoare invalidă";}return <span>{text} — valută necunoscută; execuția monetară necesită clarificare</span>;}
+ return <Money amount={amount} currency={currency}/>;
+}
 
 function blockText(reason: string | null): string | null {
   if (!reason) return null;
@@ -199,6 +204,7 @@ function MandatesSection({
   const [resources, setResources] = useState("synth.*");
   const [actions, setActions] = useState("increment");
   const [budget, setBudget] = useState("10");
+  const [budgetCurrency,setBudgetCurrency]=useState("");
   const [maxSteps, setMaxSteps] = useState("10");
   const [ttlHours, setTtlHours] = useState("24");
 
@@ -227,7 +233,7 @@ function MandatesSection({
       return;
     }
     let budgetLimit: string;
-    try { budgetLimit = requiredMoneyInput(budget); }
+    try { budgetLimit = requiredExecutionBudgetInput(budget,budgetCurrency,false); }
     catch (error) { setNotice({ kind: "danger", text: error instanceof Error ? error.message : "Sumă invalidă" }); return; }
     const parent = mandates.find((m) => m.mandate_id === parentId);
     const requestedExpiry = Date.now() + hours * 3600_000;
@@ -242,6 +248,7 @@ function MandatesSection({
           allowed_resources: resources.split(",").map((s) => s.trim()).filter(Boolean),
           allowed_actions: actions.split(",").map((s) => s.trim()).filter(Boolean),
           budget_limit: budgetLimit,
+          budget_currency: moneyCurrency(budgetCurrency)!,
           concurrency_limit: 2,
           max_steps: Number(maxSteps) || 10,
           max_depth: 1,
@@ -329,6 +336,7 @@ function MandatesSection({
               value={budget}
               onChange={(e) => setBudget(e.target.value)}
             />
+            <input className="bo-input" style={{width:110}} aria-label="Valută buget mandat (ISO)" placeholder="EUR / RON / USD" value={budgetCurrency} onChange={e=>setBudgetCurrency(e.target.value)} />
             <input
               className="bo-input"
               style={{ width: 110 }}
@@ -376,7 +384,7 @@ function MandatesSection({
             <span className="bo-hint">
               {m.mandate_id} · acțiuni [{m.allowed_actions.join(", ")}] ·
               resurse [{m.allowed_resources.join(", ")}] · buget{" "}
-              <UnconfiguredMoney amount={m.budget_limit} />
+              <ExecutionBudget amount={m.budget_limit} currency={m.budget_currency} />
               {m.guardian_ref ? ` · Guardian: ${m.guardian_ref}` : ""}
               {m.parent_mandate_id ? " · delegat" : ""}
             </span>
@@ -419,6 +427,7 @@ function SubmitRunForm({
     '[{"action":"increment","resource":"synth.counter","payload":{"amount":1}}]',
   );
   const [budget, setBudget] = useState("5");
+  const [budgetCurrency,setBudgetCurrency]=useState("");
   const correlation = useRef<string | null>(null);
   const attempted = useRef<RunSubmission | null>(null);
   const { data: session } = useSession();
@@ -435,7 +444,7 @@ function SubmitRunForm({
       if (raw) {
         const draft = parseRunDraft(raw);
         attempted.current = draft; correlation.current = draft.correlation_id;
-        setMandateId(draft.mandate_id); setBudget(moneyInputValue(draft.budget_amount));
+        setMandateId(draft.mandate_id); setBudget(moneyInputValue(draft.budget_amount)); setBudgetCurrency(draft.budget_currency??"");
         setSteps(JSON.stringify(draft.steps)); setOpen(true);
         setNotice({kind:"danger",text:"Trimitere neconfirmată păstrată. Verifică rularea existentă; reluarea folosește aceeași corelare și același draft."});
       }
@@ -468,7 +477,8 @@ function SubmitRunForm({
       const payload = replayPayload(attempted.current, {
         mandate_id: mandateId,
         steps: parsed as Record<string, unknown>[],
-        budget_amount: requiredMoneyInput(budget),
+        budget_amount: requiredExecutionBudgetInput(budget,budgetCurrency,false),
+        budget_currency: moneyCurrency(budgetCurrency)!,
         correlation_id: correlation.current,
       });
       sessionStorage.setItem(storageKey, JSON.stringify(payload));
@@ -531,6 +541,7 @@ function SubmitRunForm({
               value={budget}
               onChange={(e) => setBudget(e.target.value)}
             />
+            <input className="bo-input" style={{width:110}} aria-label="Valută buget execuție (ISO)" placeholder="EUR / RON / USD" value={budgetCurrency} onChange={e=>setBudgetCurrency(e.target.value)} />
             <button
               type="button"
               className="bo-btn bo-btn--primary"
@@ -1272,6 +1283,7 @@ function RunDetail({
         {run.policy_version} · corelare {run.correlation_id}
         {run.lease_owner ? ` · lease ${run.lease_owner}` : ""}
       </p>
+      <p className="bo-hint">Buget rezervat: <ExecutionBudget amount={run.budget_reserved} currency={run.budget_currency} /></p>
       {run.block_reason ? (
         <div style={{ marginTop: 8 }}>
           <InlineAlert kind="warn">Blocată: {blockText(run.block_reason)}</InlineAlert>
@@ -1288,7 +1300,7 @@ function RunDetail({
           <span className="bo-hint">
             {m.mandate_id} · acțiuni [{m.allowed_actions.join(", ")}] ·
             resurse [{m.allowed_resources.join(", ")}] · buget{" "}
-            <UnconfiguredMoney amount={m.budget_limit} /> · expiră {m.expires_at.slice(0, 19)}Z
+            <ExecutionBudget amount={m.budget_limit} currency={m.budget_currency} /> · expiră {m.expires_at.slice(0, 19)}Z
             {m.guardian_ref ? ` · Guardian: ${m.guardian_ref}` : ""}
           </span>
         </div>

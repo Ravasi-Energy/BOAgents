@@ -1,0 +1,4 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {parseMoneyInput,parseProfileMoney,moneyInputValue,validateMoneyPair}from'../src/lib/money-format.ts';
+test('v2 changed profile money cannot be saved without explicit currency or exact amount',()=>{assert.doesNotThrow(()=>validateMoneyPair(parseMoneyInput('6.000,00'),'EUR'));assert.doesNotThrow(()=>validateMoneyPair(null,null));for(const [amount,currency]of[['6000.00',null],[null,'EUR'],[1.234,'EUR'],['6000','ZZZ']])assert.throws(()=>validateMoneyPair(amount,currency));});
+
+test("v2 published Decimal profile admits exact3-place KWD and read/edit unchanged",()=>{const value=parseProfileMoney("6.000,125");assert.equal(value,"6000.125");validateMoneyPair(value,"KWD");assert.equal(parseProfileMoney(moneyInputValue(value)),value);});

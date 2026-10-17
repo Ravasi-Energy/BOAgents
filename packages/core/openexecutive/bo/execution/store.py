@@ -29,6 +29,7 @@ from openexecutive.bo.db import get_conn
 from openexecutive.bo.execution.mandate import (
     Mandate,
     MandateValidationError,
+    _require_budget_currency,
     check_child_intersection,
     mandate_state,
     new_mandate_id,
@@ -353,6 +354,10 @@ def create_mandate(
     else:
         depth = 0
         parent_id = None
+    # AC5: budgets are monetary — the resolved currency (declared or
+    # inherited from the parent chain) is mandatory. NULL is readable
+    # legacy data, never a "dimensionless" escape hatch.
+    v["budget_currency"] = _require_budget_currency(v["budget_currency"])
     if depth > max_depth_cap or v["max_depth"] > max_depth_cap:
         raise MandateValidationError(
             f"adâncimea depășește limita tenantului ({max_depth_cap})"

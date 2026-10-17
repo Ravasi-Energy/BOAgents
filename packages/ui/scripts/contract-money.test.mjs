@@ -1,3 +1,4 @@
+// Stefan monetary rule v2.0 supersedes contradictory F3 presentation assertions only.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {retainerMoneyPatch, moneyCurrency, parseMoneyNumber, formatMoney} from '../src/lib/money-format.ts';
@@ -5,7 +6,7 @@ for (const currency of ['RON','EUR','USD']) test(`retainer exact ${currency} JSO
  const patch=retainerMoneyPatch('6.000,25',currency);
  assert.deepEqual(JSON.parse(JSON.stringify(patch)),{retainer_amount:'6000.25',retainer_currency:currency});
  assert.equal(formatMoney(patch.retainer_amount,patch.retainer_currency,2),`6.000,25 ${currency==='RON'?'lei':currency==='EUR'?'€':'USD'}`);
- assert.equal(parseMoneyNumber('6.000,25'),6000.25);
+ assert.throws(()=>parseMoneyNumber('6.000,25'),/API cu șir zecimal/);
 });
 test('legacy unknown stays unknown; no default currency',()=>{assert.equal(moneyCurrency(''),null);assert.deepEqual(retainerMoneyPatch('',''),{retainer_amount:null,retainer_currency:null});});
 test('partial retainer and ambiguous currency refused',()=>{

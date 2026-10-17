@@ -1,3 +1,4 @@
+// Stefan monetary rule v2.0 supersedes contradictory F3 presentation assertions only.
 // BUGHUNT-02 C8 — vendored from the coordinator probe
 // (coordonare/rapoarte/coordonator/BUGHUNT-BOAGENTS-20261003/reproduced/money_roundtrip.mjs).
 // Runs under `npm test` (node --test on Node 22); assertions identical to the
@@ -14,12 +15,9 @@ test("C8 1234,56 round-trips as 1.234,56 lei", () => {
   assert.equal(formatMoney(saved, "EUR", 2), "1.234,56 €");
 });
 
-test("C8 1,005 is rejected at input and rendered visibly invalid, never silently 1,01", () => {
-  // F3/D07 (BO01 patch): over-precision must not be saved nor silently
-  // rounded on display. parseMoneyInput refuses; money() shows the
-  // original value marked invalid.
-  assert.throws(() => parseMoneyInput("1,005"), /mai mult de 2 zecimale/);
+test("C8 v2 keeps explicit operation precision; display rounding exposes exact value", () => {
+  assert.throws(() => parseMoneyInput("1,005"), /2 zecimale/);
   assert.throws(() => parseMoneyNumber("1,005"));
-  assert.throws(() => formatMoney("1.005", "RON", 2), /mai mult de 2 zecimale/);
-  assert.equal(money("1.005", "RON", 2), "1.005 — Sumă cu mai mult de 2 zecimale");
+  assert.equal(formatMoney("1.005", "RON", 2), "≈ 1,01 lei — Valoare exactă: 1,005 lei");
+  assert.equal(money("1.005", "RON", 2), "≈ 1,01 lei — Valoare exactă: 1,005 lei");
 });

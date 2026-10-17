@@ -1,4 +1,5 @@
 "use client";
+import { usageCost } from "@/lib/usage-money";
 import { Money } from "@/lib/Money";
 
 import Link from "next/link";
@@ -17,8 +18,11 @@ function fmtInt(n: number): string {
   return (n ?? 0).toLocaleString();
 }
 
-// The API field is explicitly cost_usd: USD is the source contract, not a fallback.
-function fmtCost(n: number) { return <Money amount={n} currency="USD" />; }
+// Authoritative cost object; never reconstruct from the legacy numeric mirror.
+function fmtCost(row: UsageTotals) {
+ try{const cost=usageCost(row);return <Money amount={cost.amount} currency={cost.currency}/>;}
+ catch(e){return <span role="alert">{e instanceof Error?e.message:"Cost indisponibil."}</span>;}
+}
 
 // Cache-hit ratio: prompt input served from cache as a fraction of ALL prompt
 // input (fresh + cache reads + cache writes). cache_creation tokens are billed
@@ -56,7 +60,7 @@ function UsageRowCells({ u }: { u: UsageTotals }) {
       <td className="px-3 py-1.5 text-right tabular-nums">{fmtInt(u.output_tokens)}</td>
       <td className="px-3 py-1.5 text-right tabular-nums">{fmtInt(u.web_search_requests ?? 0)}</td>
       <td className="px-3 py-1.5 text-right tabular-nums">{cacheHitPct(u)}%</td>
-      <td className="px-3 py-1.5 text-right tabular-nums">{fmtCost(u.cost_usd)}</td>
+      <td className="px-3 py-1.5 text-right tabular-nums">{fmtCost(u)}</td>
     </>
   );
 }
@@ -176,7 +180,7 @@ export default function TokenUsagePage() {
           {/* Totals */}
           {totals ? (
             <div className="mt-6 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
-              <StatCard label="Cost (USD)" value={fmtCost(totals.cost_usd)} hint="actual charged" />
+              <StatCard label="Cost" value={fmtCost(totals)} hint="actual charged" />
               <StatCard label="Calls" value={fmtInt(totals.calls)} />
               <StatCard label="Cache hit" value={`${cacheHitPct(totals)}%`} hint="of prompt input served from cache" />
               <StatCard label="Output tokens" value={fmtInt(totals.output_tokens)} />

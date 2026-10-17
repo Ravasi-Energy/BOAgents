@@ -50,7 +50,7 @@ def pilot(tmp_path, monkeypatch):
     service.change_activation(admin, row["id"], True, 0, "Synthetic approval")
     mandate = store.create_mandate("tenant-a", {
         "allowed_resources": ["synth.erp"], "allowed_actions": ["diagnose"],
-        "budget_limit": "100", "concurrency_limit": 2, "max_steps": 1, "max_depth": 2,
+        "budget_limit": "100", "budget_currency": "USD", "concurrency_limit": 2, "max_steps": 1, "max_depth": 2,
         "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat()},
         parent=None, principal_ref="synthetic-admin", policy_version=1, actor="synthetic-admin", max_depth_cap=3)
     def call(path, body=None, token="synthetic-token-a"):

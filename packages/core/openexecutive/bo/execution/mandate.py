@@ -96,9 +96,10 @@ def _validate_budget(v: Any) -> Decimal:
 
 
 def _validate_budget_currency(v: Any) -> str | None:
-    """Optional ISO-4217 currency for the budget amount. ``None`` stays
-    dimensionless (legacy abstract budgets) — never defaulted to a
-    currency that was not declared (REGULA-SUME-VALUTE-V2)."""
+    """ISO-4217 currency for a declared amount; ``None`` means "not
+    provided" and is refused by the callers that require a currency —
+    never defaulted to one that was not declared (REGULA-SUME-VALUTE-V2,
+    AC5)."""
     if v is None:
         return None
     from openexecutive.memory.company_profile import ISO_4217_CODES
@@ -108,6 +109,17 @@ def _validate_budget_currency(v: Any) -> str | None:
             "moneda bugetului: așteptat cod ISO-4217 valid (ex. USD, EUR, RON)"
         )
     return v
+
+
+def _require_budget_currency(v: Any) -> str:
+    ccy = _validate_budget_currency(v)
+    if ccy is None:
+        raise MandateValidationError(
+            "bugetul este monetar și cere monedă ISO explicită "
+            "(budget_currency) — NULL nu se reclasifică drept "
+            "adimensional (AC5)"
+        )
+    return ccy
 
 
 def _validate_expiry(v: Any) -> str:

@@ -31,6 +31,7 @@ type DetailState =
       kind: "data";
       detail: BoBotDetail;
       runs: BoRun[];
+      runsError?: string | null;
       role: "admin" | "operator" | "viewer" | null;
     };
 
@@ -86,7 +87,11 @@ export default function BoBotDetailPage() {
   const load = useCallback(async () => {
     try {
       const detail = await getBoBot(id);
-      const runs = await listBoRuns(id).catch(() => ({ runs: [] as BoRun[] }));
+      let runsError: string | null = null;
+      const runs = await listBoRuns(id).catch(() => {
+        runsError = "Istoricul nu a putut fi citit. Reincarca pentru a verifica rularile.";
+        return { runs: [] as BoRun[] };
+      });
       let role: "admin" | "operator" | "viewer" | null = null;
       try {
         role = (await getBoSettings()).role;
@@ -94,7 +99,7 @@ export default function BoBotDetailPage() {
         role = null; // unknown role → UI stays read-only; server enforces anyway
       }
       if (currentBot.current !== id) return;
-      setState({ kind: "data", detail, runs: runs.runs, role });
+      setState({ kind: "data", detail, runs: runs.runs, runsError, role });
       if (!draftDirty.current) {
         editVersion.current = detail.bot.draft_version;
         editBase.current = { name: detail.bot.name, description: detail.bot.description, content: detail.draft?.content ?? {} };
@@ -476,7 +481,7 @@ export default function BoBotDetailPage() {
       {/* Rulări */}
       <div className="bo-card" style={{ marginTop: 16 }}>
         <h2 className="bo-card-title">Rulări de simulare</h2>
-        {runs.length === 0 ? (
+        {state.runsError ? <InlineAlert kind="warn">{state.runsError}</InlineAlert> : runs.length === 0 ? (
           <p className="bo-hint" style={{ marginTop: 8 }}>
             Nicio rulare încă — pornește o simulare din panoul de mai sus.
           </p>

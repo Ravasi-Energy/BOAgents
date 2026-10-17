@@ -1,7 +1,7 @@
 "use client";
 import { profileDelta } from "@/lib/p0-edit";
 import { Money } from "@/lib/Money";
-import { moneyInputValue, parseMoneyInput, moneyCurrency } from "@/lib/money-format";
+import { moneyInputValue, parseProfileMoney, moneyCurrency, validateMoneyPair } from "@/lib/money-format";
 
 // The company-profile section editors, extracted from app/company-profile/page.tsx
 // so the onboarding draft-review screen can reuse the exact editing surface the
@@ -293,7 +293,7 @@ function CompanyBasicsSection({ profile, saving, onSave, pending }: SectionCompo
 
   const [moneyError, setMoneyError] = useState("");
   const saveMoney = async (payload: object) => {
-    try { const amount = parseMoneyInput(arr); const currency = moneyCurrency(arrCurrency); setMoneyError(""); await onSave({ ...payload, annual_revenue_arr: amount, annual_revenue_arr_currency: currency }); }
+    try { const amount = parseProfileMoney(arr); const currency = moneyCurrency(arrCurrency); validateMoneyPair(amount,currency); setMoneyError(""); await onSave({ ...payload, annual_revenue_arr: amount, annual_revenue_arr_currency: currency }); }
     catch (error) { setMoneyError(error instanceof Error ? error.message : "Sumă invalidă"); throw error; }
   };
   return (
@@ -324,7 +324,7 @@ function CompanyBasicsSection({ profile, saving, onSave, pending }: SectionCompo
           <div><FieldLabel>Stage</FieldLabel><Input value={stage} onChange={setStage} placeholder="Series A" /></div>
           <div><FieldLabel>Founded</FieldLabel><Input value={foundingYear} onChange={setFoundingYear} type="number" placeholder="2022" /></div>
           <div><FieldLabel>Headcount</FieldLabel><Input value={headcount} onChange={setHeadcount} type="number" placeholder="40" /></div>
-          <div><FieldLabel>ARR (6.000,25)</FieldLabel><Input value={arr} onChange={setArr} placeholder="6.000,25" /><label>Valuta ARR (gol = necunoscută)<Input value={arrCurrency} onChange={setArrCurrency} placeholder="EUR" /></label>{moneyError && <p role="alert">{moneyError}</p>}</div>
+          <div><FieldLabel>ARR (6.000,25)</FieldLabel><Input value={arr} onChange={setArr} placeholder="6.000,25" /><label>Valuta ARR (ISO, obligatorie pentru sumă)<Input value={arrCurrency} onChange={setArrCurrency} placeholder="EUR" /></label>{moneyError && <p role="alert">{moneyError}</p>}</div>
         </div>
       }
     />
@@ -613,8 +613,10 @@ function FinancialsSection({ profile, saving, onSave, pending, persisted }: Sect
   const saveMoney = async (payload: object) => {
     try {
       const base=editBase.current;
-      const amount=burn === moneyInputValue(base.burn_rate_monthly) ? base.burn_rate_monthly : parseMoneyInput(burn);
-      const patch={ ...payload, financials: { ...base, runway_months: runway ? parseFloat(runway) : null, burn_rate_monthly: amount, burn_rate_currency: moneyCurrency(burnCurrency) } };
+      const amount=burn === moneyInputValue(base.burn_rate_monthly) ? base.burn_rate_monthly : parseProfileMoney(burn);
+      const currency=moneyCurrency(burnCurrency);
+      if(burn !== moneyInputValue(base.burn_rate_monthly) || currency !== (base.burn_rate_currency??null))validateMoneyPair(amount,currency);
+      const patch={ ...payload, financials: { ...base, runway_months: runway ? parseFloat(runway) : null, burn_rate_monthly: amount, burn_rate_currency: currency } };
       setMoneyError("");
       await onSave(persisted ? profileDelta(patch,{financials:base}) as Partial<CompanyProfile> : patch);
     }
@@ -642,7 +644,7 @@ function FinancialsSection({ profile, saving, onSave, pending, persisted }: Sect
       }
       editContent={
         <div className="grid grid-cols-2 gap-3">
-          <div><FieldLabel>Cheltuială lunară (6.000,25)</FieldLabel><Input value={burn} onChange={setBurn} placeholder="6.000,25" /><label>Valuta cheltuielii (gol = necunoscută)<Input value={burnCurrency} onChange={setBurnCurrency} placeholder="EUR" /></label>{moneyError && <p role="alert">{moneyError}</p>}</div>
+          <div><FieldLabel>Cheltuială lunară (6.000,25)</FieldLabel><Input value={burn} onChange={setBurn} placeholder="6.000,25" /><label>Valuta cheltuielii (ISO, obligatorie pentru sumă)<Input value={burnCurrency} onChange={setBurnCurrency} placeholder="EUR" /></label>{moneyError && <p role="alert">{moneyError}</p>}</div>
           <div><FieldLabel>Runway (months)</FieldLabel><Input value={runway} onChange={setRunway} type="number" placeholder="18" /></div>
         </div>
       }

@@ -63,6 +63,7 @@ def _fields(**over: Any) -> dict[str, Any]:
         "allowed_resources": ["synth.*"],
         "allowed_actions": ["increment"],
         "budget_limit": "10",
+        "budget_currency": "USD",
         "concurrency_limit": 2,
         "max_steps": 10,
         "max_depth": 2,
@@ -297,9 +298,9 @@ class TestSubmission:
             _run(m, budget="4.01")  # peste plafonul tenantului
 
     def test_tenant_budget_cap_currency_mismatch_refuses(self, db: Path) -> None:
-        """v2 AB-01/02: plafonul „4.00 USD“ nu se compară mut cu sume
-        denominate altfel — EUR refuzat ca CURRENCY_MISMATCH, iar suma
-        fără monedă e refuzată pentru că nu poate fi comparată."""
+        """v2 AB-01/AC5: plafonul „4.00 USD“ nu se compară mut cu sume
+        denominate altfel — EUR refuzat; depășirea capului refuzată; sub
+        cap admis doar în aceeași monedă."""
         _enable()
         settings_store.set_value(
             TENANT, "bo.exec.budget_cap", "4.00 USD",
@@ -308,14 +309,11 @@ class TestSubmission:
         m_eur = _mandate(budget_limit="50", budget_currency="EUR")
         with pytest.raises(MandateValidationError, match="plafon"):
             _run(m_eur, budget="1")
-        m_none = _mandate(budget_limit="50")
+        m_usd = _mandate(budget_limit="50", budget_currency="USD")
         with pytest.raises(MandateValidationError, match="plafon"):
-            _run(m_none, budget="1", budget_currency="EUR")
-        # fără monedă deloc + plafon denominat → blocat până la clarificare
-        with pytest.raises(MandateValidationError, match="fără monedă"):
-            _run(m_none, budget="1")
-        # aceeași monedă → comparabil și permis
-        _run(m_none, budget="4", budget_currency="USD")
+            _run(m_usd, budget="5")  # peste cap în aceeași monedă
+        _run(m_usd, budget="4")     # sub cap, aceeași monedă → permis
+
 
     def test_mandate_budget_currency_persists_and_intersects(
         self, db: Path,
@@ -1544,6 +1542,7 @@ class TestRoutes:
                                "allowed_resources": ["synth.*"],
                                "allowed_actions": ["increment"],
                                "budget_limit": "10",
+                               "budget_currency": "USD",
                                "concurrency_limit": 2,
                                "max_steps": 10, "max_depth": 2,
                                "expires_at": FUTURE,
@@ -1698,6 +1697,7 @@ class TestRoutes:
                                "allowed_resources": ["synth.*"],
                                "allowed_actions": ["increment"],
                                "budget_limit": "10",
+                               "budget_currency": "USD",
                                "concurrency_limit": 2,
                                "max_steps": 10, "max_depth": 1,
                                "expires_at": FUTURE,
@@ -1900,10 +1900,31 @@ class TestChainCurrencyInvariant:
             _mandate(parent=parent, allowed_resources=["synth.counter"],
                      allowed_actions=["increment"], budget_currency="EUR")
 
-    def test_currency_cannot_appear_under_dimensionless_parent(
+    def test_mandate_without_currency_refused(self, db: Path) -> None:
+        # AC5: bugetul este monetar, cere monedă — NULL nu e „adimensional"
+        with pytest.raises(MandateValidationError, match="moned"):
+            _mandate(budget_currency=None)
+        # absent complet la API = același refuz (test_f4_full_app: 422)
+
+    def test_legacy_null_mandate_readable_but_no_execution(
         self, db: Path
     ) -> None:
-        parent = _mandate()  # fără budget_currency → nedeterminat
-        with pytest.raises(MandateValidationError, match="nedeterminat"):
-            _mandate(parent=parent, allowed_resources=["synth.counter"],
-                     allowed_actions=["increment"], budget_currency="USD")
+        """AC5: rândul legacy NULL se citește cu limită explicită, dar nu
+        produce execuție/comparație monetară (nici direct, nici cu monedă
+        declarată la run)."""
+        _enable()
+        m = _mandate(budget_limit="50", budget_currency="USD")
+        from openexecutive.bo.execution.store import get_conn
+        with get_conn() as conn:
+            conn.execute(
+                "UPDATE bo_exec_mandates SET budget_currency = NULL "
+                "WHERE tenant = ? AND mandate_id = ?",
+                (TENANT, m.mandate_id),
+            )
+        legacy = store.get_mandate(TENANT, m.mandate_id)
+        assert legacy.budget_currency is None  # readback onest, nu presupus
+        assert legacy.budget_limit == Decimal("50")
+        with pytest.raises(MandateValidationError, match="moned"):
+            _run(legacy, budget="1")  # moștenire imposibilă → refuz
+        with pytest.raises(MandateValidationError, match="moned"):
+            _run(legacy, budget="1", budget_currency="USD")  # nici explicit

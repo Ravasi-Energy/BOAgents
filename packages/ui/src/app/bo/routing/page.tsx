@@ -1,7 +1,7 @@
 "use client";
 import { catalogPatch } from "@/lib/p0-edit";
 import { Money } from "@/lib/Money";
-import { moneyInputValue, parseMoneyInput } from "@/lib/money-format";
+import { moneyInputValue, parseRoutingPrice } from "@/lib/money-format";
 
 // Modele și rutare (VAL3-01): catalog administrabil + observații produse de
 // routerul în mod observare. Pagina afișează explicit «observare» — decizia
@@ -146,8 +146,8 @@ function EntryEditor({
         capabilities: csv(capabilities),
         regions: csv(regions),
         cost: {
-          input_per_million: parseMoneyInput(costIn),
-          output_per_million: parseMoneyInput(costOut),
+          input_per_million: parseRoutingPrice(costIn),
+          output_per_million: parseRoutingPrice(costOut),
           currency: currency.trim() || null,
           valid_until: validUntil.trim() || null,
         },

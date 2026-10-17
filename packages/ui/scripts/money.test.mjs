@@ -1,3 +1,4 @@
+// Stefan monetary rule v2.0 supersedes contradictory F3 presentation assertions only.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { formatMoney, money } from "../src/lib/money-format.ts";
@@ -21,8 +22,9 @@ test("precision, rounding, invalid data", () => {
   assert.equal(formatMoney(0, "RON", 0), "0 lei");
   // F3/D07: sub-cent and over-precision values are never silently rounded —
   // formatMoney refuses, money() renders the original marked invalid.
-  for (const amount of [1e-7, "-999.995", "1.005"]) assert.throws(() => formatMoney(amount, "USD", 2), /mai mult de 2 zecimale/);
-  assert.equal(money("-999.995", "USD", 2), "-999.995 — Sumă cu mai mult de 2 zecimale");
+  assert.throws(() => formatMoney(1e-7, "USD", 2), /precizie/);
+  assert.equal(formatMoney("1.005", "USD", 2), "≈ 1,01 USD — Valoare exactă: 1,005 USD");
+  assert.equal(money("-999.995", "USD", 2), "≈ -1.000,00 USD — Valoare exactă: -999,995 USD");
   for (const currency of [null, "", "eur"]) assert.throws(() => formatMoney(6000, currency, 2));
   for (const amount of [NaN, Infinity, "6.000,00", null]) assert.throws(() => formatMoney(amount, "EUR", 2));
   assert.throws(() => formatMoney(6000, "RON", 1));
@@ -39,7 +41,7 @@ test("Romanian input/save/reload preserves major units, currency and editable pr
   }
   assert.equal(parseMoneyInput(moneyInputValue("12345678901234567890.12")), "12345678901234567890.12");
   assert.throws(() => parseMoneyInput(moneyInputValue("12345678901234567890.123456789")), /2 zecimale/);
-  assert.equal(parseMoneyNumber("6.000,25"), 6000.25);
+  assert.throws(() => parseMoneyNumber("6.000,25"), /API cu șir zecimal/);
   assert.throws(() => parseMoneyNumber("12.345.678.901.234.567.890,12"));
   assert.equal(parseMoneyInput(""), null);
 });

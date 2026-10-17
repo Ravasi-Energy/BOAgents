@@ -29,8 +29,7 @@ function useServerMoney() {
 export function Money({ amount, currency }: { amount: unknown; currency: unknown }) {
   const {row,error}=useServerMoney();const raw=typeof amount==="string"||typeof amount==="number"?String(amount):"necunoscută";
   if(!row)return <span role="status">{raw} — {error}</span>;
-  const rendered=money(amount,currency,row.value);const rounded=!rendered.includes(" — ")&&row.value===0&&/^-?\d+\.\d*[1-9]\d*$/.test(raw);
-  return <span title={rounded?`Valoare exactă: ${raw} ${String(currency)}`:undefined}>{rounded?"≈ ":""}{rendered}</span>;
+  return <span>{money(amount,currency,row.value)}</span>;
 }
 export function UnconfiguredMoney({amount}:{amount:number|string}) {return <Money amount={amount} currency={null}/>;}
 export function MoneySettings() {

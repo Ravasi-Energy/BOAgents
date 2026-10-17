@@ -576,6 +576,7 @@ export interface BoMandate {
   allowed_resources: string[];
   allowed_actions: string[];
   budget_limit: string;
+  budget_currency: string | null;
   concurrency_limit: number;
   max_steps: number;
   max_depth: number;
@@ -614,6 +615,7 @@ export interface BoExecRun {
   steps: { action: string; resource: string; payload?: Record<string, unknown> }[];
   current_step: number;
   budget_reserved: string;
+  budget_currency: string | null;
   concurrency_slots: number;
   policy_version: number;
   correlation_id: string;
@@ -695,6 +697,7 @@ export function createBoMandate(payload: {
   allowed_resources: string[];
   allowed_actions: string[];
   budget_limit: string;
+  budget_currency: string | null;
   concurrency_limit: number;
   max_steps: number;
   max_depth: number;
@@ -726,6 +729,7 @@ export function submitBoRun(payload: {
   mandate_id: string;
   steps: Record<string, unknown>[];
   budget_amount: string;
+  budget_currency: string | null;
   correlation_id?: string;
   parent_run_id?: string;
 }): Promise<{ run: BoExecRun }> {

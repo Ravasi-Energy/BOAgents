@@ -73,9 +73,10 @@ def test_money_boundary_rejects_float_and_invented_currency(full_app):  # noqa: 
     assert r.status_code in (400,409,422),r.text  # mismatch cu mandatul USD
 
 
-def test_dimensionless_budget_refused_under_denominated_cap(full_app):  # noqa: F811
-    """v2 §2: fără monedă nu se compară cu un cap denominat — refuz clar,
-    nu comparație mută."""
+def test_mandate_without_currency_refused_at_boundary(full_app):  # noqa: F811
+    """v2/AC5: bugetul monetar cere monedă la crearea mandatului — NULL
+    nu se reclasifică adimensional; rândurile legacy NULL nu produc
+    execuție monetară (probat la nivel store în test_bo_execution)."""
     client,headers,*_=full_app
     h=headers('admin')
     settings=client.get('/bo/settings',headers=h).json()['settings']
@@ -84,11 +85,6 @@ def test_dimensionless_budget_refused_under_denominated_cap(full_app):  # noqa: 
         r=client.put('/bo/settings/'+key,headers=h,
             json={'expected_version':s['version'],'value':value})
         assert r.status_code==200,r.text
-    ok=client.post('/bo/execution/mandates',headers=h,
-        json=_mandate_body(budget_limit='100'))  # fără monedă: admis (adimensional)
-    assert ok.status_code==201,ok.text
-    mid=ok.json()['mandate']['mandate_id']
-    steps=[{'action':'increment','resource':'synth.counter','payload':{'amount':1}}]
-    r=client.post('/bo/execution/runs',headers=h,
-        json={'mandate_id':mid,'steps':steps,'budget_amount':'5'})
-    assert r.status_code in (400,409,422),r.text
+    r=client.post('/bo/execution/mandates',headers=h,
+        json=_mandate_body(budget_limit='100'))  # fără monedă → refuz 422
+    assert r.status_code==422,r.text

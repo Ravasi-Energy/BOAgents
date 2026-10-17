@@ -1,0 +1,3 @@
+import test from 'node:test';import assert from 'node:assert/strict';import{usageCost}from'../src/lib/usage-money.ts';
+test('v2 actual usage UI adapter consumes exact cost contract and ignores conflicting float mirror',()=>{assert.deepEqual(usageCost({cost:{amount:'0.300000',currency:'USD'},cost_usd:999}),{amount:'0.300000',currency:'USD'});assert.deepEqual(usageCost({cost:{amount:'6000.00',currency:'EUR'},cost_usd:60}),{amount:'6000.00',currency:'EUR'});});
+test('v2 usage legacy-only/missing/malformed/float currency is explicit error, never zero or USD assumption',()=>{for(const v of[null,{cost_usd:6000},{cost:{amount:6000,currency:'USD'}},{cost:{amount:'6000',currency:null}},{cost:{amount:'6000',currency:'ZZZ'}}])assert.throws(()=>usageCost(v));});

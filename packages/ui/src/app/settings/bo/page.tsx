@@ -298,6 +298,11 @@ export default function BoSettingsPage() {
   return (
     <div className="bo-scope" style={{ marginTop: 20 }}>
       <MoneySettings />
+      <p className="bo-hint" style={{ marginTop: 8, marginBottom: 16 }}>
+        Disponibile în această versiune: {data.settings.length} setări pentru
+        organizația curentă. Opțiunile din catalogul planificat care nu apar
+        aici nu sunt disponibile în această versiune.
+      </p>
       <div className="bo-row" style={{ marginBottom: 16 }}>
         <Pill kind="info" icon="shield-check">
           tenant: {data.tenant}

@@ -618,7 +618,7 @@ export default function BoPackagesPage() {
           </InlineAlert>
         </div>
       ) : null}
-      {activation ? <div className="bo-card"><p>Pachet: {activation.package_state}; definiție: {activation.definition_state}. Import: <span className="bo-mono">{activation.import.id}</span>; digest: <span className="bo-mono">{activation.definition.source_artifact_set_digest}</span>.</p><Link className="bo-btn" href={`/bo/bots/${encodeURIComponent(activation.definition.id)}`}>Deschide definiția pentru verificare și publicare separată</Link></div> : null}
+      {activation ? <div className="bo-card"><p>Pachet: {activation.package_state}; definiție: {activation.definition_state}. Import: <span className="bo-mono">{activation.import.id}</span>; digest: <span className="bo-mono" style={{ overflowWrap: "anywhere" }}>{activation.definition.source_artifact_set_digest}</span>.</p><Link className="bo-btn" href={`/bo/bots/${encodeURIComponent(activation.definition.id)}`}>Deschide definiția pentru verificare și publicare separată</Link></div> : null}
       {body}
     </BoPage>
   );

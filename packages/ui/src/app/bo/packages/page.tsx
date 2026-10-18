@@ -1,9 +1,10 @@
 "use client";
 
 // Pachete semnate bo.package.v1 (VAL2-01): import → verificare → carantină.
-// Activarea pilotului sintetic este separată; aici stările ajung la DRAFT. Verdictul
+// Materializarea explicită BoBot creează draft; publicarea și pilotul sunt separate. Verdictul
 // verificatorului este afișat întotdeauna, inclusiv pentru importuri respinse.
-import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
+import { useCallback, useEffect, useState, useRef } from "react";
 
 import IconBO from "@/components/bo/IconBO";
 import {
@@ -15,6 +16,8 @@ import {
 } from "@/components/bo/ui";
 import {
   BoApiError,
+  activateBoPackage,
+  type BoPackageActivation,
   createBoPackageApproval,
   getBoSettings,
   importBoPackage,
@@ -77,6 +80,9 @@ export default function BoPackagesPage() {
   } | null>(null);
   const [sourceDir, setSourceDir] = useState("");
   const [busy, setBusy] = useState(false);
+  const [activation,setActivation]=useState<BoPackageActivation|null>(null);
+  const activating=useRef(false),activationEpoch=useRef(0);
+  useEffect(()=>()=>{++activationEpoch.current;},[]);
   const [approvalForm, setApprovalForm] = useState({
     package_id: "",
     from_version: "",
@@ -170,6 +176,19 @@ export default function BoPackagesPage() {
     } finally {
       setBusy(false);
     }
+  }
+
+  async function doActivate(id:string) {
+    if(activating.current||busy||state.kind!=="data"||!state.canWrite)return;
+    const source=state.imports.find(p=>p.id===id);
+    if(!source||source.status!=="DRAFT"||source.kind!=="bobot")return;
+    const epoch=activationEpoch.current;activating.current=true;setBusy(true);setNotice(null);setActivation(null);
+    try{const result=await activateBoPackage(id);
+      if(epoch!==activationEpoch.current)return;
+      if(result.import.id!==id||result.definition.source_import_id!==id||result.definition.source_artifact_set_digest!==result.import.artifact_set_digest||!result.definition.id||result.package_state!==result.import.status||result.definition_state!==result.definition.status)throw Error("Confirmarea materializării nu corespunde importului și digestului.");
+      setActivation(result);setNotice({kind:"ok",text:`Pachet ${result.package_state}; definiție ${result.definition_state}${result.idempotent?" (materializare existentă)":""}. Publicarea este separată; nicio execuție nu a pornit.`});await load();
+    }catch(err){if(epoch===activationEpoch.current)setNotice({kind:"danger",text:describeError(err,"Materializarea nu a fost confirmată. Importul nu a fost publicat automat.")});}
+    finally{activating.current=false;if(epoch===activationEpoch.current)setBusy(false);}
   }
 
   async function doCreateApproval() {
@@ -296,6 +315,7 @@ export default function BoPackagesPage() {
                         >
                           Verdict
                         </button>
+                        {p.status === "DRAFT" && p.kind === "bobot" && state.canWrite ? <button type="button" className="bo-btn" disabled={busy} onClick={()=>void doActivate(p.id)}>Materializează definiția BoBot</button> : null}
                         {p.status === "QUARANTINED" && state.canWrite ? (
                           <button
                             type="button"
@@ -598,6 +618,7 @@ export default function BoPackagesPage() {
           </InlineAlert>
         </div>
       ) : null}
+      {activation ? <div className="bo-card"><p>Pachet: {activation.package_state}; definiție: {activation.definition_state}. Import: <span className="bo-mono">{activation.import.id}</span>; digest: <span className="bo-mono">{activation.definition.source_artifact_set_digest}</span>.</p><Link className="bo-btn" href={`/bo/bots/${encodeURIComponent(activation.definition.id)}`}>Deschide definiția pentru verificare și publicare separată</Link></div> : null}
       {body}
     </BoPage>
   );

@@ -953,3 +953,7 @@ export function requeueBoAuditIntent(
 export function getBoExecStatus(): Promise<BoExecStatus> {
   return req("/execution/status");
 }
+
+// AC4: materialization revalidates the package; publication is a separate bot CAS action.
+export interface BoPackageActivation {import:BoPackageImport;definition:{id:string;status:string;source_import_id:string;source_artifact_set_digest:string};idempotent:boolean;package_state:string;definition_state:string}
+export function activateBoPackage(id:string):Promise<BoPackageActivation>{return req(`/packages/${encodeURIComponent(id)}/activate`,{method:'POST'});}

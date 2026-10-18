@@ -62,9 +62,9 @@ function SettingEditor({
     setNotice(null);
     let value: unknown = draft;
     if (setting.type === "integer") {
-      const n = Number(draft);
-      if (!Number.isInteger(n)) {
-        setNotice({ kind: "danger", text: "Introdu un număr întreg." });
+      const text=draft.trim(),n=Number(text);
+      if (!/^-?\d+$/.test(text) || !Number.isSafeInteger(n)) {
+        setNotice({ kind: "danger", text: "Introdu un număr întreg explicit și sigur. Câmpul gol nu înseamnă zero." });
         setSaving(false);
         return;
       }

@@ -261,3 +261,60 @@ def test_no_department_bypasses_gate() -> None:
         asyncio.run(_execute_action(action, gateway=None))
 
     mock_chat.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# notion_sync_scan heartbeat — a crashed sync must not read as success
+# ---------------------------------------------------------------------------
+
+
+def test_notion_sync_scan_crash_marks_action_failed() -> None:
+    """The heartbeat used to mark_done unconditionally — an integrity
+    refusal (or any crash) read as success in the action ledger. Now the
+    action lands `failed` with the error recorded, while the heartbeat
+    still re-chains the next scan."""
+    action = _make_action(kind="notion_sync_scan")
+
+    async def _boom(**_kw):
+        from openexecutive.knowledge.store import PersistedEmbeddingConfigError
+
+        raise PersistedEmbeddingConfigError("tampered volume")
+
+    with (
+        patch("openexecutive.knowledge.notion_sync.run_notion_sync", _boom),
+        patch(
+            "openexecutive.knowledge.notion_sync.enqueue_next_notion_sync_scan",
+            lambda **_kw: None,
+        ),
+    ):
+        asyncio.run(_execute_action(action, gateway=None))
+
+    with episodic._get_conn(episodic.DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT status, last_error FROM scheduled_actions WHERE id = ?",
+            (action.id,),
+        ).fetchone()
+    assert row["status"] == "failed"
+    assert "tampered" in row["last_error"]
+
+
+def test_notion_sync_scan_success_still_marks_done() -> None:
+    action = _make_action(kind="notion_sync_scan")
+
+    async def _ok(**_kw):
+        return {"synced": 0}
+
+    with (
+        patch("openexecutive.knowledge.notion_sync.run_notion_sync", _ok),
+        patch(
+            "openexecutive.knowledge.notion_sync.enqueue_next_notion_sync_scan",
+            lambda **_kw: None,
+        ),
+    ):
+        asyncio.run(_execute_action(action, gateway=None))
+
+    with episodic._get_conn(episodic.DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT status FROM scheduled_actions WHERE id = ?", (action.id,)
+        ).fetchone()
+    assert row["status"] == "done"

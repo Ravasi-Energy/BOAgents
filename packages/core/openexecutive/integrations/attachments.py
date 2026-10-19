@@ -155,9 +155,19 @@ def _schedule_ingest(data: bytes, filename: str) -> None:
     Uses the same strong-ref pattern as ``_thread_rename_tasks`` in
     discord_bot to prevent GC cancellation mid-flight.
     """
+    try:
+        from openexecutive.clients.slots import get_active_client
+        from openexecutive.config import get_settings
+
+        slug_at_enqueue = get_active_client(get_settings())
+    except Exception:
+        slug_at_enqueue = None
+
     async def _run() -> None:
         suffix = _suffix_from_filename(filename)
         try:
+            from openexecutive.cli.fixture_loader import _FIXTURE_OP_LOCK
+            from openexecutive.clients.slots import get_active_client, is_restore_blocked
             from openexecutive.config import get_settings
             from openexecutive.knowledge.loader import (
                 ATTACHMENT_DOMAIN,
@@ -166,59 +176,81 @@ def _schedule_ingest(data: bytes, filename: str) -> None:
             )
             from openexecutive.knowledge.store import ChromaDBStore
 
+            settings = get_settings()
             # The configured store, not the bare default. `ChromaDBStore()`
             # falls back to a RELATIVE "./chroma_db", resolved against the
             # process CWD — so with VECTOR_STORE_PATH set (every container
             # deployment) this wrote to a second database nothing reads,
             # off the data volume and gone with the container. It happened
             # to work in local dev only because CWD is the repo root there.
-            store = ChromaDBStore(persist_directory=get_settings().vector_store_path)
-            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-                tmp.write(data)
-                tmp_path = Path(tmp.name)
+            #
+            # Fence the ingest against a client switch: the task is
+            # fire-and-forget, so without `_FIXTURE_OP_LOCK` it can land
+            # inside the drop→recreate window and leave a chunk sent under
+            # client A in client B's attachment collection.
+            async with _FIXTURE_OP_LOCK:
+                if is_restore_blocked():
+                    logger.info(
+                        "attachments: skipping ChromaDB ingest for %s — restore-blocked",
+                        filename,
+                    )
+                    return
+                if get_active_client(settings) != slug_at_enqueue:
+                    logger.info(
+                        "attachments: skipping ChromaDB ingest for %s — active client switched",
+                        filename,
+                    )
+                    return
+                store = ChromaDBStore(persist_directory=settings.vector_store_path)
+                with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+                    tmp.write(data)
+                    tmp_path = Path(tmp.name)
 
-            try:
-                # `source_name` is the real attachment name: `tmp_path` is a
-                # random staging name, and indexing under it both duplicates
-                # on every re-send and leaves chunks no API call can delete.
-                #
-                # It is PREFIXED, and stripped to a bare name, because an
-                # attachment name is chosen by whoever sent the message and
-                # the name is the chunk-id namespace: unprefixed, an inbound
-                # "strategy-2026.md" would upsert over the curated company
-                # document of that name. The prefix separates inbound content
-                # from curated uploads, and makes provenance visible in the
-                # `[filename]` citation. It does NOT separate senders from
-                # each other — ids are md5 of the prefixed name alone, so two
-                # senders' "notes.md" still collide. Harmless while nothing
-                # reads this collection; it is the first thing to fix if
-                # anything ever does.
-                #
-                # Isolation is the COLLECTION. These rows go to
-                # ATTACHMENT_COLLECTION, which `retriever.retrieve` never
-                # queries, so an attachment cannot resurface as company
-                # knowledge in a later, unrelated turn.
-                #
-                # What this replaced, so nobody reinstates it: the rows used
-                # to land in COMPANY_COLLECTION under a non-specialist domain,
-                # which excluded them from nothing — an unfiltered retrieval
-                # has no `where` clause at all. See knowledge.general_catch_all
-                # in architecture-facts.yaml.
-                count = await ingest_file(
-                    tmp_path,
-                    store,
-                    domain=ATTACHMENT_DOMAIN,
-                    collection=ChromaDBStore.ATTACHMENT_COLLECTION,
-                    source_name=f"{ATTACHMENT_SOURCE_PREFIX}{Path(filename).name}",
-                    extra_metadata={"type": "attachment"},
-                )
-                logger.info(
-                    "attachments: indexed %d chunks from %s into ChromaDB",
-                    count,
-                    filename,
-                )
-            finally:
-                tmp_path.unlink(missing_ok=True)
+                try:
+                    # `source_name` is the real attachment name: `tmp_path`
+                    # is a random staging name, and indexing under it both
+                    # duplicates on every re-send and leaves chunks no API
+                    # call can delete.
+                    #
+                    # It is PREFIXED, and stripped to a bare name, because an
+                    # attachment name is chosen by whoever sent the message
+                    # and the name is the chunk-id namespace: unprefixed, an
+                    # inbound "strategy-2026.md" would upsert over the
+                    # curated company document of that name. The prefix
+                    # separates inbound content from curated uploads, and
+                    # makes provenance visible in the `[filename]` citation.
+                    # It does NOT separate senders from each other — ids are
+                    # md5 of the prefixed name alone, so two senders'
+                    # "notes.md" still collide. Harmless while nothing reads
+                    # this collection; it is the first thing to fix if
+                    # anything ever does.
+                    #
+                    # Isolation is the COLLECTION. These rows go to
+                    # ATTACHMENT_COLLECTION, which `retriever.retrieve`
+                    # never queries, so an attachment cannot resurface as
+                    # company knowledge in a later, unrelated turn.
+                    #
+                    # What this replaced, so nobody reinstates it: the rows
+                    # used to land in COMPANY_COLLECTION under a
+                    # non-specialist domain, which excluded them from
+                    # nothing — an unfiltered retrieval has no `where`
+                    # clause at all. See knowledge.general_catch_all in
+                    # architecture-facts.yaml.
+                    count = await ingest_file(
+                        tmp_path,
+                        store,
+                        domain=ATTACHMENT_DOMAIN,
+                        collection=ChromaDBStore.ATTACHMENT_COLLECTION,
+                        source_name=f"{ATTACHMENT_SOURCE_PREFIX}{Path(filename).name}",
+                        extra_metadata={"type": "attachment"},
+                    )
+                    logger.info(
+                        "attachments: indexed %d chunks from %s into ChromaDB",
+                        count,
+                        filename,
+                    )
+                finally:
+                    tmp_path.unlink(missing_ok=True)
         except Exception:
             logger.exception("attachments: background ingest failed for %s", filename)
 

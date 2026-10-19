@@ -182,3 +182,71 @@ def test_every_known_domain_is_accepted(client: TestClient, domain: str) -> None
 
     assert resp.status_code == 200, resp.text
     assert resp.json()["domain"] == domain
+
+
+# ── client-switch fencing ────────────────────────────────────────────────
+# Vector writes take _FIXTURE_OP_LOCK so they land fully before or after a
+# slot switch — never inside the drop→recreate window, where an upload's
+# chunks would survive into the incoming client's collection.
+
+
+def test_upload_refused_while_restore_blocked(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "openexecutive.clients.slots.is_restore_blocked", lambda: True
+    )
+    resp = _upload(client, domain="finance")
+
+    assert resp.status_code == 409
+    store: _CapturingStore = client.app.state.store  # type: ignore[attr-defined]
+    assert store.rows == {}, "a refused upload must not reach the store"
+
+
+def test_upload_refused_when_client_switched_mid_request(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An upload issued against client A must not land in client B's
+    collection when the switch commits while the request was queued."""
+    calls = iter(["acme_corp", "beta_inc"])
+    monkeypatch.setattr(
+        "openexecutive.clients.slots.get_active_client",
+        lambda _settings: next(calls),
+    )
+    resp = _upload(client, domain="finance")
+
+    assert resp.status_code == 409
+    store: _CapturingStore = client.app.state.store  # type: ignore[attr-defined]
+    assert store.rows == {}, "a mid-switch upload must not be re-attributed"
+
+
+def test_delete_refused_when_client_switched_mid_request(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A delete issued against A's file must not remove B's same-named doc."""
+    docs_dir = tmp_path / "company" / "docs"
+    docs_dir.mkdir(parents=True)
+    (docs_dir / "plan.md").write_text("# Plan")
+
+    calls = iter(["acme_corp", "beta_inc"])
+    monkeypatch.setattr(
+        "openexecutive.clients.slots.get_active_client",
+        lambda _settings: next(calls),
+    )
+    resp = client.delete("/documents/plan.md")
+
+    assert resp.status_code == 409
+    assert (docs_dir / "plan.md").exists(), "B's file must survive A's stale delete"
+
+
+def test_upload_same_client_passes_the_fence(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stable context (the normal case) — both reads agree."""
+    monkeypatch.setattr(
+        "openexecutive.clients.slots.get_active_client",
+        lambda _settings: "acme_corp",
+    )
+    resp = _upload(client, domain="finance")
+
+    assert resp.status_code == 200, resp.text

@@ -1470,9 +1470,14 @@ def _io_failing_store(
         def delete_documents(
             self, collection: str, where: dict[str, Any], *, strict: bool = False
         ) -> None:
-            if site == "research" and collection == _real.RESEARCH_COLLECTION or site == "skills" and collection == SKILLS_COLLECTION:
+            if site == "skills" and collection == SKILLS_COLLECTION:
                 _fail()
             return super().delete_documents(collection, where, strict=strict)
+
+        def delete_research_docs(self) -> None:
+            if site == "research":
+                _fail()
+            return super().delete_research_docs()
 
         def delete_notion_docs(self, *, strict: bool = False) -> None:
             if site == "notion":
@@ -1561,3 +1566,74 @@ def test_delete_documents_strict_flag_controls_propagation() -> None:
 
     with pytest.raises(PersistedEmbeddingConfigError):
         _Refusing().delete_documents("c", {"k": "v"})  # even non-strict
+
+
+async def test_incoming_client_cannot_read_outgoing_chroma_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """App-level analogue of the ChromaDB cross-tenant advisories: after slot
+    B activates, every per-client collection seeded under client A is provably
+    empty in the SHARED volume — A's rows are unreadable under B's identity.
+    The strict cleanups in ``_rebuild_vector_state`` are the boundary."""
+    env = _late_refusal_env(tmp_path, monkeypatch)  # real _rebuild_vector_state
+    _seed_live_company(env, "Acme Corp")
+    await create_client_slot(env.settings, display_name="Acme Corp", source="current")
+    await create_client_slot(env.settings, display_name="Beta Inc", source="blank")
+
+    import chromadb
+    from chromadb.config import Settings
+
+    from openexecutive.knowledge.skills_index import SKILLS_COLLECTION
+    from openexecutive.knowledge.store import ChromaDBStore
+
+    def _chroma() -> Any:
+        return chromadb.PersistentClient(
+            path=str(env.settings.vector_store_path),
+            settings=Settings(anonymized_telemetry=False),
+        )
+
+    # Seed marker rows per per-client collection — explicit embeddings, so
+    # no embedding function ever runs (no build, no download). Each
+    # collection gets TWO rows: one matching the cleanup contract and one
+    # OFF-CONTRACT row (missing/foreign metadata) — a where-delete keyed on
+    # the expected tag would silently spare the second kind.
+    seeds = {
+        ChromaDBStore.COMPANY_COLLECTION: {"kind": "doc"},
+        ChromaDBStore.RESEARCH_COLLECTION: {"type": "recent_research"},
+        ChromaDBStore.NOTION_COLLECTION: {"type": "notion"},
+        ChromaDBStore.ATTACHMENT_COLLECTION: {"type": "attachment"},
+        SKILLS_COLLECTION: {"source": "company"},
+    }
+    off_contract = {
+        ChromaDBStore.COMPANY_COLLECTION: {"legacy": True},
+        ChromaDBStore.RESEARCH_COLLECTION: {"purpose": "planted"},
+        ChromaDBStore.NOTION_COLLECTION: {"note": "planted"},
+        ChromaDBStore.ATTACHMENT_COLLECTION: {"planted": 1},
+        SKILLS_COLLECTION: {"no_source_field": 1},
+    }
+    client = _chroma()
+    for name, meta in seeds.items():
+        client.get_or_create_collection(name=name).upsert(
+            ids=["a-row", "a-offrow"],
+            documents=["client A secret marker", "client A off-contract row"],
+            metadatas=[meta, off_contract[name]],
+            embeddings=[[0.1] * 4, [0.2] * 4],
+        )
+    # A builtin skill row is shared library — it must SURVIVE the switch.
+    client.get_collection(SKILLS_COLLECTION).upsert(
+        ids=["builtin-skill"],
+        documents=["shared builtin skill"],
+        metadatas=[{"source": "builtin"}],
+        embeddings=[[0.3] * 4],
+    )
+
+    await activate_client_slot(env.settings, "beta_inc")
+    assert get_active_client(env.settings) == "beta_inc"
+
+    probe = _chroma()
+    for name in seeds:
+        rows = probe.get_collection(name).get(ids=["a-row", "a-offrow"])
+        assert rows["ids"] == [], f"{name}: A rows survived the switch"
+    assert probe.get_collection(SKILLS_COLLECTION).get(ids=["builtin-skill"])["ids"] == [
+        "builtin-skill"
+    ], "builtin library rows must not be wiped by a client switch"

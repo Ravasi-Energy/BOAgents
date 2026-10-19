@@ -679,13 +679,13 @@ class ExecutiveResearchWorkflow(Workflow):
             from datetime import UTC, datetime
 
             from openexecutive.knowledge.loader import ingest_text
-            from openexecutive.knowledge.store import ChromaDBStore
+            from openexecutive.knowledge.store import (
+                ChromaDBStore,
+                PersistedEmbeddingConfigError,
+            )
 
             now = datetime.now(UTC)
-            store.delete_documents(
-                ChromaDBStore.RESEARCH_COLLECTION,
-                where={"type": "recent_research"},
-            )
+            store.delete_research_docs()
             await ingest_text(
                 artifact,
                 store,
@@ -696,6 +696,10 @@ class ExecutiveResearchWorkflow(Workflow):
                     "created_at": now.isoformat(),
                 },
             )
+        except PersistedEmbeddingConfigError:
+            # Integrity refusal is not a persistence miss — the run must
+            # fail, not report success with the artifact never written.
+            raise
         except Exception:
             logger.exception("research: persist artifact to knowledge failed")
 

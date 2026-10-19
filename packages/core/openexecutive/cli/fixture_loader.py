@@ -522,14 +522,10 @@ async def _apply_state_from_source(
     store = ChromaDBStore(persist_directory=settings.vector_store_path)
     store.delete_company_docs()
     # Recent-research artifacts are per-company; never let a new company
-    # inherit the prior company's research. strict=True: a failed delete must
-    # abort the load — silently surviving rows are one company's data served
-    # under another's identity.
-    store.delete_documents(
-        collection=ChromaDBStore.RESEARCH_COLLECTION,
-        where={"type": "recent_research"},
-        strict=True,
-    )
+    # inherit the prior company's research. Drop+recreate always propagates —
+    # a failed delete must abort the load: silently surviving rows are one
+    # company's data served under another's identity.
+    store.delete_research_docs()
     store.delete_notion_docs(strict=True)
     store.delete_attachment_docs(strict=True)
     # Company-authored skills share the same per-company rule: the source
@@ -546,7 +542,7 @@ async def _apply_state_from_source(
 
     store.delete_documents(
         collection=SKILLS_COLLECTION,
-        where={"source": "company"},
+        where={"source": {"$ne": "builtin"}},
         strict=True,
     )
     for skill in list_skills():
@@ -875,11 +871,7 @@ async def reset_all_state(
 
             store = ChromaDBStore(persist_directory=settings.vector_store_path)
             store.delete_company_docs()
-            store.delete_documents(
-                collection=ChromaDBStore.RESEARCH_COLLECTION,
-                where={"type": "recent_research"},
-                strict=True,
-            )
+            store.delete_research_docs()
             store.delete_notion_docs(strict=True)
             store.delete_attachment_docs(strict=True)
             from openexecutive.knowledge.notion_sync import reset_local_state
@@ -896,7 +888,7 @@ async def reset_all_state(
                 shutil.rmtree(company_skills_dir)
             store.delete_documents(
                 collection=SKILLS_COLLECTION,
-                where={"source": "company"},
+                where={"source": {"$ne": "builtin"}},
                 strict=True,
             )
 

@@ -21,6 +21,11 @@ class _FakeChromaCollection:
     def __init__(self, metadatas: list[dict[str, Any]], documents: list[str] | None = None):
         self._metadatas = metadatas
         self._documents = documents or [f"chunk-text-{i}" for i in range(len(metadatas))]
+        # The routes validate the persisted schema before reading — a clean
+        # collection declares no embedding_function nodes.
+        from types import SimpleNamespace
+
+        self._model = SimpleNamespace(serialized_schema={})
 
     def get(self, **kwargs: Any) -> dict[str, Any]:
         where = kwargs.get("where")
@@ -175,3 +180,29 @@ def test_peek_caps_limit_to_safe_max(
     assert r.status_code == 200
     # Only 2 chunks exist in the fake store; limit is capped to 25 internally.
     assert len(r.json()["chunks"]) == 2
+
+
+def test_external_routes_propagate_integrity_refusal(
+    client: TestClient, fake_store, stub_manifest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tampered persisted schema must surface as an error, never as data.
+
+    Without the guard call, `col.get` would serve rows from a collection the
+    integrity guard refuses — laundering a tamper signal into an empty-looking
+    or normal response. The refusal propagates as a server error instead.
+    """
+    from openexecutive.knowledge import store as store_mod
+
+    def _refuse(_col: object) -> None:
+        raise store_mod.PersistedEmbeddingConfigError("tampered schema (synthetic)")
+
+    # The router imports the validator inside each function, so patch the
+    # source module — that is the name the calls resolve at runtime.
+    monkeypatch.setattr(store_mod, "validate_collection_schema", _refuse)
+
+    # The refusal is not swallowed into empty rows: it reaches the server
+    # layer (TestClient re-raises; in production this surfaces as HTTP 500).
+    with pytest.raises(store_mod.PersistedEmbeddingConfigError):
+        client.get("/knowledge/external")
+    with pytest.raises(store_mod.PersistedEmbeddingConfigError):
+        client.get("/knowledge/external/openstax-finance/peek")

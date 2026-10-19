@@ -252,14 +252,14 @@ def test_missing_serialized_schema_fails_closed(tmp_path):
     )
     col = client.get_collection("company_docs")
 
-    from openexecutive.knowledge.store import _validate_collection_schema
+    from openexecutive.knowledge.store import validate_collection_schema
 
     class _FakeCol:
         name = "company_docs"
         _model = None
 
     with pytest.raises(PersistedEmbeddingConfigError):
-        _validate_collection_schema(_FakeCol())
+        validate_collection_schema(_FakeCol())
     assert isinstance(col._model.serialized_schema, dict)
 
 
@@ -383,3 +383,110 @@ def test_legit_cleanup_and_absent_collection_unaffected(tmp_path):
     assert not _marker_present(db)
     store.delete_company_docs()  # drop+recreate on healthy schema still fine
     assert store.collection_exists("company_docs")
+
+
+def test_tamper_from_separate_process_refused(tmp_path):
+    """Another PROCESS writes schema_str while this store is live. The next
+    operation must still refuse — proves per-operation revalidation reads
+    the backend fresh rather than a cached collection model. (Sequential
+    proof: the remaining intra-call race is closed separately by validating
+    the exact object handed out — see test_get_or_create_validates_the_
+    returned_object.)"""
+    db = tmp_path / "db"
+    _make_db_with_collection(db)
+    store = ChromaDBStore(persist_directory=db)
+
+    payload = json.dumps(_HOSTILE_EF)
+    script = (
+        "import sqlite3, json\n"
+        f"con = sqlite3.connect({str(db / 'chroma.sqlite3')!r})\n"
+        "row = con.execute(\"SELECT schema_str FROM collections WHERE name='company_docs'\").fetchone()\n"
+        "sch = json.loads(row[0])\n"
+        "sch['keys']['#embedding']['float_list']['vector_index']['config']['embedding_function'] = "
+        f"json.loads({payload!r})\n"
+        "con.execute(\"UPDATE collections SET schema_str=? WHERE name='company_docs'\", (json.dumps(sch),))\n"
+        "con.commit()\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    with pytest.raises(PersistedEmbeddingConfigError):
+        store.add_documents(
+            texts=["x"], metadatas=[{}], ids=["i1"], collection="company_docs"
+        )
+
+
+def test_mixed_legit_and_hostile_nodes_same_collection_refused(tmp_path):
+    """Mixed schema: the dense node stays the legit default while a hostile
+    node hides under a sparse index — partial legitimacy must not pass."""
+    db = tmp_path / "db"
+    _make_db_with_collection(db)
+    _tamper_schema(db, "company_docs", _HOSTILE_SPARSE_EF, "sparse")
+
+    # Sanity: the dense node is still the legit default — only the sparse
+    # branch is hostile, so a node-iterator that stops at the first match
+    # would wrongly pass.
+    import chromadb
+    from chromadb.config import Settings
+
+    col = chromadb.PersistentClient(
+        path=str(db), settings=Settings(anonymized_telemetry=False)
+    ).get_collection("company_docs")
+    dense = col._model.serialized_schema["keys"]["#embedding"]["float_list"][
+        "vector_index"
+    ]["config"].get("embedding_function")
+    assert dense is None or dense.get("name") in ("default", "onnx_mini_lm_l6_v2")
+
+    with pytest.raises(PersistedEmbeddingConfigError):
+        ChromaDBStore(persist_directory=db)
+
+
+def test_get_or_create_validates_the_returned_object(tmp_path):
+    """The earlier shape validated ``get_collection``'s result but returned
+    ``get_or_create_collection``'s — a hostile collection materialising in
+    the missing-name gap (or a write between the two fetches) was handed
+    out unvalidated. The returned object itself must be validated."""
+    from chromadb.errors import NotFoundError
+
+    db = tmp_path / "db"
+    _make_db_with_collection(db)
+    _tamper_schema(db, "company_docs", _HOSTILE_EF, "dense")
+
+    import chromadb
+    from chromadb.config import Settings
+
+    store = ChromaDBStore.__new__(ChromaDBStore)  # skip init-time scan
+    store._client = chromadb.PersistentClient(
+        path=str(db), settings=Settings(anonymized_telemetry=False)
+    )
+
+    # Simulate the race: get_collection reports absent while a hostile
+    # collection already exists on disk — get_or_create then returns IT.
+    def _absent(name: str, *a, **kw):
+        raise NotFoundError(f"collection {name} does not exist")
+
+    store._client.get_collection = _absent
+    with pytest.raises(PersistedEmbeddingConfigError):
+        store._get_or_create_collection("company_docs")
+
+
+def test_existing_collection_is_the_object_returned(tmp_path):
+    """For a present collection the validated object IS the returned one —
+    a second fetch cannot smuggle a post-validation write into the caller."""
+    db = tmp_path / "db"
+    _make_db_with_collection(db)
+    store = ChromaDBStore(persist_directory=db)
+
+    calls = {"n": 0}
+    real_get_or_create = store._client.get_or_create_collection
+
+    def _counting(*a, **kw):
+        calls["n"] += 1
+        return real_get_or_create(*a, **kw)
+
+    store._client.get_or_create_collection = _counting
+    col = store._get_or_create_collection("company_docs")
+    assert col is not None
+    assert calls["n"] == 0, "existing collection must not trigger a second fetch"

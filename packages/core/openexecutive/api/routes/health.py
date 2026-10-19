@@ -13,20 +13,34 @@ router = APIRouter()
 async def health_check() -> HealthResponse:
     from openexecutive.config import get_settings
     from openexecutive.knowledge.skills_index import count_skills
-    from openexecutive.knowledge.store import ChromaDBStore
+    from openexecutive.knowledge.store import (
+        ChromaDBStore,
+        PersistedEmbeddingConfigError,
+    )
     from openexecutive.onboarding.profile_builder import load_or_create_profile
 
     settings = get_settings()
 
     builtin_skills_count = 0
     company_skills_count = 0
+    integrity_refused = False
+    store_unhealthy = False
     try:
         store = ChromaDBStore(persist_directory=settings.vector_store_path)
         chunk_count = store.get_collection_count(ChromaDBStore.BUILTIN_COLLECTION)
         builtin_skills_count = count_skills(store, source="builtin")
         company_skills_count = count_skills(store, source="company")
-    except Exception:
+    except PersistedEmbeddingConfigError:
+        # Tampered persisted schema is not "0 chunks" — the unauthenticated
+        # endpoint monitoring watches must still show the process is up
+        # while flagging the volume as suspect. Degraded, no detail.
         chunk_count = 0
+        integrity_refused = True
+    except Exception:
+        # A broken-but-not-tampered store (sqlite fault, unreadable volume)
+        # is degraded too — not "ok with 0 chunks".
+        chunk_count = 0
+        store_unhealthy = True
 
     profile = load_or_create_profile()
 
@@ -41,7 +55,7 @@ async def health_check() -> HealthResponse:
     return HealthResponse(
         # "degraded" (still HTTP 200 — the process IS up) so health-check
         # monitors can see the fence without being handed any identity.
-        status="degraded" if blocked else "ok",
+        status="degraded" if (blocked or integrity_refused or store_unhealthy) else "ok",
         builtin_knowledge_chunks=chunk_count,
         company_profile_loaded=not profile.is_empty(),
         company_name=(

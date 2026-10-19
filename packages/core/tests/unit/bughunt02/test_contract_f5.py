@@ -487,8 +487,8 @@ async def test_br4_public_load_fixture_snapshot_failure_and_rollback(
     assert not fixture_loader._fixture_active_sentinel(settings).exists()
     assert (parked_doc / "beta.md").exists()
 
-    # Failure leg: the apply crashes AFTER profile/docs swap (strict
-    # research wipe raises). The exception propagates, the sentinel is
+    # Failure leg: the apply crashes AFTER profile/docs swap (the notion
+    # wipe raises). The exception propagates, the sentinel is
     # never written, and the user's snapshot is NOT overwritten by the
     # fixture's state.
     def _boom(self: Any, **_kw: Any) -> None:

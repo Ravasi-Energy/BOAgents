@@ -87,6 +87,12 @@ async def execute_tool_calls(
         try:
             result = await handler(tool_input)
         except Exception as exc:
+            from openexecutive.knowledge.store import PersistedEmbeddingConfigError
+            if isinstance(exc, PersistedEmbeddingConfigError):
+                # A tampered knowledge volume is a process-level fence, not
+                # a tool failure — the run must fail, not complete with a
+                # normal artifact while the store stays refused.
+                raise
             logger.exception("synthesis: tool %s raised", name)
             summaries.append({
                 "tool": name,

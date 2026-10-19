@@ -65,6 +65,8 @@ async def upload_document(
         tmp_path = Path(tmp.name)
 
     try:
+        from openexecutive.cli.fixture_loader import _FIXTURE_OP_LOCK
+        from openexecutive.clients.slots import get_active_client, is_restore_blocked
         from openexecutive.config import get_settings
         from openexecutive.knowledge.loader import ingest_file
         from openexecutive.knowledge.store import ChromaDBStore
@@ -76,25 +78,45 @@ async def upload_document(
             else ChromaDBStore(persist_directory=settings.vector_store_path)
         )
 
-        # `source_name` — NOT tmp_path.name. The temp file is only a staging
-        # buffer so the PDF/DOCX extractors have a real path to open; the
-        # document's identity is the name the user uploaded it under. Deriving
-        # identity from the random temp name instead gives every re-upload
-        # fresh chunk ids (so the id-keyed upsert never collides and the
-        # collection grows without bound) and stores a `filename` that the
-        # DELETE endpoint below can never match.
-        chunks_indexed = await ingest_file(
-            path=tmp_path,
-            store=store,
-            domain=domain,
-            collection=ChromaDBStore.COMPANY_COLLECTION,
-            source_name=safe_filename,
-        )
+        # Fence the vector write against a client switch. `_FIXTURE_OP_LOCK`
+        # is held for the whole activation, so this write lands either fully
+        # before or fully after the wipe — never inside the drop→recreate
+        # window, where its chunks would survive into the next client's
+        # collection. A request that arrived under client A but can only run
+        # after the switch must be refused, not silently re-attributed to B.
+        slug_at_request = get_active_client(settings)
+        async with _FIXTURE_OP_LOCK:
+            if is_restore_blocked():
+                raise HTTPException(
+                    status_code=409,
+                    detail="Knowledge store is restore-blocked — repair before uploading",
+                )
+            if get_active_client(settings) != slug_at_request:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Active client switched while the upload was queued — re-upload",
+                )
 
-        company_docs_dir = settings.company_profile_path.parent / "docs"
-        company_docs_dir.mkdir(parents=True, exist_ok=True)
-        dest = company_docs_dir / safe_filename
-        dest.write_bytes(content)
+            # `source_name` — NOT tmp_path.name. The temp file is only a
+            # staging buffer so the PDF/DOCX extractors have a real path to
+            # open; the document's identity is the name the user uploaded it
+            # under. Deriving identity from the random temp name instead
+            # gives every re-upload fresh chunk ids (so the id-keyed upsert
+            # never collides and the collection grows without bound) and
+            # stores a `filename` that the DELETE endpoint below can never
+            # match.
+            chunks_indexed = await ingest_file(
+                path=tmp_path,
+                store=store,
+                domain=domain,
+                collection=ChromaDBStore.COMPANY_COLLECTION,
+                source_name=safe_filename,
+            )
+
+            company_docs_dir = settings.company_profile_path.parent / "docs"
+            company_docs_dir.mkdir(parents=True, exist_ok=True)
+            dest = company_docs_dir / safe_filename
+            dest.write_bytes(content)
 
         # Fire the proactive-alerts pipeline. Body is a best-effort excerpt
         # for triage context; PDFs/docx won't decode cleanly and that's fine —
@@ -198,9 +220,28 @@ async def delete_document(
         if request and hasattr(request.app.state, "store")
         else ChromaDBStore(persist_directory=settings.vector_store_path)
     )
-    store.delete_documents(
-        collection=ChromaDBStore.COMPANY_COLLECTION,
-        where={"filename": safe},
-    )
-    path.unlink()
+
+    # Same switch fence as the upload: without it a delete issued against
+    # client A can land after the wipe and remove a same-named document
+    # belonging to client B.
+    from openexecutive.cli.fixture_loader import _FIXTURE_OP_LOCK
+    from openexecutive.clients.slots import get_active_client, is_restore_blocked
+
+    slug_at_request = get_active_client(settings)
+    async with _FIXTURE_OP_LOCK:
+        if is_restore_blocked():
+            raise HTTPException(
+                status_code=409,
+                detail="Knowledge store is restore-blocked — repair before deleting",
+            )
+        if get_active_client(settings) != slug_at_request:
+            raise HTTPException(
+                status_code=409,
+                detail="Active client switched while the delete was queued — retry",
+            )
+        store.delete_documents(
+            collection=ChromaDBStore.COMPANY_COLLECTION,
+            where={"filename": safe},
+        )
+        path.unlink()
     return {"deleted": safe}

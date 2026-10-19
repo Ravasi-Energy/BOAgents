@@ -157,7 +157,7 @@ def _serialized_schema(collection: Any) -> dict[str, Any]:
     return schema
 
 
-def _validate_collection_schema(collection: Any) -> None:
+def validate_collection_schema(collection: Any) -> None:
     name = getattr(collection, "name", "?")
     for path, ef in _iter_ef_nodes(_serialized_schema(collection)):
         _validate_ef_node(name, path, ef)
@@ -207,26 +207,28 @@ class ChromaDBStore(KnowledgeStore):
         # embed/schema access against a tampered schema_str would. See
         # PersistedEmbeddingConfigError.
         for col in self._client.list_collections():
-            _validate_collection_schema(col)
+            validate_collection_schema(col)
 
     def _get_or_create_collection(self, name: str) -> Any:
-        # Re-validate before handing out a collection handle: the DB can be
-        # modified on disk after construction, and ``get_collection`` /
+        # Re-validate the handle actually handed out — the DB can be modified
+        # on disk after construction, and ``get_collection`` /
         # ``_model.serialized_schema`` are the probe-verified zero-build
-        # reads. Only a missing collection falls through; any other failure
-        # is re-raised rather than silently skipping validation.
+        # reads. Validating one object while returning another (the earlier
+        # get-then-get_or_create shape) left a window: a schema_str write
+        # committed between the two fetches, or a hostile collection created
+        # in the missing-name gap, would be used unvalidated. One fetch per
+        # branch, validation on the object returned either way.
         from chromadb.errors import NotFoundError
 
         try:
-            existing = self._client.get_collection(name)
+            col = self._client.get_collection(name)
         except NotFoundError:
-            existing = None
-        if existing is not None:
-            _validate_collection_schema(existing)
-        return self._client.get_or_create_collection(
-            name=name,
-            metadata={"hnsw:space": "cosine"},
-        )
+            col = self._client.get_or_create_collection(
+                name=name,
+                metadata={"hnsw:space": "cosine"},
+            )
+        validate_collection_schema(col)
+        return col
 
     def add_documents(
         self,
@@ -288,7 +290,7 @@ class ChromaDBStore(KnowledgeStore):
     def collection_exists(self, collection: str) -> bool:
         try:
             col = self._client.get_collection(collection)
-            _validate_collection_schema(col)
+            validate_collection_schema(col)
             return True
         except PersistedEmbeddingConfigError:
             raise
@@ -298,7 +300,7 @@ class ChromaDBStore(KnowledgeStore):
     def get_collection_count(self, collection: str) -> int:
         try:
             col = self._client.get_collection(collection)
-            _validate_collection_schema(col)
+            validate_collection_schema(col)
             return col.count()
         except PersistedEmbeddingConfigError:
             raise
@@ -446,7 +448,7 @@ class ChromaDBStore(KnowledgeStore):
         except NotFoundError:
             existing = None
         if existing is not None:
-            _validate_collection_schema(existing)
+            validate_collection_schema(existing)
             self._client.delete_collection(name)
         self._get_or_create_collection(name)
 
@@ -454,12 +456,30 @@ class ChromaDBStore(KnowledgeStore):
         """Delete and recreate the company_docs collection, clearing all indexed documents."""
         self._drop_and_recreate(self.COMPANY_COLLECTION)
 
+    def delete_research_docs(self) -> None:
+        """Drop and recreate the recent-research collection outright.
+
+        Every row in this collection is per-client by construction, so the
+        same boundary argument as :meth:`delete_attachment_docs` applies: a
+        ``where`` delete removes only rows carrying the expected metadata —
+        an out-of-band or off-contract row survives it. Only an empty
+        collection is airtight on a client switch.
+        """
+        self._drop_and_recreate(self.RESEARCH_COLLECTION)
+
     def delete_notion_docs(self, *, strict: bool = False) -> None:
-        """Drop synced Notion chunks from the isolated collection and any
-        leftover COMPANY rows tagged ``type=notion`` (pre-isolation ingest)."""
-        self.delete_documents(
-            collection=self.NOTION_COLLECTION, where={"type": "notion"}, strict=strict
-        )
+        """Drop synced Notion chunks — the whole isolated collection, not
+        just rows carrying ``type=notion`` — plus any leftover COMPANY rows
+        tagged ``type=notion`` (pre-isolation ingest, where the tag is still
+        the only marker).
+
+        ``strict`` governs only the COMPANY leftovers sweep — the
+        ``NOTION_COLLECTION`` drop itself propagates every failure
+        unconditionally (a failed drop must never read as "collection
+        empty"). Non-strict callers such as ``purge_all_synced`` therefore
+        get a louder contract than before: a transient chroma fault aborts
+        the purge mid-flight rather than reporting a clean sweep."""
+        self._drop_and_recreate(self.NOTION_COLLECTION)
         self.delete_documents(
             collection=self.COMPANY_COLLECTION, where={"type": "notion"}, strict=strict
         )
@@ -468,16 +488,19 @@ class ChromaDBStore(KnowledgeStore):
         """Drop every inbound attachment chunk, plus any pre-isolation
         leftovers still tagged ``type=attachment`` in COMPANY.
 
-        Drop-and-recreate rather than a ``where`` delete, unlike
-        :meth:`delete_notion_docs`: the callers are client-slot restore and
-        fixture reset, where one surviving row is one company's attachment
-        visible to the next. "Deleted every row carrying the tag" is not the
-        same guarantee as "the collection is empty", and here only the
-        second one is good enough.
+        Drop-and-recreate rather than a ``where`` delete — the same
+        airtight boundary as :meth:`delete_research_docs` and
+        :meth:`delete_notion_docs`: the callers are client-slot restore
+        and fixture reset, where one surviving row is one company's
+        attachment visible to the next. "Deleted every row carrying the
+        tag" is not the same guarantee as "the collection is empty", and
+        here only the second one is good enough.
 
-        The COMPANY sweep is belt-and-braces — every caller drops that
-        collection wholesale a line or two earlier — but it keeps this
-        method correct when called on its own.
+        As in :meth:`delete_notion_docs`, the collection drop propagates
+        unconditionally; ``strict`` governs only the COMPANY sweep —
+        belt-and-braces anyway, since every caller drops that collection
+        wholesale a line or two earlier, but it keeps this method correct
+        when called on its own.
         """
         self._drop_and_recreate(self.ATTACHMENT_COLLECTION)
         self.delete_documents(

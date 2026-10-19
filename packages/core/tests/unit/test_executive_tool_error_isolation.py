@@ -273,3 +273,84 @@ def test_raising_mcp_tool_becomes_error_result_and_turn_survives(
     assert len(failures) == 1
     assert failures[0]["details"]["kind"] == "mcp"
     assert failures[0]["details"]["tool"] == "gcal__list"
+
+
+# --------------------------------------------------------------------- #
+# Knowledge-store integrity refusal — a fence, not a tool failure
+# --------------------------------------------------------------------- #
+
+
+def test_persisted_schema_refusal_in_skill_handler_refuses_turn() -> None:
+    """PersistedEmbeddingConfigError must NOT become an error tool_result.
+
+    A tampered knowledge volume is a process-level fence: laundering the
+    refusal into `{"error": ...}` would let the turn complete successfully
+    while the store stays refused — the exact contract the skill-dispatch
+    leg re-raises to preserve.
+    """
+    from openexecutive.knowledge.store import PersistedEmbeddingConfigError
+
+    async def _tampered(_input: dict[str, Any]) -> str:
+        raise PersistedEmbeddingConfigError("schema refused")
+
+    provider = _ScriptedProvider(
+        [
+            _FinalMsg(
+                [_ToolUseBlock("tu-1", "lookup_person", {"query": "x"})],
+                stop_reason="tool_use",
+            ),
+            _FinalMsg([_TextBlock("unreachable")], stop_reason="end_turn"),
+        ]
+    )
+
+    with (
+        patch.dict(
+            "openexecutive.orchestrator.executive._ALL_SKILL_HANDLERS",
+            {"lookup_person": _tampered},
+        ),
+        pytest.raises(PersistedEmbeddingConfigError),
+    ):
+        _run_loop(provider)
+
+    # The loop died on the refusal — it never asked the provider to recover.
+    assert len(provider.calls) == 1
+
+
+class _TamperedGateway:
+    """MCPGateway stand-in whose call_tool hits a refused vector store."""
+
+    async def search_tools(self, _input: dict[str, Any]) -> str:
+        return json.dumps({"tools": []})
+
+    async def call_tool(self, _input: dict[str, Any]) -> str:
+        from openexecutive.knowledge.store import PersistedEmbeddingConfigError
+
+        raise PersistedEmbeddingConfigError("schema refused")
+
+    async def load_mcp_server(self, _input: dict[str, Any]) -> str:
+        return json.dumps({"ok": True})
+
+
+def test_persisted_schema_refusal_in_mcp_dispatch_refuses_turn() -> None:
+    """Same fence on the MCP dispatch leg — an MCP tool touching the
+    vector store on a tampered volume refuses the turn."""
+    from openexecutive.knowledge.store import PersistedEmbeddingConfigError
+
+    provider = _ScriptedProvider(
+        [
+            _FinalMsg(
+                [
+                    _ToolUseBlock(
+                        "tu-mcp", "call_tool", {"name": "gcal__list", "arguments": "{}"}
+                    )
+                ],
+                stop_reason="tool_use",
+            ),
+            _FinalMsg([_TextBlock("unreachable")], stop_reason="end_turn"),
+        ]
+    )
+
+    with pytest.raises(PersistedEmbeddingConfigError):
+        _run_loop(provider, Executive(mcp_gateway=_TamperedGateway()))  # type: ignore[arg-type]
+
+    assert len(provider.calls) == 1

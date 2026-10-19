@@ -1689,6 +1689,15 @@ class Executive:
                             # api/routes/chat.py silently stop working.
                             if isinstance(raw, asyncio.CancelledError):
                                 raise raw
+                            from openexecutive.knowledge.store import (
+                                PersistedEmbeddingConfigError,
+                            )
+                            if isinstance(raw, PersistedEmbeddingConfigError):
+                                # A tampered knowledge volume is a process-level
+                                # fence, not a tool failure — laundering it into
+                                # an error tool_result would let the turn report
+                                # success while the store stays refused.
+                                raise raw
                             logger.exception(
                                 "skill:%s raised — session=%s turn=%s iteration=%d",
                                 tu["name"], session_id, turn_id, iteration,
@@ -1803,6 +1812,15 @@ class Executive:
                         tool_label = tu["input"].get("name", tu["name"]) if tu["name"] == "call_tool" else tu["name"]
                         if isinstance(raw, BaseException):
                             if isinstance(raw, asyncio.CancelledError):
+                                raise raw
+                            from openexecutive.knowledge.store import (
+                                PersistedEmbeddingConfigError,
+                            )
+                            if isinstance(raw, PersistedEmbeddingConfigError):
+                                # Same fence as the skill-dispatch leg —
+                                # an MCP tool touching the vector store on a
+                                # tampered volume must refuse the turn, not
+                                # degrade to an error tool_result.
                                 raise raw
                             logger.exception(
                                 "mcp:%s raised — session=%s turn=%s iteration=%d",

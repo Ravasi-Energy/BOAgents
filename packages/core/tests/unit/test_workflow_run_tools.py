@@ -505,3 +505,37 @@ def test_an_undelivered_resumable_gate_says_both_things(
     hint = out["presentation_hint"]
     assert "could not be delivered" in hint
     assert "picks up where it left off" in hint
+
+
+@pytest.mark.asyncio
+async def test_research_run_marked_failed_when_store_construction_refuses():
+    """A PersistedEmbeddingConfigError during ChromaDBStore construction
+    (which revalidates every persisted schema) must reach fail_run — the
+    `running` row created a few lines earlier must not be orphaned."""
+    from openexecutive.knowledge.store import PersistedEmbeddingConfigError
+    from openexecutive.orchestrator import research_tools
+
+    events: list[tuple[str, str]] = []
+
+    def _create(run_id, kind, title, inputs):
+        events.append(("create", run_id))
+
+    def _fail(run_id, error):
+        events.append(("fail", run_id))
+
+    def _boom(*a, **kw):
+        raise PersistedEmbeddingConfigError("tampered schema")
+
+    with (
+        patch("openexecutive.workflows.persistence.create_run", _create),
+        patch("openexecutive.workflows.persistence.fail_run", _fail),
+        patch("openexecutive.knowledge.store.ChromaDBStore", _boom),
+        patch.object(research_tools, "_audit", lambda *a, **k: None),
+    ):
+        result = await research_tools.handle_run_executive_research({"note": "scan"})
+
+    assert events and events[0][0] == "create"
+    assert ("fail", events[0][1]) in events, (
+        f"run must be marked failed, got {events}"
+    )
+    assert "error" in json.loads(result)

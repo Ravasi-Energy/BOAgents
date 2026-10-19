@@ -38,6 +38,9 @@ class FakeStore:
             if not all(r["metadata"].get(k) == v for k, v in where.items())
         ]
 
+    def delete_research_docs(self) -> None:
+        self.collections[ChromaDBStore.RESEARCH_COLLECTION] = []
+
     def query(self, query_text, collection, domain_filter=None, n_results=5):
         col = self.collections.get(collection, [])
         return [
@@ -74,8 +77,10 @@ async def test_ingest_text_empty_is_noop() -> None:
 
 @pytest.mark.asyncio
 async def test_keep_latest_replace_pattern() -> None:
-    """Mirror the workflow's keep-latest: clear by type, then ingest the
-    new artifact — only the latest survives."""
+    """Mirror the workflow's keep-latest: drop the whole research
+    collection, then ingest the new artifact — only the latest survives.
+    The real store's ``delete_research_docs`` is drop+recreate; the fake
+    mirrors the observable contract (collection empty afterwards)."""
     store = FakeStore()
     await ingest_text(
         "First run findings.",
@@ -84,9 +89,7 @@ async def test_keep_latest_replace_pattern() -> None:
         collection=ChromaDBStore.RESEARCH_COLLECTION,
         extra_metadata={"type": "recent_research"},
     )
-    store.delete_documents(
-        ChromaDBStore.RESEARCH_COLLECTION, where={"type": "recent_research"}
-    )
+    store.delete_research_docs()
     await ingest_text(
         "Second run findings, totally different.",
         store,

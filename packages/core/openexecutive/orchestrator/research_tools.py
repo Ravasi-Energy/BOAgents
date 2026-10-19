@@ -91,8 +91,12 @@ async def handle_run_executive_research(
     artifact = ""
     result_data: dict[str, Any] = {}
     last_error = ""
-    store = ChromaDBStore(persist_directory=get_settings().vector_store_path)
     try:
+        # Inside the try: constructing the store revalidates every persisted
+        # schema — a refusal here must still reach the fail_run below or the
+        # `running` row created above is orphaned (the resumer only handles
+        # `awaiting_human`).
+        store = ChromaDBStore(persist_directory=get_settings().vector_store_path)
         async for event in workflow.run(inputs=wf_inputs, store=store):
             event = ensure_workflow_event(event, site='research_tools.run_executive_research')
             if event.type == "result" and event.data:

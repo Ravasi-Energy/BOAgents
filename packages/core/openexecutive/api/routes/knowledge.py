@@ -271,7 +271,11 @@ def _cache_mtime(cache_dir: Path) -> float | None:
 async def list_external_sources(request: Request) -> ExternalSourcesResponse:
     """List every source declared in sources.yaml with live ingest stats."""
     from openexecutive.knowledge.external_sources import load_manifest
-    from openexecutive.knowledge.store import ChromaDBStore
+    from openexecutive.knowledge.store import (
+        ChromaDBStore,
+        PersistedEmbeddingConfigError,
+        validate_collection_schema,
+    )
 
     manifest = load_manifest()
     store = _get_store(request)
@@ -279,7 +283,14 @@ async def list_external_sources(request: Request) -> ExternalSourcesResponse:
     # Single bulk fetch is faster than per-source queries when there are 10+ sources.
     try:
         col = store._client.get_collection(ChromaDBStore.BUILTIN_COLLECTION)
+        # col.get() never builds an embedding function, so this read is safe
+        # from the deserialize vector itself — but returning rows from a
+        # collection the integrity guard would refuse would launder a tamper
+        # signal into ordinary data. Validate first, propagate the refusal.
+        validate_collection_schema(col)
         rows = col.get(include=["metadatas"])
+    except PersistedEmbeddingConfigError:
+        raise
     except Exception:
         rows = {"metadatas": []}
 
@@ -334,7 +345,11 @@ async def peek_external_source(
 ) -> ExternalPeekResponse:
     """Return the first N indexed chunks of a source so a human can spot-check them."""
     from openexecutive.knowledge.external_sources import load_manifest
-    from openexecutive.knowledge.store import ChromaDBStore
+    from openexecutive.knowledge.store import (
+        ChromaDBStore,
+        PersistedEmbeddingConfigError,
+        validate_collection_schema,
+    )
 
     _validate_source_id(source_id)
     if not any(src.id == source_id for src in load_manifest()):
@@ -344,11 +359,14 @@ async def peek_external_source(
     store = _get_store(request)
     try:
         col = store._client.get_collection(ChromaDBStore.BUILTIN_COLLECTION)
+        validate_collection_schema(col)
         rows = col.get(
             where={"source_id": source_id},
             limit=limit,
             include=["documents", "metadatas"],
         )
+    except PersistedEmbeddingConfigError:
+        raise
     except Exception:
         rows = {"documents": [], "metadatas": []}
 
@@ -683,6 +701,8 @@ async def search_knowledge(
     def _query_collection(
         collection: str, n: int, domains: list[str] | None = None
     ) -> list[dict[str, object]]:
+        from openexecutive.knowledge.store import PersistedEmbeddingConfigError
+
         try:
             return store.query(
                 query_text=body.query,
@@ -690,6 +710,10 @@ async def search_knowledge(
                 domain_filter=effective_domains if domains is None else domains,
                 n_results=n,
             )
+        except PersistedEmbeddingConfigError:
+            # A tampered persisted schema must surface, not read back as an
+            # innocent "no hits" panel.
+            raise
         except Exception:
             return []
 

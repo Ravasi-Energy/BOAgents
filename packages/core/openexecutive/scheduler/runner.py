@@ -663,15 +663,26 @@ async def _execute_action(
             enqueue_next_notion_sync_scan,
             run_notion_sync,
         )
+        sync_error: str | None = None
         try:
             stats = await run_notion_sync(now=now)
             logger.info("scheduler: notion_sync_scan %s", stats)
-        except Exception:
+        except Exception as exc:
+            sync_error = str(exc)[:200]
             logger.exception(
                 "scheduler: notion_sync_scan (action %d) crashed", action.id
             )
         try:
-            mark_action_done(action.id)
+            if sync_error is None:
+                mark_action_done(action.id)
+            else:
+                # A crashed sync — including a knowledge-store integrity
+                # refusal — must not read as success in the action ledger.
+                # max_attempts=0 marks it `failed` outright: the heartbeat
+                # re-chain below is already this action's retry mechanism,
+                # and a scheduler-level retry on top would multiply the
+                # heartbeat chain every failed cycle.
+                mark_action_failed_or_retry(action.id, sync_error, max_attempts=0)
         except Exception:
             logger.exception(
                 "scheduler: notion_sync_scan (action %d) — mark_done failed",

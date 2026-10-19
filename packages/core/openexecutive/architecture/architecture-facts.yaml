@@ -806,6 +806,22 @@ knowledge:
     attachments in front of the Executive under "From your company documents",
     and it is why isolation belongs in the collection, never in a domain
     value.
+  persisted_schema_guard: |
+    ChromaDB 1.5.9 instantiates the persisted `embedding_function` config
+    at schema-deserialize/embed time — a tampered `schema_str` row in
+    chroma.sqlite3 turns the next add/query into code loading (e.g.
+    `sentence_transformer` with `trust_remote_code`). ChromaDBStore
+    validates `col._model.serialized_schema` — a zero-build read — at
+    construction and again before every collection handout, refusing any
+    embedding_function node it never writes (whitelist: `default` /
+    `onnx_mini_lm_l6_v2` with empty config; `legacy` or `unknown` nodes only
+    when they carry no name/config payload). The refusal is `PersistedEmbeddingConfigError` and must
+    never be laundered into empty data: read helpers, delete paths and the
+    /knowledge/external diagnostics all re-raise it. Deployment contract:
+    embedded PersistentClient only — never `chromadb run` / HttpClient —
+    so the four upstream server-side advisories have no exposed endpoint;
+    the tampered-persisted-schema vector is what this guard covers. See
+    docs/knowledge-store-guard.md for the operator procedure.
 
 memory:
   episodic_db: ./episodic_memory.db

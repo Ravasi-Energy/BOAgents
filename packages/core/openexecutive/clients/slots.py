@@ -1011,19 +1011,18 @@ async def _rebuild_vector_state(
 
     if store is None:
         store = ChromaDBStore(persist_directory=settings.vector_store_path)
-    # strict=True on every cleanup below: a delete that fails silently would
+    # Every cleanup below either drops+recreates the collection (always
+    # propagates) or passes strict=True: a delete that fails silently would
     # leave the previous client's research/notion/attachment/skill rows
     # readable under the incoming identity. Any failure must abort the
     # transition — activate_client_slot's marker + recovery decide whether
     # the live state is still coherent; publishing the new client on top of
     # a partial cleanup is never acceptable.
     store.delete_company_docs()
-    # Per-company research artifacts never carry across companies.
-    store.delete_documents(
-        collection=ChromaDBStore.RESEARCH_COLLECTION,
-        where={"type": "recent_research"},
-        strict=True,
-    )
+    # Per-company research artifacts never carry across companies —
+    # drop+recreate, because a where-delete only removes rows carrying the
+    # expected metadata.
+    store.delete_research_docs()
     store.delete_notion_docs(strict=True)
     # Inbound attachments are per-company too, and no longer swept by
     # delete_company_docs above now that they live in their own collection.
@@ -1050,9 +1049,14 @@ async def _rebuild_vector_state(
         except Exception:
             logger.exception("client-slots: reindex company doc failed: %s", doc.name)
 
-    # Company-authored skills: drop the old client's rows, index the restored set.
+    # Company-authored skills: drop the old client's rows, index the restored
+    # set. The collection is shared with builtin skills, so the filter keeps
+    # source=builtin rows and removes EVERYTHING else — company rows, but also
+    # off-contract or source-less rows an out-of-band writer could plant.
     store.delete_documents(
-        collection=SKILLS_COLLECTION, where={"source": "company"}, strict=True
+        collection=SKILLS_COLLECTION,
+        where={"source": {"$ne": "builtin"}},
+        strict=True,
     )
     for skill in list_skills():
         if skill.source == "company":

@@ -25,11 +25,37 @@ vector-store volume is a privileged filesystem boundary.
 |---|---|---|
 | API boot (`api/main.py` lifespan) | API does not start | `PersistedEmbeddingConfigError` in logs; `/health` never answers |
 | Scheduled/overnight workflows (`scheduler/runner.py`, `clients/rotation.py`, `workflows/resumer.py`) | That job/run fails | run marked failed with the error as `last_error` |
-| Client-slot activation/restore (`clients/slots.py`) | Refused before any live mutation: the store is preflighted in `activate_client_slot` (and inside `_restore_slot_state`), so DB, profile/docs, MCP config and the `.active_client` sentinel all stay the previous client's. A A durable `.restore_blocked` transition marker is written *before* the first live mutation — a write failure aborts the switch with live state untouched, and a crash/restart mid-restore leaves the instance fenced. A refusal *after* preflight triggers automatic save-back-free recovery to the previous coherent state; if recovery also fails the instance enters restore-blocked (API 503, scheduler/resumer hold) until the recorded recovery succeeds. Overnight rotation additionally force-restores the original client (`_force_restore`) on activation failure. | activation error; live state provably coherent — previous state restored, or instance fenced off |
-| Attachment ingest (`integrations/attachments.py`) | That request fails | HTTP 500 on the upload |
+| Client-slot activation/restore (`clients/slots.py`) | Refused before any live mutation: the store is preflighted in `activate_client_slot` (and inside `_restore_slot_state`), so DB, profile/docs, MCP config and the `.active_client` sentinel all stay the previous client's. A durable `.restore_blocked` transition marker is written *before* the first live mutation — a write failure aborts the switch with live state untouched, and a crash/restart mid-restore leaves the instance fenced. A refusal *after* preflight triggers automatic save-back-free recovery to the previous coherent state; if recovery also fails the instance enters restore-blocked (API 503, scheduler/resumer hold) until the recorded recovery succeeds. Overnight rotation additionally force-restores the original client (`_force_restore`) on activation failure. | activation error; live state provably coherent — previous state restored, or instance fenced off |
+| Attachment ingest (`integrations/attachments.py`) | The background ingest logs the refusal; the already-answered request cannot retroactively fail — the volume stays refused for every later op | logged `attachments: background ingest failed` |
+| External-source diagnostics (`GET /knowledge/external`, `GET /knowledge/external/{id}/peek`) | That request fails | HTTP 500 — the refusal is re-raised, never laundered into empty/normal chunk data |
+| Knowledge search diagnostics (`POST /knowledge/search`) | That request fails | HTTP 500 — re-raised out of the per-collection tolerant loop |
+| `GET /health` (unauthenticated) | Status degrades | `status="degraded"`, chunk counts 0 — the fence is visible without handing detail to an unauthenticated caller. Any other store failure (broken-but-not-tampered volume) degrades too — never "ok with 0 chunks" |
+| Research artifact persist (`workflows/executive_research.py`) | The run fails | refusal re-raised — never "success" with the artifact unwritten |
+| Skill/MCP tool dispatch (`orchestrator/executive.py`), synthesis tools (`workflows/_synthesis.py`) | The turn/run fails | the refusal is re-raised before the generic per-tool `{"error": ...}` conversion — a refused volume must not read as a recoverable tool error |
+| Document upload/delete (`POST`/`DELETE /documents`), attachment ingest | The write is fenced | vector writes take `_FIXTURE_OP_LOCK` (serializes against the whole slot switch) and refuse 409/skip when restore-blocked or when the active client changed mid-request — a write issued under client A can never land in client B's collection |
+| `handle_run_executive_research` (`orchestrator/research_tools.py`) | The run row is marked failed | store construction moved inside the guarded block — no orphaned `running` row on refusal |
+| `notion_sync_scan` heartbeat (`scheduler/runner.py`) | The action is marked failed | refusal no longer reads as `done` in the action ledger (retry left to the heartbeat re-chain) |
 
 The error message names the collection and the schema path of the offending
 node — it never carries document contents or config payloads.
+
+## GHSA coverage (chromadb 1.5.9, delivery pin)
+
+| Alert | Advisory vector | Verdict on this deployment |
+|---|---|---|
+| GHSA-f4j7-r4q5-qw2c (critical, pre-auth code injection via `/api/v2/tenants/.../collections`) | Chroma **server** endpoint accepting a malicious model repo + `trust_remote_code` | Absent path: no Chroma server runs — every instantiation is the embedded `PersistentClient` (no `HttpClient`, no `chroma run`, no exposed port). The residual vector — a tampered persisted `schema_str` — is refused by this guard before any build. |
+| GHSA-36p7-vc44-83pf (critical, authenticated code injection via UPDATE_COLLECTION) | Same vector through an authenticated server call | Absent path — same verdict: no server endpoint exists; the persisted-schema path is guarded. |
+| GHSA-2wm9-hf6c-p5cr (high, any authenticated user reads/writes/deletes any tenant's collection) | Chroma server authorization gap across its own tenant/database/collection scoping | No Chroma tenants exist (embedded client, single default_tenant/default_database — grep-clean of `create_tenant`/`set_tenant`/`create_database`). The app-level tenant boundary is the client slot: probed — client A's rows in every per-client collection are deleted before B's identity is published (`test_incoming_client_cannot_read_outgoing_chroma_rows`). |
+| GHSA-xph7-9rjv-w5fr (high, SimpleRBACAuthorizationProvider not scoped to tenant/db/collection) | Same server-side RBAC flaw | Absent path, same verdict as above: no server, no RBAC provider in play; isolation is the slot cleanup contract, probed at chroma row level. |
+
+Residual risk: the guard covers *this application's* read/write paths into the
+volume. A hostile process that writes `chroma.sqlite3` directly while bypassing
+the app could still plant a schema another chroma consumer would build — the
+filesystem remains the privileged boundary (see deployment contract). Probes:
+`tests/unit/test_knowledge_store_ef_guard.py` (20 tests incl. cross-process
+tamper and mixed legit+hostile schema),
+`tests/unit/test_knowledge_external_routes.py::test_external_routes_propagate_integrity_refusal`,
+`tests/unit/test_client_slots.py::test_incoming_client_cannot_read_outgoing_chroma_rows`.
 
 ## Situation A — persisted configuration rejected
 

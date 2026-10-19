@@ -361,3 +361,50 @@ def test_attachment_ingest_uses_the_configured_vector_store():
 
     assert store_call is not None, "ChromaDBStore was never constructed"
     assert store_call.kwargs.get("persist_directory") == get_settings().vector_store_path
+
+
+# ── client-switch fencing on the fire-and-forget ingest ──────────────────
+# `_schedule_ingest` lands whenever the channel delivers — possibly inside a
+# client slot switch. The ingest takes `_FIXTURE_OP_LOCK` and must skip when
+# the store is restore-blocked or the active client changed since enqueue.
+
+
+def _drive_ingest(filename: str = "notes.md", data: bytes = b"# Notes\nx."):
+    """Schedule the ingest and let the background task finish."""
+    from openexecutive.integrations import attachments as att
+
+    async def _drive() -> None:
+        att._schedule_ingest(data, filename)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    asyncio.run(_drive())
+
+
+def test_ingest_skipped_when_client_switches_before_it_runs():
+    """A chunk sent under client A must not index into client B's
+    attachment collection when the switch commits before the task runs."""
+    mock_ingest = AsyncMock(return_value=3)
+    slugs = iter(["acme_corp", "beta_inc"])
+    with (
+        patch("openexecutive.knowledge.loader.ingest_file", mock_ingest),
+        patch(
+            "openexecutive.clients.slots.get_active_client",
+            lambda _settings: next(slugs),
+        ),
+    ):
+        _drive_ingest()
+
+    mock_ingest.assert_not_called()
+
+
+def test_ingest_skipped_while_restore_blocked():
+    """A fenced volume must not take attachment writes."""
+    mock_ingest = AsyncMock(return_value=3)
+    with (
+        patch("openexecutive.knowledge.loader.ingest_file", mock_ingest),
+        patch("openexecutive.clients.slots.is_restore_blocked", lambda: True),
+    ):
+        _drive_ingest()
+
+    mock_ingest.assert_not_called()

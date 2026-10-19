@@ -20,6 +20,7 @@ from openexecutive.bo.identity import Identity, require
 from openexecutive.bo.packages import store
 from openexecutive.bo.packages.canon import signed_payload
 from openexecutive.bo.packages.contract import (
+    MANIFEST_MAX_BYTES,
     MANIFEST_NAME,
     load_manifest,
     load_manifest_raw,
@@ -53,6 +54,49 @@ def _audit(tenant: str, actor: str, event_type: str, summary: str,
 
 def _setting(identity: Identity, key: str, db_path: Path | None) -> Any:
     return settings_store.get_effective_value(identity.tenant, key, db_path=db_path)
+
+
+def _manifest_limit_bytes(
+    identity: Identity, db_path: Path | None
+) -> tuple[int, str | None]:
+    """Effective manifest byte cap, from ``bo.packages.manifest_max_kb`` (KiB).
+
+    The setting can only *restrict* the 256 KiB protocol ceiling (spec 0002
+    AC8). Reads the stored row explicitly: a historical value outside the
+    current 16..256 interval is kept untouched (evidence), reported as
+    incompatible, and the effective ceiling applies — never a silent clamp
+    and never above the protocol cap.
+    """
+    stored, is_stored = settings_store.get_stored_value(
+        identity.tenant, "bo.packages.manifest_max_kb", db_path=db_path)
+    if not is_stored:
+        return MANIFEST_MAX_BYTES, None
+    try:
+        # `int()` accepta si bool/str/float — o valoare memorata printr-un
+        # scriitor care a ocolit contractul tipat se aplica restrictiv,
+        # dar se si raporteaza; Infinity/NaN trec de json.loads si ar fi
+        # crampat toata calea fara OverflowError aici
+        if isinstance(stored, bool) or not isinstance(stored, int):
+            kb = int(stored)
+            return min(kb, 256) * 1024, (
+                f"valoare memorata de tip {type(stored).__name__} "
+                f"({stored!r}), nu int — plafonul efectiv se aplica "
+                "restrictiv pana la corectarea autorizata")
+        kb = stored
+    except (TypeError, ValueError, OverflowError):
+        return MANIFEST_MAX_BYTES, (
+            f"valoare memorata invalida {stored!r} — plafonul efectiv "
+            "ramane 256 KiB pana la corectarea autorizata")
+    diag = None
+    if kb > 256:
+        diag = (f"valoare memorata {kb}KiB peste plafonul protocolului "
+                "256KiB — plafonul efectiv ramane 256 KiB pana la "
+                "corectarea autorizata")
+    elif kb < 16:
+        diag = (f"valoare memorata {kb}KiB sub intervalul administrat "
+                "16..256KiB — se aplica valoarea memorata (mai restrictiva) "
+                "si se raporteaza incompatibilitatea")
+    return min(kb, 256) * 1024, diag
 
 
 def _trust_registry(identity: Identity, db_path: Path | None) -> TrustRegistry:
@@ -128,11 +172,17 @@ def import_package(
         raise PackageReject("PACKAGES_DISABLED", "importul de pachete este oprit")
 
     source_dir = Path(source_dir)
+    manifest_lim, manifest_diag = _manifest_limit_bytes(identity, db_path)
+    if manifest_diag:
+        _audit(identity.tenant, identity.actor,
+               "bo_setting_manifest_limit_incompatible", manifest_diag,
+               {"setting": "bo.packages.manifest_max_kb"})
     # Manifest first: needed for the idempotency check before full verify.
     # An unparseable manifest yields a controlled REJECT verdict — no row is
     # persisted because the package cannot be identified.
     try:
-        manifest, _raw = load_manifest_raw(source_dir / MANIFEST_NAME)
+        manifest, _raw = load_manifest_raw(
+            source_dir / MANIFEST_NAME, limita_bytes=manifest_lim)
         manifest = validate_manifest(manifest)
     except PackageReject as e:
         v = Verdict(False, e.code, e.detail, tenant_ref=identity.tenant)
@@ -173,7 +223,8 @@ def import_package(
         operator_max_bytes=int(
             _setting(identity, "bo.packages.max_package_bytes", db_path)),
         operator_rollback_requires_approval=bool(_setting(
-            identity, "bo.packages.rollback_requires_approval", db_path)))
+            identity, "bo.packages.rollback_requires_approval", db_path)),
+        operator_manifest_max_bytes=manifest_lim)
 
     if not verdict.accepted:
         row_id = store.insert_import(
@@ -244,7 +295,13 @@ def promote_to_draft(identity: Identity, import_id: str,
         raise store.StateError(f"status {row['status']} nu permite promovarea")
 
     stored = Path(row["stored_path"] or "")
-    m = validate_manifest(load_manifest(stored / MANIFEST_NAME))
+    manifest_lim, manifest_diag = _manifest_limit_bytes(identity, db_path)
+    if manifest_diag:
+        _audit(identity.tenant, identity.actor,
+               "bo_setting_manifest_limit_incompatible", manifest_diag,
+               {"setting": "bo.packages.manifest_max_kb"})
+    m = validate_manifest(
+        load_manifest(stored / MANIFEST_NAME, limita_bytes=manifest_lim))
     if artifact_set_digest(m["artifactDigests"]) != row["artifact_set_digest"]:
         raise PackageReject("ARTIFACT_DRIFT", "manifestul stocat diferă")
     for rel, declared in m["artifactDigests"].items():
@@ -292,7 +349,13 @@ def activate_bobot(identity: Identity, import_id: str,
             f"status {row['status']} nu permite activarea — cere DRAFT")
 
     stored = Path(row["stored_path"] or "")
-    m = validate_manifest(load_manifest(stored / MANIFEST_NAME))
+    manifest_lim, manifest_diag = _manifest_limit_bytes(identity, db_path)
+    if manifest_diag:
+        _audit(identity.tenant, identity.actor,
+               "bo_setting_manifest_limit_incompatible", manifest_diag,
+               {"setting": "bo.packages.manifest_max_kb"})
+    m = validate_manifest(
+        load_manifest(stored / MANIFEST_NAME, limita_bytes=manifest_lim))
     if artifact_set_digest(m["artifactDigests"]) != row["artifact_set_digest"]:
         raise PackageReject("ARTIFACT_DRIFT", "manifestul stocat diferă")
 
@@ -305,6 +368,7 @@ def activate_bobot(identity: Identity, import_id: str,
         host_version=BO_PRODUCT_VERSION,
         operator_max_bytes=int(_setting(
             identity, "bo.packages.max_package_bytes", db_path)),
+        operator_manifest_max_bytes=manifest_lim,
         operator_rollback_requires_approval=bool(_setting(
             identity, "bo.packages.rollback_requires_approval", db_path)))
     if not verdict.accepted:

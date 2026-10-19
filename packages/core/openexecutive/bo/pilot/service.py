@@ -14,7 +14,13 @@ from openexecutive.bo.execution import engine, store
 from openexecutive.bo.identity import Identity, require
 from openexecutive.bo.packages import service as packages
 from openexecutive.bo.packages import store as package_store
-from openexecutive.bo.packages.verify import verify_package
+from openexecutive.bo.packages.contract import (
+    MANIFEST_NAME,
+    load_manifest,
+    validate_manifest,
+)
+from openexecutive.bo.packages.errors import PackageReject
+from openexecutive.bo.packages.verify import artifact_set_digest, verify_package
 from openexecutive.bo.settings import store as settings
 
 PACKAGE_ID = "pkg.synthetic-erp"
@@ -59,14 +65,41 @@ def verify_import(tenant, import_id, db_path=None):
     if row["status"] != "DRAFT" or row["package_id"] != PACKAGE_ID:
         raise package_store.StateError("Pilotul cere pachetul sintetic verificat și promovat la DRAFT")
     identity = Identity("pilot-verifier", tenant, "admin", True, "shared_secret")
-    verdict = verify_package(Path(row["stored_path"]), packages._trust_registry(identity, db_path),
-                             tenant_ref=tenant, host_version=packages.BO_PRODUCT_VERSION)
+    manifest_lim, manifest_diag = packages._manifest_limit_bytes(identity, db_path)
+    if manifest_diag:
+        packages._audit(tenant, identity.actor,
+                        "bo_setting_manifest_limit_incompatible", manifest_diag,
+                        {"setting": "bo.packages.manifest_max_kb"})
+    stored = Path(row["stored_path"])
+    verdict = verify_package(stored, packages._trust_registry(identity, db_path),
+                             tenant_ref=tenant, host_version=packages.BO_PRODUCT_VERSION,
+                             operator_manifest_max_bytes=manifest_lim)
     if not verdict.accepted or verdict.manifest_digest != row["manifest_digest"]:
         raise package_store.StateError(f"Verificare curentă refuzată: {verdict.code}")
-    manifest = json.loads((Path(row["stored_path"]) / "manifest.json").read_text())
+    # Re-citirea manifestului trece prin același loader limitat ca importul:
+    # plafonul administrat, cheile duplicate și constantele interzise nu pot
+    # fi ocolite între verificare și folosire.
+    try:
+        manifest = validate_manifest(
+            load_manifest(stored / MANIFEST_NAME, limita_bytes=manifest_lim))
+    except PackageReject as e:
+        raise package_store.StateError(
+            f"Manifestul stocat refuzat la recitire: {e.code}: {e.detail}"
+        ) from None
+    # digesturile declarate folosite mai jos vin din manifestul recitit —
+    # ele trebuie să fie exact cele din importul stocat, nu orice fișier
+    # schimbat între verificare și recitire
+    if artifact_set_digest(manifest["artifactDigests"]) != row["artifact_set_digest"]:
+        raise package_store.StateError("Manifestul stocat diferă de importul declarat")
     if set(manifest["artifactDigests"]) != {"bots/diagnostic.json"} or manifest["requestedCapabilities"] != ["synth_erp:diagnose"]:
         raise package_store.StateError("Pachetul nu declară exact diagnosticul sintetic")
-    if json.loads((Path(row["stored_path"]) / "bots/diagnostic.json").read_text()) != CONTENT:
+    # Artefactul se compară cu digestul declarat înainte de a-l citi: un fișier
+    # schimbat după verificare nu ajunge la parse.
+    raw_bot = (stored / "bots/diagnostic.json").read_bytes()
+    declared = manifest["artifactDigests"]["bots/diagnostic.json"]
+    if f"sha256:{hashlib.sha256(raw_bot).hexdigest()}" != declared:
+        raise package_store.StateError("Artefactul diagnostic s-a modificat după verificare")
+    if json.loads(raw_bot) != CONTENT:
         raise package_store.StateError("Gramatică diagnostic incompatibilă; scripturile nu se execută")
     return row
 

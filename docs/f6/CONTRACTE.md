@@ -66,7 +66,7 @@ Chei necunoscute → 422; valori invalide → 422; conflict versiune → 409.
 | Metodă | Rută | Rol | Corp / efect |
 |---|---|---|---|
 | GET | `/bo/packages` | viewer | listă importuri tenant |
-| POST | `/bo/packages/import` | admin | `{source_dir≤1024}` — verificare `bo.package.v1` completă (§4) apoi copie în carantină; răspunsul are întotdeauna `verdict`; respingerile se persistă ca `REJECTED` |
+| POST | `/bo/packages/import` | admin | `{source_dir≤1024}` — verificare `bo.package.v1` completă (§4) apoi copie în carantină; răspunsul are întotdeauna `verdict`; respingerile se persistă ca `REJECTED`. Manifestul se verifică pe octeți cruzi cu capul administrat `bo.packages.manifest_max_kb` (16..256 KiB, doar restrânge — AC8) **înainte** de parse/semnătură; valoare istorică peste cap → diagnostic explicit, nu cap silențios |
 | GET | `/bo/packages/{import_id}` | viewer | import + verdict |
 | POST | `/bo/packages/{import_id}/promote` | admin | QUARANTINED→DRAFT după re-verificarea copiei stocate (drift) |
 | POST | `/bo/packages/{import_id}/activate` | admin | DRAFT + `kind=bobot` → re-verificare completă (semnătură/trust/revocare/digest/compatibilitate/capabilități) + materializare `bobot.json` (`bo.bobot.v1`) în definiție draft legată de `(import_id, artifactSetDigest)`; idempotent pe același digest; stările pachet/definiție distincte în răspuns; publicarea rămâne acțiune CAS separată; zero efecte/cod arbitrar |
@@ -139,6 +139,12 @@ administrat; schema închisă respinge chei necunoscute și câmpuri PII.
 
 ## Contracte lipsă / întrebări de domeniu (la coordonator)
 
+- **F6-BO-AC8 — cap administrat pe manifest**: **REZOLVAT (AC8, spec 0002)** —
+  `bo.packages.manifest_max_kb` (plajă 16..256 KiB, implicit 256) îngustează
+  limita contractuală 256 KiB fără s-o depășească niciodată; resolver comun în
+  `bo/packages/service.py`, aplicat pe octeții cruzi în `contract.load_manifest`
+  /`verify_manifest`/`verify_import`/promote/activate/pilot; valorile istorice
+  peste cap sau non-int/NaN/Infinity produc diagnostic explicit fail-closed.
 - **F6-BO-G3 — activarea pachetului `kind=bobot`**: **REZOLVAT (AC4, spec
   0002)** — `POST /bo/packages/{import_id}/activate` materializează
   `bobot.json` (`bo.bobot.v1`) într-o definiție draft legată de

@@ -474,6 +474,25 @@ REGISTRY: dict[str, SettingSpec] = {
         validate=lambda v: _validate_int(
             v, minimum=65536, maximum=268435456, label="Dimensiunea maximă"),
     ),
+    "bo.packages.manifest_max_kb": SettingSpec(
+        key="bo.packages.manifest_max_kb",
+        type="integer",
+        default=256,
+        apply_mode="IMMEDIATE",
+        scope="tenant",
+        page="setari",
+        tab="general",
+        label_ro="Dimensiune maximă manifest (KiB)",
+        label_en="Max manifest size (KiB)",
+        help_ro="Limită administrativă peste manifestul bo.package.v1; nu poate depăși plafonul protocolului de 256 KiB (spec 0002 AC8).",
+        owner_role="admin",
+        edit_role="admin",
+        sensitivity="normal",
+        effect_ro="Se aplică la următorul import/recitire; peste limita efectivă manifestul e respins MANIFEST_TOO_LARGE înainte de parse.",
+        acceptance_ro="Interval 16..256 KiB; o valoare peste 256 e refuzată la salvare.",
+        validate=lambda v: _validate_int(
+            v, minimum=16, maximum=256, label="Dimensiunea manifestului"),
+    ),
     "bo.packages.trust_store_json": SettingSpec(
         key="bo.packages.trust_store_json",
         type="text",

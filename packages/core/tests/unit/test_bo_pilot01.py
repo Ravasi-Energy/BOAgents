@@ -161,6 +161,26 @@ def test_two_tenants_isolated_and_wrong_service_credential_unknown(pilot, monkey
     assert pilot["call"]("/stats", token="synthetic-token-b")["effectCount"] == 0
 
 
+def test_verify_import_respecta_limita_manifest_administrata(pilot):
+    """AC8: pilotul recitește manifestul sub același plafon administrat ca
+    importul — o valoare istorică sub interval strânge și refuză, o valoare
+    administrată validă (dar sub 256 KiB) lasă pachetul să treacă."""
+    with settings.get_conn() as conn:
+        conn.execute(
+            "INSERT INTO bo_settings (tenant, key, value_json, version,"
+            " updated_by, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            ("tenant-a", "bo.packages.manifest_max_kb", json.dumps(0), 3,
+             "ops-vechi", "2026-01-01T00:00:00Z"))
+    with pytest.raises(package_store.StateError, match="MANIFEST_TOO_LARGE"):
+        service.verify_import("tenant-a", pilot["row"]["id"])
+    with pytest.raises(package_store.StateError):
+        service.guard("tenant-a")
+    # după corectarea autorizată la o valoare validă, pachetul trece din nou
+    pilot["setting"]("bo.packages.manifest_max_kb", 64)
+    row = service.verify_import("tenant-a", pilot["row"]["id"])
+    assert row["id"] == pilot["row"]["id"]
+
+
 @pytest.mark.parametrize("field", ["tenant", "effect_key", "digest", "receipt_ref"])
 def test_receipt_correlation_required(pilot, field):
     result = run(pilot)

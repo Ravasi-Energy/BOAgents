@@ -269,6 +269,7 @@ def verify_package(
     verdict_ttl: timedelta = VERDICT_TTL,
     operator_max_bytes: int | None = None,
     operator_rollback_requires_approval: bool | None = None,
+    operator_manifest_max_bytes: int | None = None,
 ) -> Verdict:
     """Contract §4 order — short-circuit at the first rejection."""
     now = now or datetime.now(UTC)
@@ -304,7 +305,8 @@ def verify_package(
     if mpath.is_symlink():
         return _reject("TRAVERSAL", "manifest.json is a symlink", checks, **base)
     try:
-        manifest, _raw = load_manifest_raw(mpath)
+        manifest, _raw = load_manifest_raw(
+            mpath, limita_bytes=operator_manifest_max_bytes)
         manifest = validate_manifest(manifest)
         m_digest = f"sha256:{hashlib.sha256(signed_payload(manifest)).hexdigest()}"
     except PackageReject as e:

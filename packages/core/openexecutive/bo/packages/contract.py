@@ -100,22 +100,33 @@ def _no_const(name: str) -> None:
     raise PackageReject("INVALID_MANIFEST", f"forbidden JSON constant: {name}")
 
 
-def load_manifest_raw(path: Path) -> tuple[dict[str, Any], bytes]:
+def load_manifest_raw(
+    path: Path, *, limita_bytes: int | None = None
+) -> tuple[dict[str, Any], bytes]:
     """Read + parse manifest.json with the size cap applied *before* parse and
     duplicate keys rejected. Returns (parsed object, raw bytes) — the raw
     bytes are kept for callers that need the on-disk form; `manifestDigest`
-    binds the canonical signed payload (BO-C14N-v1 minus `signature`)."""
+    binds the canonical signed payload (BO-C14N-v1 minus `signature`).
+
+    `limita_bytes` is the administered ceiling (AC8, spec 0002): it can only
+    *restrict* the 256 KiB protocol cap — the effective cap is
+    ``min(limita_bytes, MANIFEST_MAX_BYTES)``. A caller that omits it stays
+    under the protocol cap; none can exceed it. The check runs on the raw
+    bytes BEFORE parse, schema or signature, and a refusal persists nothing.
+    """
+    cap = MANIFEST_MAX_BYTES if limita_bytes is None \
+        else min(limita_bytes, MANIFEST_MAX_BYTES)
     try:
         size = path.stat().st_size
     except OSError:
         raise PackageReject("INVALID_MANIFEST", "manifest.json missing") from None
-    if size > MANIFEST_MAX_BYTES:
+    if size > cap:
         raise PackageReject("MANIFEST_TOO_LARGE", f"{size} bytes")
     try:
         raw = path.read_bytes()
     except OSError:
         raise PackageReject("INVALID_MANIFEST", "manifest.json unreadable") from None
-    if len(raw) > MANIFEST_MAX_BYTES:
+    if len(raw) > cap:
         raise PackageReject("MANIFEST_TOO_LARGE", f"{len(raw)} bytes read")
     try:
         doc: Any = json.loads(
@@ -129,9 +140,11 @@ def load_manifest_raw(path: Path) -> tuple[dict[str, Any], bytes]:
     return doc, raw
 
 
-def load_manifest(path: Path) -> dict[str, Any]:
+def load_manifest(
+    path: Path, *, limita_bytes: int | None = None
+) -> dict[str, Any]:
     """Parsed manifest object (not yet validated). See `load_manifest_raw`."""
-    return load_manifest_raw(path)[0]
+    return load_manifest_raw(path, limita_bytes=limita_bytes)[0]
 
 
 def validate_manifest(manifest: dict[str, Any]) -> dict[str, Any]:

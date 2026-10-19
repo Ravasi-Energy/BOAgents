@@ -1152,3 +1152,237 @@ class TestActivateBoBot:
         assert bots_store.find_definition_by_source(
             "tenant-b", imp["id"], db_path=db_path) is None
 
+
+
+# ── AC8 (spec 0002): limita administrativă a manifestului, 16..256 KiB ──────
+
+class TestManifestAdminLimit:
+    """`bo.packages.manifest_max_kb` restrânge plafonul protocolului pe toate
+    intrările reale: import, verify intern, promote, activate."""
+
+    def _over_limit_manifest(self, dest: Path, kb: int) -> None:
+        write_pkg(dest)
+        mpath = dest / "manifest.json"
+        raw = mpath.read_bytes()
+        mpath.write_bytes(raw + b" " * (kb * 1024 - len(raw) + 1))
+
+    def test_import_refuza_manifest_peste_limita_administrata(
+            self, db_path: Path, qroot: Path, tmp_path: Path) -> None:
+        _enable(db_path)
+        settings_store.set_value(
+            "tenant-a", "bo.packages.manifest_max_kb", 64,
+            expected_version=0, actor="admin@test", db_path=db_path)
+        self._over_limit_manifest(tmp_path / "pkg", 64)
+        res = service.import_package(ADMIN, tmp_path / "pkg", db_path=db_path)
+        assert res["verdict"]["verdict"] == "REJECT"
+        assert res["verdict"]["reasons"][0].startswith("MANIFEST_TOO_LARGE")
+        # refuzul nu persistă nimic
+        assert store.list_imports("tenant-a", db_path=db_path) == []
+
+    def test_manifest_sub_limita_administrata_accepta(
+            self, db_path: Path, qroot: Path, tmp_path: Path) -> None:
+        _enable(db_path)
+        settings_store.set_value(
+            "tenant-a", "bo.packages.manifest_max_kb", 64,
+            expected_version=0, actor="admin@test", db_path=db_path)
+        write_pkg(tmp_path / "pkg")
+        assert (tmp_path / "pkg" / "manifest.json").stat().st_size < 64 * 1024
+        res = service.import_package(ADMIN, tmp_path / "pkg", db_path=db_path)
+        assert res["verdict"]["verdict"] == "ACCEPT"
+
+    def test_plafonul_protocolului_nu_se_depaseste(
+            self, db_path: Path, qroot: Path, tmp_path: Path) -> None:
+        """Fără suprascriere, plafonul efectiv rămâne 256 KiB — nimeni nu
+        îl poate ridica prin setare (maximul validatorului e 256)."""
+        _enable(db_path)
+        self._over_limit_manifest(tmp_path / "pkg", 256)
+        res = service.import_package(ADMIN, tmp_path / "pkg", db_path=db_path)
+        assert res["verdict"]["verdict"] == "REJECT"
+        assert res["verdict"]["reasons"][0].startswith("MANIFEST_TOO_LARGE")
+
+    def test_scriere_peste_256_refuzata_de_validator(self, db_path: Path) -> None:
+        from openexecutive.bo.settings.registry import SettingValidationError
+        with pytest.raises(SettingValidationError):
+            settings_store.set_value(
+                "tenant-a", "bo.packages.manifest_max_kb", 257,
+                expected_version=0, actor="admin@test", db_path=db_path)
+
+    def _injecteaza_istoric(self, db_path: Path, valoare: int) -> None:
+        with settings_store.get_conn(db_path) as conn:
+            conn.execute(
+                "INSERT INTO bo_settings (tenant, key, value_json, version,"
+                " updated_by, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                ("tenant-a", "bo.packages.manifest_max_kb",
+                 json.dumps(valoare), 3, "ops-vechi",
+                 "2026-01-01T00:00:00Z"))
+
+    def test_istoric_2048_diagnostic_fara_relaxare(
+            self, db_path: Path, qroot: Path, tmp_path: Path,
+            _audit: list[dict]) -> None:
+        """Valoarea istorică >256 nu se șterge și nu se rescrie pe tăcute:
+        rândul rămâne, plafonul efectiv e 256 KiB, iar incompatibilitatea
+        se raportează în audit până la corectarea autorizată."""
+        _enable(db_path)
+        self._injecteaza_istoric(db_path, 2048)
+        limita, diag = service._manifest_limit_bytes(ADMIN, db_path)
+        assert limita == 256 * 1024
+        assert diag and "2048" in diag
+
+        write_pkg(tmp_path / "pkg")
+        res = service.import_package(ADMIN, tmp_path / "pkg", db_path=db_path)
+        assert res["verdict"]["verdict"] == "ACCEPT"
+        assert any(e["event_type"] == "bo_setting_manifest_limit_incompatible"
+                   for e in _audit)
+        # dovada rămâne neatinsă
+        stocat, _ = settings_store.get_stored_value(
+            "tenant-a", "bo.packages.manifest_max_kb", db_path=db_path)
+        assert stocat == 2048
+
+    def test_istoric_2048_nu_ridica_plafonul(
+            self, db_path: Path, qroot: Path, tmp_path: Path) -> None:
+        """Chiar cu 2048 memorat, un manifest de 300 KiB tot cade — valorile
+        istorice nu relaxează protocolul."""
+        _enable(db_path)
+        self._injecteaza_istoric(db_path, 2048)
+        self._over_limit_manifest(tmp_path / "pkg", 300)
+        res = service.import_package(ADMIN, tmp_path / "pkg", db_path=db_path)
+        assert res["verdict"]["verdict"] == "REJECT"
+        assert res["verdict"]["reasons"][0].startswith("MANIFEST_TOO_LARGE")
+
+    def test_limita_administrata_pe_promote(
+            self, db_path: Path, qroot: Path, tmp_path: Path) -> None:
+        """Strângerea ulterioară se aplică și la recitirea copiei stocate —
+        nu numai la importul inițial. Manifestul fixture e <16 KiB, deci
+        strângerea sub el vine dintr-o valoare istorică sub interval —
+        aceeași regulă: doar restrânge, cu diagnostic."""
+        _enable(db_path)
+        write_pkg(tmp_path / "pkg")
+        res = service.import_package(ADMIN, tmp_path / "pkg", db_path=db_path)
+        assert res["verdict"]["verdict"] == "ACCEPT"
+        import_id = res["id"]
+        # o valoare istorică sub interval strânge limita sub manifestul
+        # deja importat — recitirea cade pe plafonul efectiv, nu trece
+        # „pentru că a fost acceptat odată"
+        self._injecteaza_istoric(db_path, 0)
+        with pytest.raises(PackageReject, match="MANIFEST_TOO_LARGE"):
+            service.promote_to_draft(ADMIN, import_id, db_path=db_path)
+
+    def test_limita_sub_16_memorata_se_aplica_cu_diagnostic(
+            self, db_path: Path, qroot: Path, tmp_path: Path,
+            _audit: list[dict]) -> None:
+        """Sub 16 KiB e în afara intervalului administrat, dar doar
+        restrânge — se aplică valoarea memorată și se raportează."""
+        _enable(db_path)
+        self._injecteaza_istoric(db_path, 8)
+        limita, diag = service._manifest_limit_bytes(ADMIN, db_path)
+        assert limita == 8 * 1024
+        assert diag and "8" in diag
+        write_pkg(tmp_path / "pkg")
+        # manifestul de ~1-2 KiB trece sub 8 KiB
+        res = service.import_package(ADMIN, tmp_path / "pkg", db_path=db_path)
+        assert res["verdict"]["verdict"] == "ACCEPT"
+        assert any(e["event_type"] == "bo_setting_manifest_limit_incompatible"
+                   for e in _audit)
+
+    def test_tenant_izolat_la_limita(
+            self, db_path: Path, qroot: Path, tmp_path: Path) -> None:
+        """Limita e per-tenant: tenant-b fără suprascriere păstrează
+        plafonul protocolului de 256 KiB."""
+        _enable(db_path)
+        settings_store.set_value(
+            "tenant-a", "bo.packages.manifest_max_kb", 16,
+            expected_version=0, actor="admin@test", db_path=db_path)
+        # tenant-b are și el import pornit + trust store
+        settings_store.set_value(
+            "tenant-b", "bo.packages.enabled", True,
+            expected_version=0, actor="admin@b", db_path=db_path)
+        settings_store.set_value(
+            "tenant-b", "bo.packages.trust_store_json",
+            json.dumps(_registry_doc()),
+            expected_version=0, actor="admin@b", db_path=db_path)
+        lim_a, _ = service._manifest_limit_bytes(ADMIN, db_path)
+        lim_b, _ = service._manifest_limit_bytes(OTHER_TENANT, db_path)
+        assert lim_a == 16 * 1024
+        assert lim_b == 256 * 1024
+
+    def test_limita_administrata_pe_activate(
+            self, db_path: Path, qroot: Path, tmp_path: Path) -> None:
+        """Aceeași strângere ulterioară se aplică și la activate: copia stocată
+        se recitește sub plafonul efectiv, nu sub cel de la import."""
+        _enable(db_path)
+        _bobot_pkg(tmp_path / "pkg")
+        imp = _to_draft(ADMIN, tmp_path / "pkg", db_path)
+        self._injecteaza_istoric(db_path, 0)
+        with pytest.raises(PackageReject, match="MANIFEST_TOO_LARGE"):
+            service.activate_bobot(ADMIN, imp["id"], db_path=db_path)
+
+    def test_verify_package_direct_respecta_limita_operator(
+            self, tmp_path: Path) -> None:
+        """Parametrul explicit al verifierului: aceeași regulă ca la servicii —
+        doar restrânge; o valoare sub dimensiunea manifestului refuză."""
+        write_pkg(tmp_path / "pkg")
+        registry = TrustRegistry.from_dict(_registry_doc())
+        v = verify_package(tmp_path / "pkg", registry, tenant_ref="tenant-a",
+                           host_version="1.0.0",
+                           operator_manifest_max_bytes=0)
+        assert not v.accepted
+        assert v.code == "MANIFEST_TOO_LARGE"
+        # și limita explicită nu poate depăși protocolul
+        v2 = verify_package(tmp_path / "pkg", registry, tenant_ref="tenant-a",
+                            host_version="1.0.0",
+                            operator_manifest_max_bytes=10 * 1024 * 1024)
+        assert v2.accepted
+
+    def test_manifest_malformat_peste_limita_da_too_large(
+            self, db_path: Path, qroot: Path, tmp_path: Path) -> None:
+        """Precedența plafonului: un manifest simultan supradimensionat și
+        necitibil refuză cu MANIFEST_TOO_LARGE — dimensiunea se verifică pe
+        octeții cruzi, înainte de orice parse."""
+        _enable(db_path)
+        write_pkg(tmp_path / "pkg")
+        (tmp_path / "pkg" / "manifest.json").write_bytes(
+            b"{ " + b"x" * (300 * 1024))
+        res = service.import_package(ADMIN, tmp_path / "pkg", db_path=db_path)
+        assert res["verdict"]["verdict"] == "REJECT"
+        assert res["verdict"]["reasons"][0].startswith("MANIFEST_TOO_LARGE")
+        registry = TrustRegistry.from_dict(_registry_doc())
+        v = verify_package(tmp_path / "pkg", registry, tenant_ref="tenant-a",
+                           host_version="1.0.0")
+        assert not v.accepted and v.code == "MANIFEST_TOO_LARGE"
+
+    def test_scriere_sub_16_refuzata_de_validator(self, db_path: Path) -> None:
+        from openexecutive.bo.settings.registry import SettingValidationError
+        with pytest.raises(SettingValidationError):
+            settings_store.set_value(
+                "tenant-a", "bo.packages.manifest_max_kb", 15,
+                expected_version=0, actor="admin@test", db_path=db_path)
+
+    def _injecteaza_istoric_raw(self, db_path: Path, raw: str) -> None:
+        with settings_store.get_conn(db_path) as conn:
+            conn.execute(
+                "DELETE FROM bo_settings WHERE tenant=? AND key=?",
+                ("tenant-a", "bo.packages.manifest_max_kb"))
+            conn.execute(
+                "INSERT INTO bo_settings (tenant, key, value_json, version,"
+                " updated_by, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                ("tenant-a", "bo.packages.manifest_max_kb",
+                 raw, 3, "ops-vechi", "2026-01-01T00:00:00Z"))
+
+    @pytest.mark.parametrize("raw", [
+        '"64"',      # string valid ca numar — scriitor care a ocolit tipul
+        '17.9',      # float — trunchierea e restrictiva, dar se raporteaza
+        'true',      # bool nu e un numar de KiB
+        'Infinity',  # json.loads accepta literalele — fara OverflowError
+        'NaN',
+        '1e999',
+    ])
+    def test_istoric_tipuri_neint_diagnostic_nu_crash(
+            self, db_path: Path, raw: str) -> None:
+        """Valorile stocate printr-un scriitor care a ocolit contractul
+        tipat nu crampa calea de pachete: plafonul se aplica restrictiv
+        (sau revine la protocol) si incompatibilitatea se raporteaza."""
+        _enable(db_path)
+        self._injecteaza_istoric_raw(db_path, raw)
+        limita, diag = service._manifest_limit_bytes(ADMIN, db_path)
+        assert diag is not None, raw
+        assert 0 < limita <= 256 * 1024

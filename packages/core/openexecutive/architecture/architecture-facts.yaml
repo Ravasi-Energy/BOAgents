@@ -4343,8 +4343,12 @@ bo:
   packages: |
     bo/packages implements bo.package.v1: canonicalization (BO-C14N-v1),
     Ed25519 signature verify against the tenant trust store, import →
-    quarantine → draft lifecycle with rollback approvals. No activation path
-    exists — packages never produce external effects.
+    quarantine → draft lifecycle with rollback approvals. The manifest byte
+    cap is administrable (bo.packages.manifest_max_kb, AC8/spec-0002) but can
+    only restrict the 256 KiB protocol cap — effective = min(administered,
+    protocol) on raw bytes before parse; historical values above the cap are
+    diagnosed, not relaxed. Activation exists for kind=bobot drafts only —
+    packages never produce external effects.
   execution: |
     bo/execution (VAL4-01) is the delegated-execution slice — strictly
     separate from the observe router (a recommendation never becomes an

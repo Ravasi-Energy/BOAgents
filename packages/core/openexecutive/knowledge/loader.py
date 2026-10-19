@@ -75,15 +75,35 @@ def chunk_text(text: str, chunk_size: int = 512, overlap: int = 50) -> list[str]
     return chunks
 
 
-def extract_text_from_pdf(path: Path) -> str:
+# Defense-in-depth bounds on PDF extraction. pypdf 6.19.0 already carries
+# the upstream fixes for the 2026 DoS advisories (#24–#31: long runtimes and
+# large memory on font data, ToUnicode streams, embedded files, page labels,
+# malformed FlateDecode), but a crafted document can still be large in the
+# dimensions the library legitimately honours — many pages, much text. The
+# caps mirror the xlsx ``max_chars`` contract: generous enough for real
+# documents, small enough that a parse can't grow without bound.
+PDF_MAX_PAGES = 2000
+PDF_MAX_CHARS = 1_000_000
+
+
+def extract_text_from_pdf(
+    path: Path,
+    max_pages: int = PDF_MAX_PAGES,
+    max_chars: int = PDF_MAX_CHARS,
+) -> str:
     from pypdf import PdfReader
 
     reader = PdfReader(str(path))
     pages = []
-    for page in reader.pages:
+    total = 0
+    for page in reader.pages[:max_pages]:
+        if total >= max_chars:
+            break
         text = page.extract_text()
         if text:
-            pages.append(text.strip())
+            stripped = text.strip()
+            pages.append(stripped)
+            total += len(stripped)
     return "\n\n".join(pages)
 
 

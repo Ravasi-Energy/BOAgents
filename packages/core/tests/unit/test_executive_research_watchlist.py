@@ -140,6 +140,10 @@ class FakeStore:
             if not all(r["metadata"].get(k) == v for k, v in where.items())
         ]
 
+    def delete_research_docs(self):
+        # Mirrors the real drop-and-recreate: the whole collection goes.
+        self.collections[ChromaDBStore.RESEARCH_COLLECTION] = []
+
     def query(self, query_text, collection, domain_filter=None, n_results=5):
         return []
 

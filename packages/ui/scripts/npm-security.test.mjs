@@ -76,3 +76,33 @@ test('KaTeX: ordinary formula rendering remains available without trusted links'
   assert.match(html, /class="katex"/);
   assert.match(html, /<math/);
 });
+
+test('selector-parser GHSA-rj75-hqrm-r3gf: flat class selectors finish within a bounded worker',()=>{
+ const program=`const fs=require('node:fs'),{createRequire}=require('node:module');
+  const cfg=JSON.parse(fs.readFileSync(0,'utf8')),req=createRequire(cfg.root+'/package.json');
+  const loadRAM=${loadRAM.toString()};
+  const parser=cfg.packages?.['postcss-selector-parser']?loadRAM(cfg.packages,'postcss-selector-parser',req):createRequire(cfg.root+'/node_modules/@tailwindcss/typography/package.json')('postcss-selector-parser');
+  const selector='.a'.repeat(100000),ast=parser().astSync(selector);
+  require('node:assert/strict').equal(ast.nodes[0].nodes.length,100000);
+  require('node:assert/strict').equal(ast.toString(),selector);process.stdout.write('bounded');`;
+ const child=spawnSync(process.execPath,['-e',program],{input:JSON.stringify({root,packages:globalThis.__BO01_TEST_PACKAGES}),encoding:'utf8',timeout:2500,killSignal:'SIGKILL',maxBuffer:4096});
+ assert.equal(child.status,0,`Flat-selector worker failed/expired: ${child.error?.code||child.signal||child.stderr}`);
+ assert.equal(child.stdout,'bounded');
+});
+test('selector-parser preserves the typography selector API and exact text',()=>{
+ const parser=globalThis.__BO01_TEST_PACKAGES?.['postcss-selector-parser']?load('postcss-selector-parser'):
+  createRequire(path.join(root,'node_modules/@tailwindcss/typography/package.json'))('postcss-selector-parser');
+ const selector='.prose :where(a):not(:where([class~="not-prose"] *))';
+ const ast=parser().astSync(selector);assert.equal(ast.toString(),selector);
+ const classes=[];ast.walkClasses(node=>classes.push(node.value));assert.deepEqual(classes,['prose']);
+});
+
+for (const format of ['png', 'jpeg', 'webp', 'avif']) test('Sharp installed native ordinary image roundtrip: ' + format, async () => {
+  const sharp = appRequire('sharp');
+  const image = await sharp({create: {width: 31, height: 19, channels: 3, background: {r: 12, g: 34, b: 56}}})
+    .rotate(90).resize(17, 23)[format]().toBuffer();
+  const metadata = await sharp(image).metadata();
+  assert.equal(metadata.width, 17);
+  assert.equal(metadata.height, 23);
+  assert.equal(metadata.format, format === 'avif' ? 'heif' : format);
+});

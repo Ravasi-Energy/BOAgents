@@ -115,7 +115,7 @@ export default function DynamicSection({ id, title, sub, basePath = 'architectur
       )}
 
       {content && (
-        <div className="prose prose-invert prose-sm max-w-none prose-headings:text-fg prose-p:text-fg prose-li:text-fg prose-code:text-amber-300 prose-code:bg-surface-elevated prose-code:rounded prose-code:px-1 prose-code:py-0.5 prose-code:before:content-none prose-code:after:content-none prose-table:text-xs prose-th:text-fg-muted prose-td:text-fg-muted prose-a:text-indigo-400">
+        <div className="prose prose-invert prose-sm max-w-none [overflow-wrap:anywhere] [&_pre]:max-w-full [&_pre]:overflow-x-auto prose-headings:text-fg prose-p:text-fg prose-li:text-fg prose-code:text-amber-300 prose-code:bg-surface-elevated prose-code:rounded prose-code:px-1 prose-code:py-0.5 prose-code:before:content-none prose-code:after:content-none prose-table:text-xs prose-th:text-fg-muted prose-td:text-fg-muted prose-a:text-indigo-400">
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
             rehypePlugins={[[rehypeSanitize, SAFE_SCHEMA]]}

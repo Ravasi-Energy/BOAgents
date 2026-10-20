@@ -107,8 +107,8 @@ export default function ArchitecturePage() {
   const totalCount = SECTIONS.length;
 
   return (
-    <div className="flex flex-1 min-h-0 bg-surface text-fg overflow-hidden">
-      <aside className="w-52 flex-shrink-0 border-r border-line flex flex-col bg-surface-elevated">
+    <div className="flex flex-col md:flex-row flex-1 min-h-0 bg-surface text-fg overflow-hidden">
+      <aside className="w-full md:w-52 max-h-44 md:max-h-none overflow-y-auto flex-shrink-0 border-b md:border-b-0 md:border-r border-line flex flex-col bg-surface-elevated">
         <div className="px-3 py-4">
           <p className="px-2 text-[10px] font-semibold uppercase tracking-widest text-fg-subtle mb-2">
             Architecture
@@ -155,8 +155,8 @@ export default function ArchitecturePage() {
         </div>
       </aside>
 
-      <main className="flex-1 overflow-y-auto">
-        <div className="max-w-4xl mx-auto px-8 py-10 space-y-20">
+      <main className="flex-1 min-w-0 min-h-0 overflow-y-auto">
+        <div className="max-w-4xl mx-auto px-4 md:px-8 py-10 space-y-20">
           <div className="space-y-4">
             <div>
               <h1 className="text-2xl font-bold text-fg">Open Executive — Architecture</h1>

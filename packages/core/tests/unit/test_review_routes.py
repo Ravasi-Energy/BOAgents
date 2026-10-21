@@ -305,3 +305,126 @@ def test_review_read_allowed_to_viewer(
         headers={**auth_env, "x-caller-email": "viewer@example.com"},
     )
     assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# F02 inchidere: matricea completa mutatii x roluri prin proxy real +
+# audit persistent (fixture-ul autouse no-opeaza log_event; proba de mai
+# jos instaleaza un logger real si verifica randul scris).
+# ---------------------------------------------------------------------------
+
+VIEWER_H = {"x-caller-email": "viewer@example.com"}
+ADMIN_H = {"x-caller-email": "admin@example.com"}
+SERVICE_H = {"x-api-key": "svc"}
+ANON_H: dict[str, str] = {}
+
+
+def _matrix_calls(store: ReviewStore) -> list[tuple[str, str, dict | None]]:
+    item_id = _pending(store, "matrix.md")
+    ann = store.add_annotation(item_id, "finance", "seed note")
+    return [
+        ("PATCH", f"/review/items/{item_id}", {"status": "approved"}),
+        ("POST", "/review/bulk-approve", {"item_ids": [item_id]}),
+        ("POST", "/review/curate", {"domain": "finance", "action": "start"}),
+        ("POST", f"/review/items/{item_id}/annotations",
+         {"correction": "matrix"}),
+        ("PATCH", f"/review/annotations/{ann.annotation_id}",
+         {"correction": "edited"}),
+        ("DELETE", f"/review/annotations/{ann.annotation_id}", None),
+    ]
+
+
+def _do(client: TestClient, method: str, path: str,
+        body: dict | None, headers: dict[str, str]):
+    req = {"PATCH": client.patch, "POST": client.post,
+           "DELETE": client.delete, "GET": client.get}[method]
+    return req(path, headers=headers, **({"json": body} if body else {}))
+
+
+def _snapshot(store: ReviewStore) -> tuple:
+    items = sorted(
+        (i.item_id, i.status, i.priority, i.reviewer_notes)
+        for i in store.list_items(ContentType.BUILTIN))
+    return (
+        items,
+        store.count_by_status(),
+        store.get_withheld_keys(ContentType.BUILTIN),
+    )
+
+
+@pytest.mark.parametrize("idx", range(6))
+def test_review_mutation_matrix_denied_roles(
+    idx: int, client: TestClient, store: ReviewStore,
+    auth_env: dict[str, str]
+) -> None:
+    """Fiecare mutatie /review x {viewer, operator(service key), anonim}
+    prin proxy real → 403 si efect ZERO in store."""
+    method, path, body = _matrix_calls(store)[idx]
+    for role_headers in (
+        {**auth_env, **VIEWER_H}, SERVICE_H, ANON_H
+    ):
+        before = _snapshot(store)
+        resp = _do(client, method, path, body, role_headers)
+        assert resp.status_code == 403, (
+            f"{method} {path} pentru {role_headers}: "
+            f"{resp.status_code} {resp.text}")
+        assert _snapshot(store) == before, (
+            f"{method} {path} refuzat dar a avut efect")
+
+
+@pytest.mark.parametrize("idx", range(6))
+def test_review_mutation_matrix_allowed_admin(
+    idx: int, client: TestClient, store: ReviewStore,
+    auth_env: dict[str, str]
+) -> None:
+    """Acelasi set de mutatii pentru adminul delegat → 200."""
+    method, path, body = _matrix_calls(store)[idx]
+    resp = _do(client, method, path, body, {**auth_env, **ADMIN_H})
+    assert resp.status_code == 200, (
+        f"{method} {path} pentru admin: {resp.status_code} {resp.text}")
+
+
+def test_review_mutation_denied_on_tenant_mismatch(
+    client: TestClient, store: ReviewStore, auth_env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tenantul se citeste din configurare (BO_TENANT_ID), nu din request:
+    un hint `x-bo-tenant` diferit este refuz chiar si adminului."""
+    monkeypatch.setenv("BO_TENANT_ID", "tenant-a")
+    item_id = _pending(store, "tenant.md")
+    resp = client.patch(
+        f"/review/items/{item_id}", json={"status": "approved"},
+        headers={**auth_env, **ADMIN_H, "x-bo-tenant": "tenant-b"})
+    assert resp.status_code == 403
+    assert store.get_item(item_id).status == ReviewStatus.PENDING
+
+
+def test_review_denial_audit_persisted(
+    client: TestClient, store: ReviewStore, auth_env: dict[str, str],
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refuzul scrie `review_mutation_denied` in auditul PERSISTENT, cu
+    actorul real — nu e un no-op (fixture-ul autouse al fisierului il
+    inlocuieste; aici instalam loggerul real pe un db temporar)."""
+    import openexecutive.audit as audit_pkg
+    from openexecutive.audit import logger as audit_mod
+
+    audit_db = tmp_path / "audit.db"
+    logger = audit_mod.AuditLogger(db_path=audit_db)
+    logger.initialize_db()
+    monkeypatch.setattr(audit_pkg, "log_event", audit_mod.log_event)
+    prev = audit_mod._default_logger
+    audit_mod.set_audit_logger(logger)
+    try:
+        item_id = _pending(store, "audit.md")
+        resp = client.patch(
+            f"/review/items/{item_id}", json={"status": "approved"},
+            headers={**auth_env, **VIEWER_H})
+        assert resp.status_code == 403
+    finally:
+        audit_mod.set_audit_logger(prev)
+    rows = logger.query(event_type="review_mutation_denied")
+    assert len(rows) == 1
+    assert rows[0].actor == "viewer@example.com"
+    assert "/review/items/" in rows[0].summary
+    assert store.get_item(item_id).status == ReviewStatus.PENDING

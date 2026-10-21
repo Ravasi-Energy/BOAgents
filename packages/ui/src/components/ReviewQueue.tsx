@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useRef } from "react";
 import {
   ExternalPeekChunk,
   ReviewAnnotation,
@@ -120,12 +120,46 @@ function ItemSlideOver({
   const [externalChunkLimit, setExternalChunkLimit] = useState(10);
   const [loadingChunks, setLoadingChunks] = useState(false);
 
-  useEffect(() => {
-    getReviewItem(itemId).then((d) => {
-      setDetail(d);
-      setNotes(d.item.reviewer_notes);
-    });
+  const [detailLoading, setDetailLoading] = useState(true);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [notesSaving, setNotesSaving] = useState(false);
+  const [notesError, setNotesError] = useState<string | null>(null);
+  const [notesReadbackRequired, setNotesReadbackRequired] = useState(false);
+  const detailEpoch = useRef(0);
+  const notesEpoch = useRef(0);
+  const notesBusy = useRef(false);
+  const notesNeedReadback = useRef(false);
+  const notesConfirmed = useRef("");
+
+  const readDetail = useCallback(async (preserveDraft = false) => {
+    const request = ++detailEpoch.current;
+    setDetailLoading(true); setDetailError(null);
+    try {
+      const data = await getReviewItem(itemId);
+      if (request !== detailEpoch.current) return;
+      if (data.item.item_id !== itemId || !Array.isArray(data.annotations)) {
+        throw new Error("Invalid review item response.");
+      }
+      setDetail(data); notesConfirmed.current = data.item.reviewer_notes;
+      if (!preserveDraft) setNotes(data.item.reviewer_notes);
+      notesNeedReadback.current = false; setNotesReadbackRequired(false);
+      setNotesError(null);
+    } catch (error) {
+      if (request === detailEpoch.current) {
+        setDetailError(error instanceof Error ? error.message : "Unable to read review item.");
+      }
+    } finally {
+      if (request === detailEpoch.current) setDetailLoading(false);
+    }
   }, [itemId]);
+
+  useEffect(() => {
+    setDetail(null); setNotes(""); setNotesError(null); setNotesSaving(false);
+    notesBusy.current = false; notesNeedReadback.current = false;
+    setNotesReadbackRequired(false); notesConfirmed.current = "";
+    void readDetail();
+    return () => { detailEpoch.current++; notesEpoch.current++; };
+  }, [readDetail]);
 
   const itemId_stable = detail?.item.item_id;
 
@@ -219,18 +253,40 @@ function ItemSlideOver({
   };
 
   const handleSaveNotes = async () => {
-    if (!detail) return;
-    const updated = await patchReviewItem(itemId, { reviewer_notes: notes });
-    setDetail((prev) => prev ? { ...prev, item: updated } : prev);
-    onUpdated(updated);
+    if (!detail || detail.item.item_id !== itemId || notesBusy.current ||
+        notesNeedReadback.current || notes === notesConfirmed.current) return;
+    const request = ++notesEpoch.current;
+    notesBusy.current = true; setNotesSaving(true); setNotesError(null);
+    try {
+      const updated = await patchReviewItem(itemId, { reviewer_notes: notes });
+      if (request !== notesEpoch.current) return;
+      if (updated.item_id !== itemId) throw new Error("Invalid review item response.");
+      notesConfirmed.current = updated.reviewer_notes;
+      setDetail((prev) => prev?.item.item_id === itemId ? { ...prev, item: updated } : prev);
+      onUpdated(updated);
+    } catch (error) {
+      if (request === notesEpoch.current) {
+        notesNeedReadback.current = true; setNotesReadbackRequired(true);
+        setNotesError(error instanceof Error ? error.message : "Unable to save review notes.");
+      }
+    } finally {
+      if (request === notesEpoch.current) { notesBusy.current = false; setNotesSaving(false); }
+    }
   };
 
-  if (!detail) {
+  if (!detail || detail.item.item_id !== itemId) {
     return (
       <div className="fixed inset-0 z-50 flex justify-end">
         <div className="absolute inset-0 bg-black/50" onClick={onClose} />
         <div className="relative w-[560px] bg-surface-elevated border-l border-line flex items-center justify-center">
-          <span className="text-fg-muted text-sm">Loading…</span>
+          {detailLoading ? <span className="text-fg-muted text-sm">Loading…</span> : (
+            <div role="alert" className="p-5 text-sm text-red-400">
+              <p>Review item could not be read. This is not an empty item.</p>
+              <p>{detailError}</p>
+              <button onClick={() => { void readDetail(); }} className="mt-3 px-3 py-2 border rounded">Retry reading review item</button>
+              <button onClick={onClose} className="ml-3 px-3 py-2 border rounded">Close review item</button>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -259,7 +315,7 @@ function ItemSlideOver({
               <PriorityPill priority={item.priority} />
             </div>
           </div>
-          <button onClick={onClose} className="text-fg-muted hover:text-fg p-1">
+          <button onClick={onClose} aria-label="Close review item" className="text-fg-muted hover:text-fg p-1">
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
             </svg>
@@ -363,10 +419,22 @@ function ItemSlideOver({
             <textarea
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
-              onBlur={handleSaveNotes}
+              onBlur={() => { void handleSaveNotes(); }}
+              disabled={notesSaving}
               placeholder="Add your review notes here…"
               className="w-full h-20 bg-surface-elevated border border-line-strong rounded-lg px-3 py-2 text-xs text-fg resize-none focus:outline-none focus:border-indigo-500 placeholder:text-fg-subtle"
             />
+            {notesError && (
+              <div role="alert" className="mt-2 text-xs text-red-400">
+                <p>Review notes could not be confirmed. Your draft is preserved. Read the current item before saving again.</p>
+                <p>{notesError}</p>
+              </div>
+            )}
+            {detailError && <p role="alert" className="mt-2 text-xs text-red-400">Current review item could not be read: {detailError}</p>}
+            {notesReadbackRequired && (
+              <button disabled={detailLoading || notesSaving} onClick={() => { void readDetail(true); }} className="mt-2 text-xs px-3 py-2 border rounded disabled:opacity-40">Read current review item; keep draft</button>
+            )}
+            <button disabled={notesSaving || notesReadbackRequired || detailLoading} onClick={() => { void handleSaveNotes(); }} className="mt-2 text-xs px-3 py-2 border rounded disabled:opacity-40">{notesSaving ? "Saving notes…" : "Save notes"}</button>
           </section>
 
           {/* Annotations */}
@@ -428,6 +496,10 @@ function ItemSlideOver({
 type Tab = "queue" | "all" | "annotations";
 type RejectModalState = { itemId: string; notes: string } | null;
 
+function validTrustedDefaults(value: unknown): value is Record<string,number> {
+  return value !== null && typeof value === "object" && !Array.isArray(value) && Object.values(value).every(n=>Number.isSafeInteger(n) && (n as number)>=0);
+}
+
 export default function ReviewQueue() {
   const [tab, setTab] = useState<Tab>("queue");
   const [items, setItems] = useState<ReviewItem[]>([]);
@@ -441,23 +513,33 @@ export default function ReviewQueue() {
   const [rejectModal, setRejectModal] = useState<RejectModalState>(null);
   const [trustedDefaults, setTrustedDefaults] = useState<Record<string, number>>({});
   const [pendingItems, setPendingItems] = useState<ReviewItem[]>([]);
+  const [readError, setReadError] = useState<string | null>(null);
+  const readEpoch = useRef(0);
 
   const loadQueue = useCallback(async () => {
+    const request = ++readEpoch.current;
+    setReadError(null);
     setLoading(true);
     try {
       const [pending, needsRevision, defaults] = await Promise.all([
         listReviewItems({ status: "pending", limit: 200 }),
         listReviewItems({ status: "needs_revision", limit: 200 }),
-        getTrustedDefaults().catch(() => ({}) as Record<string, number>),
+        getTrustedDefaults(),
       ]);
+      if (request !== readEpoch.current) return;
+      if (!Array.isArray(pending) || !Array.isArray(needsRevision) || !validTrustedDefaults(defaults)) throw new Error("Invalid review data response.");
       setItems([...pending, ...needsRevision]);
       setTrustedDefaults(defaults);
+    } catch (error) {
+      if (request === readEpoch.current) setReadError(error instanceof Error ? error.message : "Unable to read review data.");
     } finally {
-      setLoading(false);
+      if (request === readEpoch.current) setLoading(false);
     }
   }, []);
 
   const loadAll = useCallback(async () => {
+    const request = ++readEpoch.current;
+    setReadError(null);
     setLoading(true);
     try {
       // The per-domain action row must reflect what the SERVER would do, so it
@@ -471,24 +553,34 @@ export default function ReviewQueue() {
           content_type: filterType || undefined,
           limit: 500,
         }),
-        getTrustedDefaults().catch(() => ({}) as Record<string, number>),
+        getTrustedDefaults(),
         listReviewItems({ status: "pending", limit: 500 }),
       ]);
+      if (request !== readEpoch.current) return;
+      if (!Array.isArray(result) || !Array.isArray(pending) || !validTrustedDefaults(defaults)) throw new Error("Invalid review data response.");
       setAllItems(result);
       setTrustedDefaults(defaults);
       setPendingItems(pending);
+    } catch (error) {
+      if (request === readEpoch.current) setReadError(error instanceof Error ? error.message : "Unable to read review data.");
     } finally {
-      setLoading(false);
+      if (request === readEpoch.current) setLoading(false);
     }
   }, [filterStatus, filterDomain, filterType]);
 
   const loadAnnotations = useCallback(async () => {
+    const request = ++readEpoch.current;
+    setReadError(null);
     setLoading(true);
     try {
       const anns = await listAllAnnotations(true);
+      if (request !== readEpoch.current) return;
+      if (!Array.isArray(anns)) throw new Error("Invalid annotations response.");
       setAnnotations(anns);
+    } catch (error) {
+      if (request === readEpoch.current) setReadError(error instanceof Error ? error.message : "Unable to read review data.");
     } finally {
-      setLoading(false);
+      if (request === readEpoch.current) setLoading(false);
     }
   }, []);
 
@@ -496,6 +588,7 @@ export default function ReviewQueue() {
     if (tab === "queue") loadQueue();
     else if (tab === "all") loadAll();
     else loadAnnotations();
+    return () => { readEpoch.current++; };
   }, [tab, loadQueue, loadAll, loadAnnotations]);
 
   const handleApprove = async (item: ReviewItem) => {
@@ -585,14 +678,16 @@ export default function ReviewQueue() {
         ))}
       </div>
 
+      {readError && <div role="alert" className="text-sm text-fg-muted"><p>{readError}</p><p>Review data could not be read. This is not an empty queue.</p><button type="button" className="underline hover:text-fg" onClick={()=>{if(tab==="queue")void loadQueue();else if(tab==="all")void loadAll();else void loadAnnotations();}}>Retry reading review data</button></div>}
+
       {/* Queue tab */}
-      {tab === "queue" && (
+      {!readError && tab === "queue" && (
         <div>
           <div className="flex items-center justify-between mb-4">
             <p className="text-sm text-fg-muted">
               {loading ? "Loading…" : `${items.length} item${items.length !== 1 ? "s" : ""} need review`}
             </p>
-            {items.length > 0 && (
+            {!loading && items.length > 0 && (
               <button
                 onClick={() => handleBulkApprove()}
                 className="text-xs bg-emerald-900/40 hover:bg-emerald-900/60 text-emerald-400 border border-emerald-900/60 px-3 py-1.5 rounded-lg transition-colors"
@@ -637,7 +732,7 @@ export default function ReviewQueue() {
             </div>
           )}
           <div className="space-y-2">
-            {items.map((item) => (
+            {(!loading ? items : []).map((item) => (
               <ItemRow
                 key={item.item_id}
                 item={item}
@@ -653,7 +748,7 @@ export default function ReviewQueue() {
       )}
 
       {/* All items tab */}
-      {tab === "all" && (
+      {!readError && tab === "all" && (
         <div>
           {/* Filters */}
           <div className="flex gap-2 mb-4 flex-wrap">
@@ -689,7 +784,7 @@ export default function ReviewQueue() {
           </div>
 
           {/* Per-domain actions: approve what's queued, or start/stop curating. */}
-          {domains.length > 0 && (
+          {!loading && domains.length > 0 && (
             <div className="flex gap-2 mb-4 flex-wrap">
               {domains.map((d) => {
                 const pendingInDomain = pendingItems.filter((i) => i.domain === d);
@@ -738,7 +833,7 @@ export default function ReviewQueue() {
 
           {loading && <p className="text-sm text-fg-subtle">Loading…</p>}
           <div className="space-y-2">
-            {allItems.map((item) => (
+            {(!loading ? allItems : []).map((item) => (
               <ItemRow
                 key={item.item_id}
                 item={item}
@@ -757,13 +852,13 @@ export default function ReviewQueue() {
       )}
 
       {/* Annotations tab */}
-      {tab === "annotations" && (
+      {!readError && tab === "annotations" && (
         <div>
           <p className="text-sm text-fg-muted mb-4">
             {loading ? "Loading…" : `${annotations.length} active SME correction${annotations.length !== 1 ? "s" : ""}`}
           </p>
           <div className="space-y-2">
-            {annotations.map((ann) => (
+            {(!loading ? annotations : []).map((ann) => (
               <div key={ann.annotation_id} className="bg-surface-elevated/40 border border-line rounded-lg p-3 flex items-start gap-3">
                 <div className="flex-1">
                   <div className="flex items-center gap-2 mb-1">

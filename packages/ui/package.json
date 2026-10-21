@@ -20,7 +20,11 @@
     "predev": "node scripts/apply-braces-depth.cjs --check",
     "prebuild": "node scripts/apply-braces-depth.cjs --check",
     "prestart": "node scripts/apply-braces-depth.cjs --check",
-    "pretest": "node scripts/apply-braces-depth.cjs --check"
+    "pretest": "node scripts/apply-braces-depth.cjs --check",
+    "test:geometry": "node --test scripts/reference-geometry.mjs",
+    "test:read-errors": "node --test --test-reporter=junit scripts/read-error-states.mjs",
+    "test:person-routes": "node --test --test-reporter=junit scripts/person-route-states.mjs",
+    "test:review-details": "node --test --test-reporter=junit scripts/review-detail-states.mjs"
   },
   "dependencies": {
     "@dagrejs/dagre": "^3.1.0",
@@ -46,7 +50,8 @@
     "eslint-config-next": "^16.3.8",
     "postcss": "^8.5.28",
     "tailwindcss": "^4.3.3",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "playwright": "1.62.1"
   },
   "overrides": {
     "lodash-es": "^4.18.1",

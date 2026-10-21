@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useRef } from "react";
 import {
   deleteAdvice,
   deleteDecision,
@@ -41,9 +41,9 @@ export default function MemorySection() {
   // keep a constant identity across renders, or the tab's refresh→useEffect
   // chain would re-fire every render and loop forever. (Do NOT inline a
   // `setCount(tab)` factory here.)
-  const onCountDecisions = useCallback((n: number) => setCounts((c) => ({ ...c, decisions: n })), []);
-  const onCountInitiatives = useCallback((n: number) => setCounts((c) => ({ ...c, initiatives: n })), []);
-  const onCountAdvice = useCallback((n: number) => setCounts((c) => ({ ...c, advice: n })), []);
+  const onCountDecisions = useCallback((n: number | null) => setCounts((c) => ({ ...c, decisions: n })), []);
+  const onCountInitiatives = useCallback((n: number | null) => setCounts((c) => ({ ...c, initiatives: n })), []);
+  const onCountAdvice = useCallback((n: number | null) => setCounts((c) => ({ ...c, advice: n })), []);
 
   return (
     <div className="rounded-xl border border-line bg-surface-elevated p-4">
@@ -91,24 +91,40 @@ export default function MemorySection() {
 // Decisions
 // ---------------------------------------------------------------------------
 
-function DecisionsTab({ onCount }: { onCount: (n: number) => void }) {
+function MemoryReadError({message,retry}:{message:string;retry:()=>Promise<void>}) {
+  return <div role="alert" className="text-sm text-fg-muted"><p>{message}</p><p>The memory list could not be read. This is not an empty list.</p><button type="button" className="underline hover:text-fg" onClick={()=>void retry()}>Retry reading memories</button></div>;
+}
+
+function DecisionsTab({ onCount }: { onCount: (n: number | null) => void }) {
   const [items, setItems] = useState<Decision[]>([]);
   const [loading, setLoading] = useState(true);
+  const [readError, setReadError] = useState<string | null>(null);
+  const readEpoch = useRef(0);
   const [editingId, setEditingId] = useState<number | null>(null);
 
   const refresh = useCallback(async () => {
+    const request = ++readEpoch.current;
+    setReadError(null);
     setLoading(true);
     try {
       const rows = await listDecisions();
+      if (request !== readEpoch.current) return;
+      if (!Array.isArray(rows)) throw new Error("Invalid memory list response.");
       setItems(rows);
       onCount(rows.length);
+    } catch (error) {
+      if (request === readEpoch.current) {
+        setReadError(error instanceof Error ? error.message : "Unable to load memories.");
+        onCount(null);
+      }
     } finally {
-      setLoading(false);
+      if (request === readEpoch.current) setLoading(false);
     }
   }, [onCount]);
 
   useEffect(() => {
     void refresh();
+    return () => { readEpoch.current++; };
   }, [refresh]);
 
   const handleDelete = useCallback(async (id: number) => {
@@ -123,6 +139,7 @@ function DecisionsTab({ onCount }: { onCount: (n: number) => void }) {
   }, [refresh]);
 
   if (loading) return <div className="text-fg-muted text-sm">Loading…</div>;
+  if (readError) return <MemoryReadError message={readError} retry={refresh} />;
   if (items.length === 0) return <EmptyState message={MEMORY_EMPTY} />;
 
   return (
@@ -259,24 +276,36 @@ function DecisionRow({
 // Initiatives
 // ---------------------------------------------------------------------------
 
-function InitiativesTab({ onCount }: { onCount: (n: number) => void }) {
+function InitiativesTab({ onCount }: { onCount: (n: number | null) => void }) {
   const [items, setItems] = useState<Initiative[]>([]);
   const [loading, setLoading] = useState(true);
+  const [readError, setReadError] = useState<string | null>(null);
+  const readEpoch = useRef(0);
   const [editingId, setEditingId] = useState<number | null>(null);
 
   const refresh = useCallback(async () => {
+    const request = ++readEpoch.current;
+    setReadError(null);
     setLoading(true);
     try {
       const rows = await listInitiatives();
+      if (request !== readEpoch.current) return;
+      if (!Array.isArray(rows)) throw new Error("Invalid memory list response.");
       setItems(rows);
       onCount(rows.length);
+    } catch (error) {
+      if (request === readEpoch.current) {
+        setReadError(error instanceof Error ? error.message : "Unable to load memories.");
+        onCount(null);
+      }
     } finally {
-      setLoading(false);
+      if (request === readEpoch.current) setLoading(false);
     }
   }, [onCount]);
 
   useEffect(() => {
     void refresh();
+    return () => { readEpoch.current++; };
   }, [refresh]);
 
   const handleDelete = useCallback(async (id: number) => {
@@ -291,6 +320,7 @@ function InitiativesTab({ onCount }: { onCount: (n: number) => void }) {
   }, [refresh]);
 
   if (loading) return <div className="text-fg-muted text-sm">Loading…</div>;
+  if (readError) return <MemoryReadError message={readError} retry={refresh} />;
   if (items.length === 0) return <EmptyState message={MEMORY_EMPTY} />;
 
   return (
@@ -407,24 +437,36 @@ function InitiativeRow({
 // Advice
 // ---------------------------------------------------------------------------
 
-function AdviceTab({ onCount }: { onCount: (n: number) => void }) {
+function AdviceTab({ onCount }: { onCount: (n: number | null) => void }) {
   const [items, setItems] = useState<Advice[]>([]);
   const [loading, setLoading] = useState(true);
+  const [readError, setReadError] = useState<string | null>(null);
+  const readEpoch = useRef(0);
   const [editingId, setEditingId] = useState<number | null>(null);
 
   const refresh = useCallback(async () => {
+    const request = ++readEpoch.current;
+    setReadError(null);
     setLoading(true);
     try {
       const rows = await listAdvice();
+      if (request !== readEpoch.current) return;
+      if (!Array.isArray(rows)) throw new Error("Invalid memory list response.");
       setItems(rows);
       onCount(rows.length);
+    } catch (error) {
+      if (request === readEpoch.current) {
+        setReadError(error instanceof Error ? error.message : "Unable to load memories.");
+        onCount(null);
+      }
     } finally {
-      setLoading(false);
+      if (request === readEpoch.current) setLoading(false);
     }
   }, [onCount]);
 
   useEffect(() => {
     void refresh();
+    return () => { readEpoch.current++; };
   }, [refresh]);
 
   const handleDelete = useCallback(async (id: number) => {
@@ -439,6 +481,7 @@ function AdviceTab({ onCount }: { onCount: (n: number) => void }) {
   }, [refresh]);
 
   if (loading) return <div className="text-fg-muted text-sm">Loading…</div>;
+  if (readError) return <MemoryReadError message={readError} retry={refresh} />;
   if (items.length === 0) return <EmptyState message={MEMORY_EMPTY} />;
 
   return (

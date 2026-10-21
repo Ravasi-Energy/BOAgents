@@ -1,0 +1,140 @@
+{
+  "UIoverlay": false,
+  "backendOverlay": false,
+  "checks": [
+    {
+      "id": "review-notes-real-patch200-readback-reload",
+      "status": "PASS"
+    },
+    {
+      "id": "review-notes-refused-transport-draft-and-server-state-preserved",
+      "status": "PASS"
+    },
+    {
+      "id": "review-notes-refused-transport-visible-error-no-unhandled",
+      "status": "PASS"
+    },
+    {
+      "id": "review-detail-refused-read-explicit-error-no-infinite-loading",
+      "status": "PASS"
+    },
+    {
+      "id": "review-detail-explicit-read-recovery",
+      "status": "PASS"
+    },
+    {
+      "id": "review-notes-refusal-blocks-replay-explicit-readback-keeps-draft-and-explicit-save",
+      "status": "PASS"
+    }
+  ],
+  "captures": [
+    {
+      "file": "review-notes-persisted-desktop.png",
+      "viewport": "desktop",
+      "width": 1440,
+      "scroll": 1440
+    },
+    {
+      "file": "review-notes-persisted-tablet.png",
+      "viewport": "tablet",
+      "width": 1024,
+      "scroll": 1024
+    },
+    {
+      "file": "review-notes-persisted-mobile.png",
+      "viewport": "mobile",
+      "width": 390,
+      "scroll": 390
+    },
+    {
+      "file": "review-notes-transport-refused-desktop.png",
+      "viewport": "desktop",
+      "width": 1440,
+      "scroll": 1440
+    },
+    {
+      "file": "review-notes-transport-refused-tablet.png",
+      "viewport": "tablet",
+      "width": 1024,
+      "scroll": 1024
+    },
+    {
+      "file": "review-notes-transport-refused-mobile.png",
+      "viewport": "mobile",
+      "width": 390,
+      "scroll": 390
+    },
+    {
+      "file": "review-detail-transport-refused-desktop.png",
+      "viewport": "desktop",
+      "width": 1440,
+      "scroll": 1440
+    },
+    {
+      "file": "review-detail-transport-refused-tablet.png",
+      "viewport": "tablet",
+      "width": 1024,
+      "scroll": 1024
+    },
+    {
+      "file": "review-detail-transport-refused-mobile.png",
+      "viewport": "mobile",
+      "width": 390,
+      "scroll": 390
+    },
+    {
+      "file": "review-notes-explicit-readback-recovered-desktop.png",
+      "viewport": "desktop",
+      "width": 1440,
+      "scroll": 1440
+    },
+    {
+      "file": "review-notes-explicit-readback-recovered-tablet.png",
+      "viewport": "tablet",
+      "width": 1024,
+      "scroll": 1024
+    },
+    {
+      "file": "review-notes-explicit-readback-recovered-mobile.png",
+      "viewport": "mobile",
+      "width": 390,
+      "scroll": 390
+    }
+  ],
+  "pageErrors": [],
+  "receipts": [
+    {
+      "method": "PATCH",
+      "path": "/api/backend/review/items/external%3Asynthetic%3Areview-source",
+      "status": 200,
+      "reviewer_notes": "BO01 synthetic persisted review note"
+    }
+  ],
+  "observations": {
+    "refusedWrite": {
+      "attempts": 1,
+      "draft": "BO01 refused local draft",
+      "visibleErrorCount": 1,
+      "serverNote": "BO01 synthetic persisted review note",
+      "pageErrors": []
+    },
+    "refusedRead": {
+      "visibleLoading": 0,
+      "visibleErrorCount": 1,
+      "pageErrors": []
+    }
+  },
+  "limits": [
+    "Synthetic signed JWT not Google OAuth; real complete API and private SQLite, workers/provider disabled",
+    "Transport abortion on selected actual browser requests, not authorization policy or CAS proof",
+    "Only synthetic reviewer_notes; no source files, annotations or review records deleted",
+    "CI controlled HTTP fixture proves UI transport/state only; actual API option proves local private SQLite/reload, not workers/CAS/authorization"
+  ],
+  "mode": "CI_ACTUAL_NEXT_CONTROLLED_HTTP_NO_DOMAIN_DB_EFFECT_CLAIM",
+  "runtime": {
+    "headless": true,
+    "chromiumSandbox": true,
+    "sandboxDisableFlagsAbsent": true,
+    "profileDirectory": "/Users/foldistefan/Programare/Codex/BOGuardian/agenti/BO-A01/boagents-val4-01/packages/ui/review-detail-results/tmp/playwright_chromiumdev_profile-TyOqL8"
+  }
+}

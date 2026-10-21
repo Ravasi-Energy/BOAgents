@@ -1,0 +1,63 @@
+{
+  "headless": true,
+  "chromiumSandbox": true,
+  "mode": "CI_ACTUAL_NEXT_PERSON_ROUTE_HTTP_FIXTURE",
+  "checks": [
+    {
+      "id": "reject-person-identifier-not-a-number",
+      "status": "PASS"
+    },
+    {
+      "id": "reject-person-identifier-2abc",
+      "status": "PASS"
+    },
+    {
+      "id": "reject-person-identifier-2.5",
+      "status": "PASS"
+    },
+    {
+      "id": "reject-person-identifier-0",
+      "status": "PASS"
+    },
+    {
+      "id": "reject-person-identifier--1",
+      "status": "PASS"
+    },
+    {
+      "id": "reject-person-identifier-9007199254740993",
+      "status": "PASS"
+    },
+    {
+      "id": "valid-missing-person-server404",
+      "status": "PASS"
+    }
+  ],
+  "captures": [
+    "invalid-person-desktop.png",
+    "invalid-person-tablet.png",
+    "invalid-person-mobile.png"
+  ],
+  "pageErrors": [],
+  "requests": [
+    {
+      "path": "/api/backend/people/987654321",
+      "method": "GET"
+    }
+  ],
+  "httpFailures": [
+    {
+      "path": "/api/backend/people/987654321",
+      "status": 404
+    }
+  ],
+  "limits": [
+    "Synthetic signed JWT, not Google OAuth",
+    "Only actual person reads and invalid identifier refusals; no write handlers or backend source patches",
+    "CI fixture serves no person records: valid missing ID returns404, malformed IDs must make no person request",
+    "Invalid person ID and valid read states only, not whole F7 or final integration acceptance"
+  ],
+  "runtime": {
+    "sandboxDisableFlagsAbsent": true,
+    "profileDirectory": "/Users/foldistefan/Programare/Codex/BOGuardian/agenti/BO-A01/boagents-val4-01/packages/ui/person-route-results/tmp/playwright_chromiumdev_profile-HJabSw"
+  }
+}

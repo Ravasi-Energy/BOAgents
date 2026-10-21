@@ -1,0 +1,78 @@
+{
+  "headless": true,
+  "chromiumSandbox": true,
+  "mode": "CI_ACTUAL_NEXT_READ_ONLY_PREBUILT_FIXTURE",
+  "checks": [
+    {
+      "route": "architecture",
+      "viewport": "mobile",
+      "contentWidth": 390,
+      "navigationWidth": 390,
+      "navigationTarget": "bo_agents",
+      "renderedDiagrams": 23,
+      "status": "PASS"
+    },
+    {
+      "route": "architecture",
+      "viewport": "tablet",
+      "contentWidth": 592,
+      "navigationWidth": 208,
+      "navigationTarget": "bo_agents",
+      "renderedDiagrams": 23,
+      "status": "PASS"
+    },
+    {
+      "route": "architecture",
+      "viewport": "desktop",
+      "contentWidth": 1008,
+      "navigationWidth": 208,
+      "navigationTarget": "bo_agents",
+      "renderedDiagrams": 23,
+      "status": "PASS"
+    },
+    {
+      "route": "guide",
+      "viewport": "mobile",
+      "contentWidth": 390,
+      "navigationWidth": 390,
+      "navigationTarget": "settings",
+      "renderedDiagrams": 0,
+      "status": "PASS"
+    },
+    {
+      "route": "guide",
+      "viewport": "tablet",
+      "contentWidth": 592,
+      "navigationWidth": 208,
+      "navigationTarget": "settings",
+      "renderedDiagrams": 0,
+      "status": "PASS"
+    },
+    {
+      "route": "guide",
+      "viewport": "desktop",
+      "contentWidth": 1008,
+      "navigationWidth": 208,
+      "navigationTarget": "settings",
+      "renderedDiagrams": 0,
+      "status": "PASS"
+    }
+  ],
+  "captures": [
+    "architecture-mobile.png",
+    "architecture-tablet.png",
+    "architecture-desktop.png",
+    "guide-mobile.png",
+    "guide-tablet.png",
+    "guide-desktop.png"
+  ],
+  "pageErrors": [],
+  "limits": [
+    "Geometry of actual product components/CSS; no broad API/auth/worker acceptance",
+    "Read-only CI fixture serves versioned prebuilt JSON, no providers or writes"
+  ],
+  "browserRuntime": {
+    "sandboxDisableFlagsAbsent": true,
+    "profileDirectory": "/Users/foldistefan/Programare/Codex/BOGuardian/agenti/BO-A01/boagents-val4-01/packages/ui/geometry-results/tmp/playwright_chromiumdev_profile-e0dwai"
+  }
+}

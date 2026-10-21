@@ -140,3 +140,72 @@ jobs:
         run: cd packages/ui && npm run build
         env:
           NEXT_TELEMETRY_DISABLED: "1"
+
+      - name: Install Chromium for permanent geometry regression
+        if: steps.diff.outputs.ui == 'true'
+        run: cd packages/ui && npx playwright install --with-deps chromium
+
+      - name: Reference geometry, real Chromium sandbox, three viewports
+        if: steps.diff.outputs.ui == 'true'
+        run: cd packages/ui && npm run test:geometry
+        env:
+          BO_GEOMETRY_OUTPUT: ${{ runner.temp }}/bo-reference-geometry
+
+      - name: Geometry evidence
+        if: always() && steps.diff.outputs.ui == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bo-reference-geometry-${{ github.sha }}
+          path: ${{ runner.temp }}/bo-reference-geometry
+          if-no-files-found: error
+
+      - name: UI read failures, explicit retry and delayed-filter isolation
+        if: steps.diff.outputs.ui == 'true'
+        run: |
+          mkdir -p "$BO_READ_ERROR_OUTPUT"
+          cd packages/ui
+          npm run --silent test:read-errors > "$BO_READ_ERROR_OUTPUT/JUNIT.xml"
+        env:
+          BO_READ_ERROR_OUTPUT: ${{ runner.temp }}/bo-read-errors
+
+      - name: Read failure regression evidence
+        if: always() && steps.diff.outputs.ui == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bo-read-errors-${{ github.sha }}
+          path: ${{ runner.temp }}/bo-read-errors
+          if-no-files-found: error
+
+      - name: Person identifiers, invalid aliases and missing record
+        if: steps.diff.outputs.ui == 'true'
+        run: |
+          mkdir -p "$BO_PERSON_ROUTE_OUTPUT"
+          cd packages/ui
+          npm run --silent test:person-routes > "$BO_PERSON_ROUTE_OUTPUT/JUNIT.xml"
+        env:
+          BO_PERSON_ROUTE_OUTPUT: ${{ runner.temp }}/bo-person-routes
+
+      - name: Person route regression evidence
+        if: always() && steps.diff.outputs.ui == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bo-person-routes-${{ github.sha }}
+          path: ${{ runner.temp }}/bo-person-routes
+          if-no-files-found: error
+
+      - name: Review detail and note transport refusal
+        if: steps.diff.outputs.ui == 'true'
+        run: |
+          mkdir -p "$BO_READ_ERROR_OUTPUT"
+          cd packages/ui
+          npm run --silent test:review-details > "$BO_READ_ERROR_OUTPUT/JUNIT.xml"
+        env:
+          BO_READ_ERROR_OUTPUT: ${{ runner.temp }}/bo-review-details
+
+      - name: Review detail regression evidence
+        if: always() && steps.diff.outputs.ui == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bo-review-details-${{ github.sha }}
+          path: ${{ runner.temp }}/bo-review-details
+          if-no-files-found: error

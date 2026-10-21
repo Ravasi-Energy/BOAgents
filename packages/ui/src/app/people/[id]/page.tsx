@@ -155,7 +155,10 @@ export default function PersonDetailPage() {
   const params = useParams();
   const router = useRouter();
   const rawId = params?.id;
-  const personId = rawId ? parseInt(String(rawId), 10) : NaN;
+  const personId = typeof rawId === "string" && /^[1-9]\d*$/.test(rawId)
+    ? Number(rawId)
+    : NaN;
+  const validPersonId = Number.isSafeInteger(personId) && personId > 0;
 
   const [person, setPerson] = useState<Person | null>(null);
   const [loading, setLoading] = useState(true);
@@ -189,9 +192,18 @@ export default function PersonDetailPage() {
   });
 
   useEffect(() => {
-    if (isNaN(personId)) return;
+    let cancelled = false;
+    setPerson(null);
+    setError(null);
+    setLoading(true);
+    if (!validPersonId) {
+      setError("Invalid person identifier.");
+      setLoading(false);
+      return;
+    }
     getPerson(personId)
       .then((p) => {
+        if (cancelled) return;
         setPerson(p);
         resetForm(p);
         // Auto-open sections that already have data so existing values aren't hidden
@@ -202,9 +214,10 @@ export default function PersonDetailPage() {
           setShowAdvanced(true);
         }
       })
-      .catch((e) => setError(e instanceof Error ? e.message : "Failed to load"))
-      .finally(() => setLoading(false));
-  }, [personId]);
+      .catch((e) => { if (!cancelled) setError(e instanceof Error ? e.message : "Failed to load"); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [personId, validPersonId]);
 
   function resetForm(p: Person) {
     setForm(personEdit(p));
@@ -302,12 +315,12 @@ export default function PersonDetailPage() {
         <div className="max-w-2xl mx-auto px-6 py-6">
           {loading && <p className="text-fg-muted text-sm">Loading…</p>}
           {error && (
-            <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 text-sm">
+            <div role="alert" className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 text-sm">
               {error}
             </div>
           )}
 
-          {person && (
+          {person && validPersonId && person.id === personId && (
             <fieldset disabled={saving} className="min-w-0 w-full border-0 p-0">
               {conflict && <div role="alert">
                 Conflict 409: draftul este păstrat. Salvarea este blocată până la reîncărcarea explicită.

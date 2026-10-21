@@ -1,0 +1,208 @@
+{
+  "headless": true,
+  "chromiumSandbox": true,
+  "mode": "CI_ACTUAL_NEXT_READ_ONLY_HTTP_FIXTURE",
+  "checks": [
+    {
+      "id": "memory-decisions-failure-explicit-retry",
+      "status": "PASS"
+    },
+    {
+      "id": "memory-initiatives-failure-explicit-retry",
+      "status": "PASS"
+    },
+    {
+      "id": "memory-advice-failure-explicit-retry",
+      "status": "PASS"
+    },
+    {
+      "id": "review-queue-failure-explicit-retry",
+      "status": "PASS"
+    },
+    {
+      "id": "review-all-failure-explicit-retry",
+      "status": "PASS"
+    },
+    {
+      "id": "review-annotations-failure-explicit-retry",
+      "status": "PASS"
+    },
+    {
+      "id": "late-filter-response-cannot-replace-current-filter",
+      "status": "PASS"
+    }
+  ],
+  "captures": [
+    "memory-read-error-desktop.png",
+    "memory-read-error-tablet.png",
+    "memory-read-error-mobile.png",
+    "memory-read-recovered-desktop.png",
+    "memory-read-recovered-tablet.png",
+    "memory-read-recovered-mobile.png",
+    "review-read-error-desktop.png",
+    "review-read-error-tablet.png",
+    "review-read-error-mobile.png",
+    "review-read-recovered-desktop.png",
+    "review-read-recovered-tablet.png",
+    "review-read-recovered-mobile.png"
+  ],
+  "pageErrors": [],
+  "requests": [
+    {
+      "path": "/api/backend/scheduled",
+      "method": "GET"
+    },
+    {
+      "path": "/api/backend/memories/decisions",
+      "method": "GET"
+    },
+    {
+      "path": "/api/backend/memories/initiatives",
+      "method": "GET"
+    },
+    {
+      "path": "/api/backend/memories/advice",
+      "method": "GET"
+    },
+    {
+      "path": "/api/backend/today/activity/daily",
+      "method": "GET"
+    },
+    {
+      "path": "/api/backend/today/activity",
+      "method": "GET"
+    },
+    {
+      "path": "/api/backend/scheduled",
+      "method": "GET"
+    },
+    {
+      "path": "/api/backend/memories/decisions",
+      "method": "GET"
+    },
+    {
+      "path": "/api/backend/memories/initiatives",
+      "method": "GET"
+    },
+    {
+      "path": "/api/backend/memories/advice",
+      "method": "GET"
+    },
+    {
+      "path": "/api/backend/scheduled",
+      "method": "GET"
+    },
+    {
+      "path": "/api/backend/bo/settings",
+      "method": "GET"
+    },
+    {
+      "path": "/api/backend/memories/decisions",
+      "method": "GET"
+    },
+    {
+      "path": "/api/backend/memories/initiatives",
+      "method": "GET"
+    },
+    {
+      "path": "/api/backend/memories/advice",
+      "method": "GET"
+    },
+    {
+      "path": "/api/backend/review/items",
+      "method": "GET"
+    },
+    {
+      "path": "/api/backend/review/items",
+      "method": "GET"
+    },
+    {
+      "path": "/api/backend/review/trusted-defaults",
+      "method": "GET"
+    },
+    {
+      "path": "/api/backend/review/items",
+      "method": "GET"
+    },
+    {
+      "path": "/api/backend/review/items",
+      "method": "GET"
+    },
+    {
+      "path": "/api/backend/review/trusted-defaults",
+      "method": "GET"
+    },
+    {
+      "path": "/api/backend/review/items",
+      "method": "GET"
+    },
+    {
+      "path": "/api/backend/review/trusted-defaults",
+      "method": "GET"
+    },
+    {
+      "path": "/api/backend/review/items",
+      "method": "GET"
+    },
+    {
+      "path": "/api/backend/review/items",
+      "method": "GET"
+    },
+    {
+      "path": "/api/backend/review/trusted-defaults",
+      "method": "GET"
+    },
+    {
+      "path": "/api/backend/review/items",
+      "method": "GET"
+    },
+    {
+      "path": "/api/backend/review/annotations",
+      "method": "GET"
+    },
+    {
+      "path": "/api/backend/review/annotations",
+      "method": "GET"
+    },
+    {
+      "path": "/api/backend/review/items",
+      "method": "GET"
+    },
+    {
+      "path": "/api/backend/review/trusted-defaults",
+      "method": "GET"
+    },
+    {
+      "path": "/api/backend/review/items",
+      "method": "GET"
+    },
+    {
+      "path": "/api/backend/review/trusted-defaults",
+      "method": "GET"
+    },
+    {
+      "path": "/api/backend/review/trusted-defaults",
+      "method": "GET"
+    }
+  ],
+  "httpFailures": [
+    {
+      "path": "/api/backend/today/activity",
+      "status": 404
+    },
+    {
+      "path": "/api/backend/bo/settings",
+      "status": 404
+    }
+  ],
+  "limits": [
+    "Synthetic signed JWT, not Google OAuth",
+    "Network abortion only on selected reads; no write handlers or backend source patches",
+    "CI HTTP fixture uses published empty array/default-map schemas, not real domain effects",
+    "Selected failure/retry states, not whole F7 or final integration acceptance"
+  ],
+  "runtime": {
+    "sandboxDisableFlagsAbsent": true,
+    "profileDirectory": "/Users/foldistefan/Programare/Codex/BOGuardian/agenti/BO-A01/boagents-val4-01/packages/ui/read-error-results/tmp/playwright_chromiumdev_profile-I5Zxce"
+  }
+}

@@ -93,9 +93,15 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      # UI checks are gated on packages/ui actually changing — a core-only PR
-      # skips the Node toolchain entirely instead of running an unrelated gate.
-      - name: Detect UI changes
+      # UI checks run on every input that can change the browser workflows'
+      # outcome (F10): the UI itself, this workflow's own definition (the
+      # probes' infrastructure), and the backend HTTP surface the UI talks
+      # to. A workflow-only commit MUST re-run the probes — otherwise the
+      # run is green without ever executing them (observed on 28fabe7).
+      # Docs-only pushes are already skipped by `paths-ignore: **/*.md`;
+      # a pure core change with no UI/infra/API surface still skips the
+      # Node toolchain entirely.
+      - name: Detect UI-affecting changes
         id: diff
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
@@ -109,7 +115,7 @@ jobs:
             exit 0
           fi
           git diff --name-only "$BASE"...HEAD
-          if git diff --name-only "$BASE"...HEAD | grep -q '^packages/ui/'; then
+          if git diff --name-only "$BASE"...HEAD | grep -qE '^(packages/ui/|\.github/workflows/|packages/core/openexecutive/api/)'; then
             echo "ui=true" >> "$GITHUB_OUTPUT"
           else
             echo "ui=false" >> "$GITHUB_OUTPUT"

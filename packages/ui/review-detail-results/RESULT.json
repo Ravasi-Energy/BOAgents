@@ -135,6 +135,6 @@
     "headless": true,
     "chromiumSandbox": true,
     "sandboxDisableFlagsAbsent": true,
-    "profileDirectory": "/Users/foldistefan/Programare/Codex/BOGuardian/agenti/BO-A01/boagents-val4-01/packages/ui/review-detail-results/tmp/playwright_chromiumdev_profile-TyOqL8"
+    "profileDirectory": "/Users/foldistefan/Programare/Codex/BOGuardian/agenti/BO-A01/boagents-val4-01/packages/ui/review-detail-results/tmp/playwright_chromiumdev_profile-jLk4Kf"
   }
 }

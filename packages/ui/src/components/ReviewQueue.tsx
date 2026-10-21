@@ -22,6 +22,7 @@ import {
   patchReviewItem,
   peekExternalSource,
   updateBuiltinFile,
+  updateFailureFile,
 } from "@/lib/api";
 
 // ---------------------------------------------------------------------------
@@ -130,6 +131,16 @@ function ItemSlideOver({
   const notesBusy = useRef(false);
   const notesNeedReadback = useRef(false);
   const notesConfirmed = useRef("");
+  const [changeError, setChangeError] = useState<string | null>(null);
+  const [changePending, setChangePending] = useState(false);
+  const [changeReadbackRequired, setChangeReadbackRequired] = useState(false);
+  const changeBusy = useRef(false);
+  const changeUnknown = useRef(false);
+  const changeEpoch = useRef(0);
+  const [fileReadRetry, setFileReadRetry] = useState(0);
+  const [chunksError, setChunksError] = useState<string | null>(null);
+  const [chunksReadRetry, setChunksReadRetry] = useState(0);
+
 
   const readDetail = useCallback(async (preserveDraft = false) => {
     const request = ++detailEpoch.current;
@@ -155,10 +166,14 @@ function ItemSlideOver({
 
   useEffect(() => {
     setDetail(null); setNotes(""); setNotesError(null); setNotesSaving(false);
+    setChangeError(null); setChangePending(false); setChangeReadbackRequired(false);
+    changeBusy.current = false; changeUnknown.current = false;
+    setEditing(false); setEditDraft(""); setNewCorrection("");
+    setSaving(false); setAddingAnnotation(false);
     notesBusy.current = false; notesNeedReadback.current = false;
     setNotesReadbackRequired(false); notesConfirmed.current = "";
     void readDetail();
-    return () => { detailEpoch.current++; notesEpoch.current++; };
+    return () => { detailEpoch.current++; notesEpoch.current++; changeEpoch.current++; };
   }, [readDetail]);
 
   const itemId_stable = detail?.item.item_id;
@@ -170,7 +185,7 @@ function ItemSlideOver({
     setContentError(false);
     setExternalChunks([]);
     setExternalChunkLimit(10);
-    setLoadingChunks(false);
+    setLoadingChunks(false); setChunksError(null);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [itemId_stable]);
 
@@ -193,64 +208,101 @@ function ItemSlideOver({
       .finally(() => { if (!cancelled) setContentLoading(false); });
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [itemId_stable]);
+  }, [itemId_stable, fileReadRetry]);
 
   useEffect(() => {
     if (!detail || detail.item.content_type !== "external") return;
     let cancelled = false;
-    setLoadingChunks(true);
+    setLoadingChunks(true); setChunksError(null);
     peekExternalSource(detail.item.filename, externalChunkLimit)
       .then((r) => { if (!cancelled) setExternalChunks(r.chunks); })
-      .catch(() => { if (!cancelled) setExternalChunks([]); })
+      .catch((error) => { if (!cancelled) setChunksError(error instanceof Error ? error.message : "Unable to read indexed chunks."); })
       .finally(() => { if (!cancelled) setLoadingChunks(false); });
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [itemId_stable, externalChunkLimit]);
+  }, [itemId_stable, externalChunkLimit, chunksReadRetry]);
 
-  const refreshAnnotations = useCallback(() => {
-    listItemAnnotations(itemId).then((anns) => {
-      setDetail((prev) => prev ? { ...prev, annotations: anns } : prev);
-    });
-  }, [itemId]);
+  const runDetailChange = async (label: string, perform: (request: number) => Promise<void>) => {
+    if (changeBusy.current || changeUnknown.current || !detail || detail.item.item_id !== itemId) return;
+    const request = ++changeEpoch.current;
+    changeBusy.current = true; setChangePending(true); setChangeError(null);
+    setSaving(label === "Save file content"); setAddingAnnotation(label === "Add correction");
+    try { await perform(request); }
+    catch (error) {
+      if (request === changeEpoch.current) {
+        changeUnknown.current = true; setChangeReadbackRequired(true);
+        setChangeError(`${label} could not be confirmed. ${error instanceof Error ? error.message : "Unable to update review data."} Your draft is preserved. Read the current item before another change; this request will not be repeated automatically.`);
+      }
+    } finally {
+      if (request === changeEpoch.current) {
+        changeBusy.current = false; setChangePending(false); setSaving(false); setAddingAnnotation(false);
+      }
+    }
+  };
 
-  const handleSaveEdit = async () => {
+  const readChangesKeepingDraft = async () => {
+    if (changeBusy.current) return;
+    const request = ++changeEpoch.current;
+    changeBusy.current = true; setChangePending(true);
+    try {
+      const data = await getReviewItem(itemId);
+      if (data.item.item_id !== itemId || !Array.isArray(data.annotations)) throw new Error("Invalid review item response.");
+      let currentFile: string | null = null;
+      if (data.item.content_type === "builtin" || data.item.content_type === "failure") {
+        const [, domain, filename] = data.item.item_id.split(":");
+        const readFile = data.item.content_type === "failure" ? getFailureFile : getBuiltinFile;
+        currentFile = (await readFile(domain, filename)).content;
+      }
+      if (request !== changeEpoch.current) return;
+      setDetail(data); onUpdated(data.item);
+      if (currentFile !== null) { setContent(currentFile); setContentError(false); }
+      changeUnknown.current = false; setChangeReadbackRequired(false); setChangeError(null);
+    } catch (error) {
+      if (request === changeEpoch.current) setChangeError(error instanceof Error ? error.message : "Unable to read current review data.");
+    } finally {
+      if (request === changeEpoch.current) { changeBusy.current = false; setChangePending(false); }
+    }
+  };
+
+  const refreshAnnotations = async (request: number) => {
+    const anns = await listItemAnnotations(itemId);
+    if (!Array.isArray(anns)) throw new Error("Invalid review annotation response.");
+    if (request === changeEpoch.current) setDetail((prev) => prev?.item.item_id === itemId ? { ...prev, annotations: anns } : prev);
+  };
+
+  const handleSaveEdit = () => {
     if (!detail || editDraft === content) { setEditing(false); return; }
-    setSaving(true);
-    try {
+    const draft = editDraft;
+    return runDetailChange("Save file content", async (request) => {
       const [, domain, filename] = detail.item.item_id.split(":");
-      await updateBuiltinFile(domain, filename, editDraft);
-      setContent(editDraft);
-      setEditing(false);
-      // Reload item — status will have reset to needs_revision server-side
-      const updated = await getReviewItem(itemId);
-      setDetail(updated);
-      onUpdated(updated.item);
-    } finally {
-      setSaving(false);
-    }
+      const writeFile = detail.item.content_type === "failure" ? updateFailureFile : updateBuiltinFile;
+      const readFile = detail.item.content_type === "failure" ? getFailureFile : getBuiltinFile;
+      await writeFile(domain, filename, draft);
+      const [current, updated] = await Promise.all([readFile(domain, filename), getReviewItem(itemId)]);
+      if (request !== changeEpoch.current) return;
+      if (updated.item.item_id !== itemId) throw new Error("Invalid review item response.");
+      setContent(current.content); setEditing(false); setDetail(updated); onUpdated(updated.item);
+    });
   };
 
-  const handleAddAnnotation = async () => {
+  const handleAddAnnotation = () => {
     if (!newCorrection.trim()) return;
-    setAddingAnnotation(true);
-    try {
-      await addAnnotation(itemId, newCorrection.trim());
-      setNewCorrection("");
-      refreshAnnotations();
-    } finally {
-      setAddingAnnotation(false);
-    }
+    const draft = newCorrection;
+    return runDetailChange("Add correction", async (request) => {
+      await addAnnotation(itemId, draft.trim());
+      await refreshAnnotations(request);
+      if (request === changeEpoch.current) setNewCorrection((current) => current === draft ? "" : current);
+    });
   };
-
-  const handleToggleAnnotation = async (ann: ReviewAnnotation) => {
+  const handleToggleAnnotation = (ann: ReviewAnnotation) => runDetailChange("Update correction", async (request) => {
     await patchAnnotation(ann.annotation_id, { is_active: !ann.is_active });
-    refreshAnnotations();
-  };
-
-  const handleDeleteAnnotation = async (annId: string) => {
+    await refreshAnnotations(request);
+  });
+  const handleDeleteAnnotation = (annId: string) => runDetailChange("Delete correction", async (request) => {
     await deleteAnnotation(annId);
-    refreshAnnotations();
-  };
+    await refreshAnnotations(request);
+  });
+  const detailChangesDisabled = changePending || changeReadbackRequired;
 
   const handleSaveNotes = async () => {
     if (!detail || detail.item.item_id !== itemId || notesBusy.current ||
@@ -323,6 +375,7 @@ function ItemSlideOver({
         </div>
 
         <div className="flex-1 overflow-y-auto p-5 space-y-6">
+          {changeError && <div role="alert" className="text-sm text-fg-muted"><p>{changeError}</p><button type="button" disabled={changePending} onClick={() => { void readChangesKeepingDraft(); }} className="underline hover:text-fg">Read current review changes; keep drafts</button></div>}
           {/* Builtin file content */}
           {isBuiltin && (
             <section>
@@ -330,6 +383,7 @@ function ItemSlideOver({
                 <p className="text-xs font-medium text-fg-muted uppercase tracking-wide">Document content</p>
                 {!editing && content != null && (
                   <button
+                    disabled={detailChangesDisabled}
                     onClick={() => { setEditDraft(content); setEditing(true); }}
                     className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors"
                   >
@@ -340,6 +394,8 @@ function ItemSlideOver({
               {editing ? (
                 <div className="space-y-2">
                   <textarea
+                    aria-label="File content draft"
+                    disabled={changePending}
                     value={editDraft}
                     onChange={(e) => setEditDraft(e.target.value)}
                     className="w-full h-72 bg-surface-elevated border border-line-strong rounded-lg px-3 py-2 text-xs text-fg font-mono resize-y focus:outline-none focus:border-indigo-500"
@@ -347,12 +403,13 @@ function ItemSlideOver({
                   <div className="flex gap-2">
                     <button
                       onClick={handleSaveEdit}
-                      disabled={saving}
+                      disabled={detailChangesDisabled}
                       className="text-xs bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50"
                     >
                       {saving ? "Saving…" : "Save"}
                     </button>
                     <button
+                      disabled={changePending}
                       onClick={() => setEditing(false)}
                       className="text-xs text-fg-muted hover:text-fg px-3 py-1.5 rounded-lg transition-colors"
                     >
@@ -363,7 +420,7 @@ function ItemSlideOver({
               ) : contentLoading ? (
                 <p className="text-xs text-fg-subtle">Loading…</p>
               ) : contentError ? (
-                <p className="text-xs text-red-500/70">Could not load file content.</p>
+                <div role="alert" className="text-xs text-red-500/70"><p>Could not load file content.</p><button type="button" onClick={() => setFileReadRetry(n => n + 1)}>Retry reading file content</button></div>
               ) : content != null ? (
                 <pre className="text-xs text-fg bg-surface-elevated/60 border border-line rounded-lg p-3 overflow-x-auto whitespace-pre-wrap font-mono max-h-96">{content}</pre>
               ) : null}
@@ -382,7 +439,8 @@ function ItemSlideOver({
               <p className="text-[11px] text-fg-subtle mb-3">
                 Indexed chunks from <span className="text-fg-muted">{item.filename}</span> — this is the text the AI retrieves from this source.
               </p>
-              {!loadingChunks && externalChunks.length === 0 && (
+              {chunksError && <div role="alert" className="text-xs text-red-400"><p>Indexed chunks could not be read. This is not an empty source.</p><p>{chunksError}</p><button type="button" disabled={loadingChunks} onClick={() => setChunksReadRetry(n => n + 1)}>Retry reading indexed chunks</button></div>}
+              {!loadingChunks && !chunksError && externalChunks.length === 0 && (
                 <div className="bg-surface-elevated/60 border border-line rounded-lg p-4 text-center">
                   <p className="text-xs text-fg-muted mb-1">No indexed chunks found.</p>
                   <p className="text-[11px] text-fg-subtle">
@@ -449,12 +507,15 @@ function ItemSlideOver({
                   <p className="flex-1 text-xs text-fg">{ann.correction}</p>
                   <div className="flex items-center gap-1 flex-shrink-0">
                     <button
+                      disabled={detailChangesDisabled}
                       onClick={() => handleToggleAnnotation(ann)}
                       className={`text-[10px] px-1.5 py-0.5 rounded-full border transition-colors ${ann.is_active ? "bg-emerald-950/60 text-emerald-400 border-emerald-900/60 hover:bg-red-950/60 hover:text-red-400 hover:border-red-900/60" : "bg-surface-overlay/60 text-fg-muted border-line-strong/60 hover:bg-emerald-950/60 hover:text-emerald-400 hover:border-emerald-900/60"}`}
                     >
                       {ann.is_active ? "Active" : "Inactive"}
                     </button>
                     <button
+                      aria-label="Delete correction"
+                      disabled={detailChangesDisabled}
                       onClick={() => handleDeleteAnnotation(ann.annotation_id)}
                       className="text-fg-subtle hover:text-red-400 transition-colors p-0.5"
                     >
@@ -467,6 +528,7 @@ function ItemSlideOver({
               ))}
               <div className="flex gap-2">
                 <input
+                  disabled={changePending}
                   value={newCorrection}
                   onChange={(e) => setNewCorrection(e.target.value)}
                   onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void handleAddAnnotation(); } }}
@@ -475,7 +537,7 @@ function ItemSlideOver({
                 />
                 <button
                   onClick={handleAddAnnotation}
-                  disabled={addingAnnotation || !newCorrection.trim()}
+                  disabled={addingAnnotation || detailChangesDisabled || !newCorrection.trim()}
                   className="text-xs bg-surface-overlay hover:bg-surface-input text-fg px-3 py-1.5 rounded-lg transition-colors disabled:opacity-40"
                 >
                   Add
@@ -515,6 +577,19 @@ export default function ReviewQueue() {
   const [pendingItems, setPendingItems] = useState<ReviewItem[]>([]);
   const [readError, setReadError] = useState<string | null>(null);
   const readEpoch = useRef(0);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [actionPending, setActionPending] = useState(false);
+  const [actionReadbackRequired, setActionReadbackRequired] = useState(false);
+  const actionBusy = useRef(false);
+  const actionUnknown = useRef(false);
+  const actionEpoch = useRef(0);
+
+  const confirmReadback = useCallback(() => {
+    actionUnknown.current = false;
+    setActionReadbackRequired(false);
+    setActionError(null);
+  }, []);
+
 
   const loadQueue = useCallback(async () => {
     const request = ++readEpoch.current;
@@ -530,12 +605,13 @@ export default function ReviewQueue() {
       if (!Array.isArray(pending) || !Array.isArray(needsRevision) || !validTrustedDefaults(defaults)) throw new Error("Invalid review data response.");
       setItems([...pending, ...needsRevision]);
       setTrustedDefaults(defaults);
+      confirmReadback();
     } catch (error) {
       if (request === readEpoch.current) setReadError(error instanceof Error ? error.message : "Unable to read review data.");
     } finally {
       if (request === readEpoch.current) setLoading(false);
     }
-  }, []);
+  }, [confirmReadback]);
 
   const loadAll = useCallback(async () => {
     const request = ++readEpoch.current;
@@ -560,13 +636,14 @@ export default function ReviewQueue() {
       if (!Array.isArray(result) || !Array.isArray(pending) || !validTrustedDefaults(defaults)) throw new Error("Invalid review data response.");
       setAllItems(result);
       setTrustedDefaults(defaults);
+      confirmReadback();
       setPendingItems(pending);
     } catch (error) {
       if (request === readEpoch.current) setReadError(error instanceof Error ? error.message : "Unable to read review data.");
     } finally {
       if (request === readEpoch.current) setLoading(false);
     }
-  }, [filterStatus, filterDomain, filterType]);
+  }, [filterStatus, filterDomain, filterType, confirmReadback]);
 
   const loadAnnotations = useCallback(async () => {
     const request = ++readEpoch.current;
@@ -577,12 +654,13 @@ export default function ReviewQueue() {
       if (request !== readEpoch.current) return;
       if (!Array.isArray(anns)) throw new Error("Invalid annotations response.");
       setAnnotations(anns);
+      confirmReadback();
     } catch (error) {
       if (request === readEpoch.current) setReadError(error instanceof Error ? error.message : "Unable to read review data.");
     } finally {
       if (request === readEpoch.current) setLoading(false);
     }
-  }, []);
+  }, [confirmReadback]);
 
   useEffect(() => {
     if (tab === "queue") loadQueue();
@@ -591,57 +669,86 @@ export default function ReviewQueue() {
     return () => { readEpoch.current++; };
   }, [tab, loadQueue, loadAll, loadAnnotations]);
 
-  const handleApprove = async (item: ReviewItem) => {
-    const updated = await patchReviewItem(item.item_id, { status: "approved" });
-    setItems((prev) => prev.filter((i) => i.item_id !== item.item_id));
-    setAllItems((prev) => prev.map((i) => (i.item_id === updated.item_id ? updated : i)));
+  useEffect(() => () => { actionEpoch.current++; }, []);
+
+  const runAction = async (label: string, perform: () => Promise<void>) => {
+    if (actionBusy.current || actionUnknown.current || loading) return;
+    actionBusy.current = true;
+    setActionPending(true);
+    setActionError(null);
+    const request = ++actionEpoch.current;
+    // A list read started before the write must never overwrite its reply.
+    readEpoch.current++;
+    try {
+      await perform();
+    } catch (error) {
+      if (request !== actionEpoch.current) return;
+      actionUnknown.current = true;
+      setActionReadbackRequired(true);
+      setActionError(`${label} failed. ${error instanceof Error ? error.message : "Unable to update review data."} Read the current review data before another change. The request will not be repeated automatically.`);
+    } finally {
+      if (request === actionEpoch.current) {
+        actionBusy.current = false;
+        setActionPending(false);
+      }
+    }
   };
 
-  const handleFlag = async (item: ReviewItem) => {
-    const updated = await patchReviewItem(item.item_id, { status: "needs_revision" });
-    setItems((prev) => prev.map((i) => (i.item_id === updated.item_id ? updated : i)));
-    setAllItems((prev) => prev.map((i) => (i.item_id === updated.item_id ? updated : i)));
+  const updateItem = async (item: ReviewItem, patch: Parameters<typeof patchReviewItem>[1], removeFromQueue = false) => {
+    const request = actionEpoch.current;
+    const updated = await patchReviewItem(item.item_id, patch);
+    if (request !== actionEpoch.current) return;
+    if (updated.item_id !== item.item_id) throw new Error("Invalid review update response.");
+    setItems((prev) => removeFromQueue ? prev.filter((i) => i.item_id !== item.item_id) : prev.map((i) => i.item_id === updated.item_id ? updated : i));
+    setAllItems((prev) => prev.map((i) => i.item_id === updated.item_id ? updated : i));
   };
 
-  const handleRejectConfirm = async () => {
+  const handleApprove = (item: ReviewItem) => runAction("Approve review item", () => updateItem(item, { status: "approved" }, true));
+  const handleFlag = (item: ReviewItem) => runAction("Flag review item", () => updateItem(item, { status: "needs_revision" }));
+  const handlePriorityChange = (item: ReviewItem, priority: ReviewPriority) => runAction("Change review priority", () => updateItem(item, { priority }));
+
+  const handleRejectConfirm = () => {
     if (!rejectModal) return;
-    const updated = await patchReviewItem(rejectModal.itemId, {
-      status: "rejected",
-      reviewer_notes: rejectModal.notes,
+    const draft = rejectModal;
+    return runAction("Reject review item", async () => {
+      const request = actionEpoch.current;
+      const updated = await patchReviewItem(draft.itemId, { status: "rejected", reviewer_notes: draft.notes });
+      if (request !== actionEpoch.current) return;
+      if (updated.item_id !== draft.itemId) throw new Error("Invalid review update response.");
+      setItems((prev) => prev.filter((i) => i.item_id !== draft.itemId));
+      setAllItems((prev) => prev.map((i) => i.item_id === updated.item_id ? updated : i));
+      setRejectModal(null);
     });
-    setItems((prev) => prev.filter((i) => i.item_id !== rejectModal.itemId));
-    setAllItems((prev) => prev.map((i) => (i.item_id === updated.item_id ? updated : i)));
-    setRejectModal(null);
   };
 
-  const handlePriorityChange = async (item: ReviewItem, priority: ReviewPriority) => {
-    const updated = await patchReviewItem(item.item_id, { priority });
-    setItems((prev) => prev.map((i) => (i.item_id === updated.item_id ? updated : i)));
-    setAllItems((prev) => prev.map((i) => (i.item_id === updated.item_id ? updated : i)));
-  };
-
-  const handleBulkApprove = async (domain?: string) => {
+  const handleBulkApprove = (domain?: string) => runAction("Approve pending review items", async () => {
+    const request = actionEpoch.current;
     await bulkApproveReviewItems(domain);
-    await loadQueue();
-    await loadAll();
-  };
+    if (request !== actionEpoch.current) return;
+    if (tab === "queue") await loadQueue(); else await loadAll();
+  });
 
-  const handleCurate = async (domain: string, action: "start" | "stop") => {
-    // Starting curation withholds that domain from the Executive, so say so
-    // before doing it — this is the one action here that removes knowledge.
+  const handleCurate = (domain: string, action: "start" | "stop") => {
+    if (actionBusy.current || actionUnknown.current) return;
     if (action === "start") {
       const n = trustedDefaults[domain] ?? 0;
-      const ok = window.confirm(
-        `Queue ${n} item${n === 1 ? "" : "s"} in "${domain}" for review?\n\n` +
-          `They will be withheld from the Executive until you approve them. ` +
-          `You can undo this with "Stop curating".`,
-      );
-      if (!ok) return;
+      if (!window.confirm(`Queue ${n} item${n === 1 ? "" : "s"} in "${domain}" for review?\n\nThey will be withheld from the Executive until you approve them. You can undo this with "Stop curating".`)) return;
     }
-    await curateDomain(domain, action);
-    await loadQueue();
-    await loadAll();
+    return runAction("Curate review domain", async () => {
+      const request = actionEpoch.current;
+      await curateDomain(domain, action);
+      if (request !== actionEpoch.current) return;
+      if (tab === "queue") await loadQueue(); else await loadAll();
+    });
   };
+
+  const readCurrentReview = () => {
+    if (actionBusy.current) return;
+    if (tab === "queue") void loadQueue();
+    else if (tab === "all") void loadAll();
+    else void loadAnnotations();
+  };
+  const actionsDisabled = actionPending || actionReadbackRequired || loading || readError !== null;
 
   const handleItemUpdated = (updated: ReviewItem) => {
     setItems((prev) => prev.map((i) => (i.item_id === updated.item_id ? updated : i)));
@@ -661,11 +768,13 @@ export default function ReviewQueue() {
 
   return (
     <div className="p-6">
+      {actionError && <div role="alert" className="text-sm text-fg-muted mb-4"><p>{actionError}</p><button type="button" className="underline hover:text-fg" disabled={actionPending || loading} onClick={readCurrentReview}>Read current review data; keep draft</button></div>}
       {/* Tabs */}
       <div className="flex gap-1 border-b border-line mb-6">
         {(["queue", "all", "annotations"] as Tab[]).map((t) => (
           <button
             key={t}
+            disabled={actionPending}
             onClick={() => setTab(t)}
             className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
               tab === t
@@ -689,6 +798,7 @@ export default function ReviewQueue() {
             </p>
             {!loading && items.length > 0 && (
               <button
+                disabled={actionsDisabled}
                 onClick={() => handleBulkApprove()}
                 className="text-xs bg-emerald-900/40 hover:bg-emerald-900/60 text-emerald-400 border border-emerald-900/60 px-3 py-1.5 rounded-lg transition-colors"
               >
@@ -720,6 +830,7 @@ export default function ReviewQueue() {
                       .map(([domain, count]) => (
                         <button
                           key={domain}
+                          disabled={actionsDisabled}
                           onClick={() => handleCurate(domain, "start")}
                           className="text-[11px] text-fg-muted hover:text-amber-400 bg-surface-elevated border border-line-strong hover:border-amber-900/60 px-2.5 py-1.5 rounded-lg transition-colors"
                         >
@@ -735,6 +846,7 @@ export default function ReviewQueue() {
             {(!loading ? items : []).map((item) => (
               <ItemRow
                 key={item.item_id}
+                disabled={actionsDisabled}
                 item={item}
                 onApprove={() => handleApprove(item)}
                 onReject={() => setRejectModal({ itemId: item.item_id, notes: "" })}
@@ -754,6 +866,7 @@ export default function ReviewQueue() {
           <div className="flex gap-2 mb-4 flex-wrap">
             <select
               value={filterStatus}
+              disabled={actionPending}
               onChange={(e) => setFilterStatus(e.target.value as ReviewStatus | "")}
               className="bg-surface-elevated border border-line-strong rounded-lg px-3 py-1.5 text-xs text-fg focus:outline-none focus:border-indigo-500"
             >
@@ -765,6 +878,7 @@ export default function ReviewQueue() {
             </select>
             <select
               value={filterDomain}
+              disabled={actionPending}
               onChange={(e) => setFilterDomain(e.target.value)}
               className="bg-surface-elevated border border-line-strong rounded-lg px-3 py-1.5 text-xs text-fg focus:outline-none focus:border-indigo-500"
             >
@@ -773,6 +887,7 @@ export default function ReviewQueue() {
             </select>
             <select
               value={filterType}
+              disabled={actionPending}
               onChange={(e) => setFilterType(e.target.value as "builtin" | "external" | "")}
               className="bg-surface-elevated border border-line-strong rounded-lg px-3 py-1.5 text-xs text-fg focus:outline-none focus:border-indigo-500"
             >
@@ -800,6 +915,7 @@ export default function ReviewQueue() {
                   <div key={d} className="flex gap-1">
                     {pendingInDomain.length > 0 && (
                       <button
+                        disabled={actionsDisabled}
                         onClick={() => handleBulkApprove(d)}
                         className="text-[10px] text-fg-muted hover:text-emerald-400 bg-surface-elevated border border-line-strong hover:border-emerald-900/60 px-2 py-1 rounded-lg transition-colors"
                       >
@@ -808,6 +924,7 @@ export default function ReviewQueue() {
                     )}
                     {untouchedPending > 0 ? (
                       <button
+                        disabled={actionsDisabled}
                         onClick={() => handleCurate(d, "stop")}
                         className="text-[10px] text-fg-muted hover:text-fg bg-surface-elevated border border-line-strong px-2 py-1 rounded-lg transition-colors"
                         title={`Return ${untouchedPending} unreviewed item(s) in ${d} to trusted default`}
@@ -817,6 +934,7 @@ export default function ReviewQueue() {
                     ) : (
                       defaultsInDomain > 0 && (
                         <button
+                          disabled={actionsDisabled}
                           onClick={() => handleCurate(d, "start")}
                           className="text-[10px] text-fg-muted hover:text-amber-400 bg-surface-elevated border border-line-strong hover:border-amber-900/60 px-2 py-1 rounded-lg transition-colors"
                           title={`Send ${defaultsInDomain} shipped item(s) in ${d} for review — they will be withheld from the Executive until approved`}
@@ -836,6 +954,7 @@ export default function ReviewQueue() {
             {(!loading ? allItems : []).map((item) => (
               <ItemRow
                 key={item.item_id}
+                disabled={actionsDisabled}
                 item={item}
                 onApprove={() => handleApprove(item)}
                 onReject={() => setRejectModal({ itemId: item.item_id, notes: "" })}
@@ -869,13 +988,16 @@ export default function ReviewQueue() {
                 </div>
                 <div className="flex items-center gap-1 flex-shrink-0">
                   <button
-                    onClick={() => void patchAnnotation(ann.annotation_id, { is_active: false }).then(loadAnnotations)}
+                    disabled={actionsDisabled}
+                    onClick={() => void runAction("Update correction", async () => { const request = actionEpoch.current; await patchAnnotation(ann.annotation_id, { is_active: false }); if (request === actionEpoch.current) await loadAnnotations(); })}
                     className="text-[10px] bg-emerald-950/60 text-emerald-400 border border-emerald-900/60 px-1.5 py-0.5 rounded-full hover:bg-red-950/60 hover:text-red-400 hover:border-red-900/60 transition-colors"
                   >
                     Active
                   </button>
                   <button
-                    onClick={() => void deleteAnnotation(ann.annotation_id).then(loadAnnotations)}
+                    aria-label="Delete correction"
+                    disabled={actionsDisabled}
+                    onClick={() => void runAction("Delete correction", async () => { const request = actionEpoch.current; await deleteAnnotation(ann.annotation_id); if (request === actionEpoch.current) await loadAnnotations(); })}
                     className="text-fg-subtle hover:text-red-400 p-0.5"
                   >
                     <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -895,10 +1017,12 @@ export default function ReviewQueue() {
       {/* Reject modal */}
       {rejectModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/60" onClick={() => setRejectModal(null)} />
-          <div className="relative bg-surface-elevated border border-line-strong rounded-xl p-5 w-[400px] shadow-2xl">
+          <div className="absolute inset-0 bg-black/60" onClick={() => { if (!actionPending) setRejectModal(null); }} />
+          <div role="dialog" aria-modal="true" aria-label="Reject item" className="relative bg-surface-elevated border border-line-strong rounded-xl p-5 w-[400px] shadow-2xl" style={{ maxWidth: "calc(100vw - 2rem)" }}>
             <p className="text-sm font-medium text-fg mb-3">Reject item</p>
+            {actionError && <div role="alert" className="text-sm text-fg-muted mb-3"><p>{actionError}</p><button type="button" className="underline hover:text-fg" disabled={actionPending || loading} onClick={readCurrentReview}>Read current review data; keep draft</button></div>}
             <textarea
+              disabled={actionPending}
               value={rejectModal.notes}
               onChange={(e) => setRejectModal({ ...rejectModal, notes: e.target.value })}
               placeholder="Optional notes about why this is rejected…"
@@ -906,12 +1030,14 @@ export default function ReviewQueue() {
             />
             <div className="flex gap-2 justify-end">
               <button
+                disabled={actionPending}
                 onClick={() => setRejectModal(null)}
                 className="text-xs text-fg-muted hover:text-fg px-3 py-1.5 rounded-lg transition-colors"
               >
                 Cancel
               </button>
               <button
+                disabled={actionsDisabled}
                 onClick={handleRejectConfirm}
                 className="text-xs bg-red-900/40 hover:bg-red-900/60 text-red-400 border border-red-900/60 px-3 py-1.5 rounded-lg transition-colors"
               >
@@ -939,6 +1065,7 @@ export default function ReviewQueue() {
 // ---------------------------------------------------------------------------
 
 function ItemRow({
+  disabled,
   item,
   onApprove,
   onReject,
@@ -946,6 +1073,7 @@ function ItemRow({
   onView,
   onPriorityChange,
 }: {
+  disabled: boolean;
   item: ReviewItem;
   onApprove: () => void;
   onReject: () => void;
@@ -985,6 +1113,7 @@ function ItemRow({
 
       {/* Priority selector */}
       <select
+        disabled={disabled}
         value={item.priority}
         onChange={(e) => onPriorityChange(e.target.value as ReviewPriority)}
         className="bg-surface-elevated border border-line-strong rounded-lg px-2 py-1 text-[10px] text-fg-muted focus:outline-none focus:border-indigo-500"
@@ -1005,6 +1134,7 @@ function ItemRow({
         </button>
         {item.status !== "approved" && (
           <button
+            disabled={disabled}
             onClick={onApprove}
             className="text-[10px] text-emerald-400 hover:text-emerald-300 bg-emerald-950/40 hover:bg-emerald-950/60 border border-emerald-900/60 px-2 py-1 rounded-lg transition-colors"
           >
@@ -1013,6 +1143,7 @@ function ItemRow({
         )}
         {item.status !== "needs_revision" && (
           <button
+            disabled={disabled}
             onClick={onFlag}
             className="text-[10px] text-violet-400 hover:text-violet-300 bg-violet-950/40 hover:bg-violet-950/60 border border-violet-900/60 px-2 py-1 rounded-lg transition-colors"
           >
@@ -1021,6 +1152,7 @@ function ItemRow({
         )}
         {item.status !== "rejected" && (
           <button
+            disabled={disabled}
             onClick={onReject}
             className="text-[10px] text-red-400 hover:text-red-300 bg-red-950/40 hover:bg-red-950/60 border border-red-900/60 px-2 py-1 rounded-lg transition-colors"
           >

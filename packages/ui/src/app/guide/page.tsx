@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 
 import DynamicSection from '@/components/architecture/DynamicSection';
+import { useReferenceScroll } from '../../lib/reference-scroll';
 
 // The section nav is hardcoded so the sidebar renders instantly without
 // waiting for the backend. IDs must match the GUIDE_SECTIONS registry in
@@ -37,6 +38,7 @@ interface SectionMeta {
 }
 
 export default function GuidePage() {
+  const { scrollRef, scrollToSection, getTrackedSection } = useReferenceScroll();
   const [activeSection, setActiveSection] = useState('chat');
   const [sectionMeta, setSectionMeta] = useState<Record<string, SectionMeta>>({});
   const observerRef = useRef<IntersectionObserver | null>(null);
@@ -57,6 +59,8 @@ export default function GuidePage() {
     observerRef.current?.disconnect();
     observerRef.current = new IntersectionObserver(
       (entries) => {
+        const tracked = getTrackedSection();
+        if (tracked) { setActiveSection(tracked); return; }
         for (const e of entries) if (e.isIntersecting) setActiveSection(e.target.id);
       },
       { rootMargin: '-20% 0px -70% 0px', threshold: 0 }
@@ -66,7 +70,7 @@ export default function GuidePage() {
       if (el) observerRef.current?.observe(el);
     });
     return () => observerRef.current?.disconnect();
-  }, []);
+  }, [getTrackedSection]);
 
   const freshCount = Object.values(sectionMeta).filter((s) => s.fresh).length;
   const totalCount = SECTIONS.length;
@@ -86,9 +90,10 @@ export default function GuidePage() {
                 <a
                   key={id}
                   href={`#${id}`}
+                  aria-current={activeSection === id ? "location" : undefined}
                   onClick={(e) => {
                     e.preventDefault();
-                    document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    if (scrollToSection(id)) setActiveSection(id);
                   }}
                   className={`flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs transition-colors ${
                     activeSection === id
@@ -119,7 +124,7 @@ export default function GuidePage() {
         </div>
       </aside>
 
-      <main className="flex-1 min-w-0 min-h-0 overflow-y-auto">
+      <main ref={scrollRef} className="flex-1 min-w-0 min-h-0 overflow-y-auto">
         <div className="max-w-4xl mx-auto px-4 md:px-8 py-10 space-y-20">
           <div>
             <h1 className="text-2xl font-bold text-fg">Open Executive — User Guide</h1>

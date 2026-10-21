@@ -1,0 +1,121 @@
+{
+  "UIoverlay": false,
+  "backendOverlay": false,
+  "checks": [
+    {
+      "id": "review-priority-PATCH200-readback-reload",
+      "status": "PASS"
+    },
+    {
+      "id": "review-flag-transport-refusal-visible-error-no-unhandled",
+      "status": "PASS"
+    },
+    {
+      "id": "review-flag-unknown-blocked-explicit-readback-keeps-draft-no-replay",
+      "status": "PASS"
+    },
+    {
+      "id": "review-priority-transport-refusal-visible-error-no-unhandled",
+      "status": "PASS"
+    },
+    {
+      "id": "review-priority-unknown-blocked-explicit-readback-keeps-draft-no-replay",
+      "status": "PASS"
+    },
+    {
+      "id": "review-reject-transport-refusal-visible-error-no-unhandled",
+      "status": "PASS"
+    },
+    {
+      "id": "review-reject-unknown-blocked-explicit-readback-keeps-draft-no-replay",
+      "status": "PASS"
+    },
+    {
+      "id": "review-explicit-reject-after-readback-real-PATCH-GET-reload",
+      "status": "PASS"
+    },
+    {
+      "id": "review-approve-real-PATCH-readback-reload",
+      "status": "PASS"
+    },
+    {
+      "id": "review-flag-real-PATCH-readback-reload",
+      "status": "PASS"
+    },
+    {
+      "id": "review-lostACK-after-real-commit-unknown-until-explicit-readback-no-replay",
+      "status": "PASS"
+    },
+    {
+      "id": "review-approve-transport-refusal-visible-unknown-readback-no-replay",
+      "status": "PASS"
+    },
+    {
+      "id": "review-curate-transport-refusal-visible-unknown-readback-no-replay",
+      "status": "PASS"
+    },
+    {
+      "id": "review-curate-real-POST-GET-pending-readback",
+      "status": "PASS"
+    },
+    {
+      "id": "review-bulk-approve-transport-refusal-unknown-readback-no-replay",
+      "status": "PASS"
+    },
+    {
+      "id": "review-bulk-approve-real-POST-GET-readback",
+      "status": "PASS"
+    }
+  ],
+  "captures": [
+    "review-priority-persisted-desktop.png",
+    "review-priority-persisted-tablet.png",
+    "review-priority-persisted-mobile.png",
+    "review-reject-transport-refused-desktop.png",
+    "review-reject-transport-refused-tablet.png",
+    "review-reject-transport-refused-mobile.png",
+    "review-actions-persisted-desktop.png",
+    "review-actions-persisted-tablet.png",
+    "review-actions-persisted-mobile.png",
+    "review-lostack-recovered-desktop.png",
+    "review-lostack-recovered-tablet.png",
+    "review-lostack-recovered-mobile.png"
+  ],
+  "pageErrors": [],
+  "observations": [
+    {
+      "action": "flag",
+      "visibleErrorCount": 1,
+      "newPageErrors": [],
+      "serverStateUnchanged": true,
+      "localPriority": "high"
+    },
+    {
+      "action": "priority",
+      "visibleErrorCount": 1,
+      "newPageErrors": [],
+      "serverStateUnchanged": true,
+      "localPriority": "high"
+    },
+    {
+      "action": "reject",
+      "visibleErrorCount": 2,
+      "newPageErrors": [],
+      "serverStateUnchanged": true,
+      "localPriority": "high",
+      "rejectDraft": "BO01 rejected transport draft"
+    }
+  ],
+  "limits": [
+    "Actual complete local API/private SQLite and synthetic signed JWT; no workers/providers/GoogleOAuth",
+    "Synthetic priority/status/reviewer_notes mutations; selected transport abort and lost ACK after commit; no role/CAS/worker or source/proof/file deletion claim"
+  ],
+  "mode": "CI_ACTUAL_NEXT_CONTROLLED_HTTP_NO_DOMAIN_DB_EFFECT_CLAIM",
+  "runtime": {
+    "headless": true,
+    "chromiumSandbox": true,
+    "sandboxDisableFlagsAbsent": true,
+    "profileDirectory": "/Users/foldistefan/Programare/Codex/BOGuardian/agenti/BO-A01/boagents-val4-01/packages/ui/review-action-results/tmp/playwright_chromiumdev_profile-MGed2G"
+  },
+  "writes": 3
+}

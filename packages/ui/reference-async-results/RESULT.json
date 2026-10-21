@@ -1,0 +1,119 @@
+{
+  "UIoverlay": false,
+  "backendOverlay": false,
+  "checks": [
+    {
+      "id": "architecture-pending-sections-and-SVG-keep-selected-target-mobile",
+      "status": "PASS"
+    },
+    {
+      "id": "architecture-user-wheel-releases-tracking-after-resize-mobile",
+      "status": "PASS",
+      "gap": 319.765625,
+      "selectedGap": -0.234375
+    },
+    {
+      "id": "architecture-pending-sections-and-SVG-keep-selected-target-tablet",
+      "status": "PASS"
+    },
+    {
+      "id": "architecture-user-wheel-releases-tracking-after-resize-tablet",
+      "status": "PASS",
+      "gap": 320.40625,
+      "selectedGap": 0.40625
+    },
+    {
+      "id": "architecture-pending-sections-and-SVG-keep-selected-target-desktop",
+      "status": "PASS"
+    },
+    {
+      "id": "architecture-user-wheel-releases-tracking-after-resize-desktop",
+      "status": "PASS",
+      "gap": 320.34375,
+      "selectedGap": 0.34375
+    },
+    {
+      "id": "guide-pending-sections-and-SVG-keep-selected-target-mobile",
+      "status": "PASS"
+    },
+    {
+      "id": "guide-user-wheel-releases-tracking-after-resize-mobile",
+      "status": "PASS",
+      "gap": 340,
+      "selectedGap": 20
+    },
+    {
+      "id": "guide-pending-sections-and-SVG-keep-selected-target-tablet",
+      "status": "PASS"
+    },
+    {
+      "id": "guide-user-wheel-releases-tracking-after-resize-tablet",
+      "status": "PASS",
+      "gap": 600,
+      "selectedGap": 280
+    },
+    {
+      "id": "guide-pending-sections-and-SVG-keep-selected-target-desktop",
+      "status": "PASS"
+    },
+    {
+      "id": "guide-user-wheel-releases-tracking-after-resize-desktop",
+      "status": "PASS",
+      "gap": 800,
+      "selectedGap": 480
+    }
+  ],
+  "captures": [
+    "architecture-pending-mobile.png",
+    "architecture-pending-tablet.png",
+    "architecture-pending-desktop.png",
+    "guide-pending-mobile.png",
+    "guide-pending-tablet.png",
+    "guide-pending-desktop.png"
+  ],
+  "pageErrors": [],
+  "limits": [
+    "Actual Architecture/DynamicSection/Mermaid/React source and CSS compiled into component bundle, existing Next/API; NOT integrated product AFTER",
+    "Browser defers authentic GET responses, no DTO fabrication, generation or writes"
+  ],
+  "mode": "CI_ACTUAL_NEXT_STATIC_VERSIONED_REFERENCE_FIXTURE",
+  "runtime": {
+    "sandboxDisableFlagsAbsent": true,
+    "profile": "/Users/foldistefan/Programare/Codex/BOGuardian/agenti/BO-A01/boagents-val4-01/packages/ui/reference-async-results/tmp/playwright_chromiumdev_profile-qaDuuc"
+  },
+  "beforeRelease": {
+    "routeName": "guide",
+    "viewport": "desktop",
+    "held": 19,
+    "scrollTop": 4374,
+    "target": {
+      "x": 520,
+      "y": 701.921875,
+      "width": 832,
+      "height": 52
+    },
+    "main": {
+      "x": 432,
+      "y": 56,
+      "width": 1008,
+      "height": 844
+    }
+  },
+  "afterRelease": {
+    "routeName": "guide",
+    "viewport": "desktop",
+    "scrollTop": 8163,
+    "target": {
+      "x": 520,
+      "y": 536,
+      "width": 832,
+      "height": 52
+    },
+    "main": {
+      "x": 432,
+      "y": 56,
+      "width": 1008,
+      "height": 844
+    }
+  }
+}

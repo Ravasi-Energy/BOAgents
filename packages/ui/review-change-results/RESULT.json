@@ -1,0 +1,106 @@
+{
+  "UIoverlay": false,
+  "backendOverlay": false,
+  "checks": [
+    {
+      "id": "review-correction-real-POST-GET-browser-reload",
+      "status": "PASS"
+    },
+    {
+      "id": "review-correction-refused-POST-error-draft-no-effect",
+      "status": "PASS"
+    },
+    {
+      "id": "review-correction-explicit-readback-keeps-draft-no-replay",
+      "status": "PASS"
+    },
+    {
+      "id": "review-correction-toggle-refused-error-no-effect",
+      "status": "PASS"
+    },
+    {
+      "id": "review-correction-toggle-real-PATCH-GET",
+      "status": "PASS"
+    },
+    {
+      "id": "review-correction-delete-aborted-before-server-error-no-effect",
+      "status": "PASS"
+    },
+    {
+      "id": "review-builtin-file-PUT-correct-namespace-aborted-draft-error-no-effect",
+      "status": "PASS"
+    },
+    {
+      "id": "review-builtin-file-explicit-readback-preserves-draft-no-PUT-replay",
+      "status": "PASS"
+    },
+    {
+      "id": "review-failure-file-PUT-correct-namespace-aborted-draft-error-no-effect",
+      "status": "PASS"
+    },
+    {
+      "id": "review-failure-file-explicit-readback-preserves-draft-no-PUT-replay",
+      "status": "PASS"
+    },
+    {
+      "id": "review-global-annotation-PATCH-aborted-error-no-effect",
+      "status": "PASS"
+    },
+    {
+      "id": "review-global-annotation-DELETE-aborted-error-no-effect",
+      "status": "PASS"
+    },
+    {
+      "id": "review-global-annotation-toggle-real-PATCH-GET",
+      "status": "PASS"
+    },
+    {
+      "id": "review-external-chunk-refused-read-is-error-not-empty-CI-only",
+      "status": "PASS"
+    },
+    {
+      "id": "review-external-chunk-explicit-read-recovery-CI-only",
+      "status": "PASS"
+    }
+  ],
+  "captures": [
+    "correction-refused-desktop.png",
+    "correction-refused-tablet.png",
+    "correction-refused-mobile.png",
+    "builtin-file-refused-desktop.png",
+    "builtin-file-refused-tablet.png",
+    "builtin-file-refused-mobile.png",
+    "failure-file-refused-desktop.png",
+    "failure-file-refused-tablet.png",
+    "failure-file-refused-mobile.png"
+  ],
+  "pageErrors": [],
+  "observations": [
+    {
+      "type": "builtin",
+      "expectedPath": "/api/backend/knowledge/builtin/synthetic/document.md",
+      "attemptedPath": "/api/backend/knowledge/builtin/synthetic/document.md",
+      "fileWritesAborted": 1,
+      "serverFileUnchanged": true,
+      "errorCount": 1
+    },
+    {
+      "type": "failure",
+      "expectedPath": "/api/backend/knowledge/failures/synthetic/document.md",
+      "attemptedPath": "/api/backend/knowledge/failures/synthetic/document.md",
+      "fileWritesAborted": 1,
+      "serverFileUnchanged": true,
+      "errorCount": 1
+    }
+  ],
+  "limits": [
+    "Actual API mode uses private SQLite, existing production API, synthetic auth; workers/providers off",
+    "CI HTTP fixture is UI state proof only; not persistence or roles",
+    "All file PUT and annotation DELETE requests aborted before server. No file write or deletion executed. Positive correction POST/PATCH only. No CAS/role/tenant acceptance"
+  ],
+  "mode": "CI_CONTROLLED_HTTP_NOT_DOMAIN_ACCEPTANCE",
+  "runtime": {
+    "sandboxDisableFlagsAbsent": true,
+    "profile": "/Users/foldistefan/Programare/Codex/BOGuardian/agenti/BO-A01/boagents-val4-01/packages/ui/review-change-results/tmp/playwright_chromiumdev_profile-CnLsnu"
+  }
+}

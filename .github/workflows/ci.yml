@@ -145,6 +145,14 @@ jobs:
         if: steps.diff.outputs.ui == 'true'
         run: cd packages/ui && npx playwright install --with-deps chromium
 
+      # Ubuntu 24.04 runners blocheaza spatiile de nume neprivilegiate prin
+      # AppArmor; fara aceasta optiune Chromium nu isi poate ridica sandbox-ul.
+      # Mandatul cere sandbox REAL (fara --no-sandbox), deci reparam mediul,
+      # nu oprim sandbox-ul.
+      - name: Enable unprivileged user namespaces for Chromium sandbox
+        if: steps.diff.outputs.ui == 'true'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - name: Reference geometry, real Chromium sandbox, three viewports
         if: steps.diff.outputs.ui == 'true'
         run: cd packages/ui && npm run test:geometry

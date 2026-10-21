@@ -380,10 +380,16 @@ def test_class9_schedule_naive_as_utc(monkeypatch: pytest.MonkeyPatch) -> None:
         seen_channel_refs={("email", "a@probe.local")},
         session_id="s1",
     ))
+    # run_at trebuie sa fie in viitor; data fixa 2026-10-20 a devenit trecut
+    # si handler-ul refuza insertul (KeyError: 'run_at'). Alegem urmatoarea
+    # zi la 23:30 Bucuresti — intentia probei ramane aceeasi.
+    run_local = (datetime.now(BUCHAREST) + timedelta(days=1)).replace(
+        hour=23, minute=30, second=0, microsecond=0,
+    )
     try:
         import asyncio
         raw = asyncio.run(schedule_tools.handle_schedule_followup({
-            "run_at": "2026-10-20T23:30:00",
+            "run_at": run_local.replace(tzinfo=None).isoformat(),
             "channel": "email",
             "channel_ref": "a@probe.local",
             "intent": "inchide luna",
@@ -392,10 +398,10 @@ def test_class9_schedule_naive_as_utc(monkeypatch: pytest.MonkeyPatch) -> None:
         schedule_tools.current_session.reset(token)
     stored = datetime.fromisoformat(captured["run_at"])
     local = stored.astimezone(BUCHAREST)
-    expected = datetime(2026, 10, 20, 23, 30, tzinfo=BUCHAREST).astimezone(UTC)
+    expected = run_local.astimezone(UTC)
     print(f"C9 23:30 handler={raw} stored={stored.isoformat()} local={local.isoformat()} asteptat_utc={expected.isoformat()}")
     assert stored == expected
-    assert local.date().isoformat() == "2026-10-20"
+    assert local.date() == run_local.date()
     assert (local.hour, local.minute) == (23, 30)
 
 

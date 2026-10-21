@@ -133,6 +133,7 @@ def get_session_metadata(session_id: str, db_path: Path = DB_PATH) -> dict[str, 
         row = conn.execute(
             """
             SELECT s.session_id, s.title, s.created_at, s.updated_at,
+                   s.caller_person_id,
                    COUNT(m.id) AS message_count
             FROM sessions s
             LEFT JOIN chat_messages m ON m.session_id = s.session_id

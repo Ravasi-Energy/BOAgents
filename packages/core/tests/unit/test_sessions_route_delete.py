@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from openexecutive.api.routes import sessions as sessions_route
 from openexecutive.memory import episodic, session_store
+from openexecutive.people import store as people_store
 
 
 @pytest.fixture()
@@ -17,7 +18,9 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     db_path = Path("./episodic_memory.db").resolve()
     monkeypatch.setattr(episodic, "DB_PATH", db_path)
     monkeypatch.setattr(session_store, "DB_PATH", db_path)
+    monkeypatch.setattr(people_store, "DB_PATH", tmp_path / "people.db")
     episodic.initialize_db(db_path)
+    people_store.initialize_db()
 
     app = FastAPI()
     app.include_router(sessions_route.router)
@@ -25,7 +28,13 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
 
 def test_delete_session_success(client: TestClient) -> None:
-    session_store.create_session("s1", "title", "2024-01-01T00:00:00")
+    """Owner deletion still works: no header → principal fallback → owner."""
+    owner_id = people_store.upsert_person(
+        full_name="Alex", is_principal=True, email="alex@example.com"
+    )
+    session_store.create_session(
+        "s1", "title", "2024-01-01T00:00:00", caller_person_id=owner_id
+    )
     session_store.save_message("s1", "user", "hi")
 
     resp = client.delete("/sessions/s1")
@@ -34,6 +43,16 @@ def test_delete_session_success(client: TestClient) -> None:
 
     assert session_store.get_session_metadata("s1") is None
     assert client.get("/sessions").json() == []
+
+
+def test_delete_session_refuses_legacy_null_owner(client: TestClient) -> None:
+    """F03: a session created before ownership existed (caller_person_id
+    NULL) is refused on delete — it is not up for grabs."""
+    session_store.create_session("legacy", "old chat", "2024-01-01T00:00:00")
+
+    resp = client.delete("/sessions/legacy")
+    assert resp.status_code == 404
+    assert session_store.get_session_metadata("legacy") is not None
 
 
 def test_delete_session_not_found(client: TestClient) -> None:

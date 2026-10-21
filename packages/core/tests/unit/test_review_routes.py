@@ -209,3 +209,99 @@ def test_bulk_approve_rejects_an_empty_domain(client: TestClient, store: ReviewS
 def test_curate_rejects_an_absurdly_long_domain(client: TestClient, store: ReviewStore) -> None:
     res = client.post("/review/curate", json={"domain": "x" * 5000, "action": "start"})
     assert res.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# F02: mutation authorization — a viewer with valid service headers could
+# PATCH review items on 28fabe7 (routes had zero identity dependencies).
+# ---------------------------------------------------------------------------
+
+PROXY = "test-proxy-secret"
+
+
+def _pending(store: ReviewStore, filename: str, domain: str = "finance") -> str:
+    """A pending item — refusal is only provable when the store would change."""
+    item_id = f"builtin:{domain}:{filename}"
+    store.register(
+        item_id=item_id,
+        content_type=ContentType.BUILTIN,
+        domain=domain,
+        filename=filename,
+    )
+    return item_id
+
+
+
+@pytest.fixture()
+def auth_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> dict[str, str]:
+    """Deployment-like auth material: proxy secret + admin roster."""
+    monkeypatch.setenv("BACKEND_PROXY_SECRET", PROXY)
+    monkeypatch.setenv("BO_ADMIN_EMAILS", "admin@example.com")
+    from openexecutive.people import store as people_store
+
+    monkeypatch.setattr(people_store, "DB_PATH", tmp_path / "people.db")
+    people_store.initialize_db()
+    people_store.upsert_person(full_name="Vic", email="viewer@example.com")
+    return {"x-caller-proxy-secret": PROXY}
+
+
+def _patch(client: TestClient, item_id: str, headers: dict[str, str]):
+    return client.patch(
+        f"/review/items/{item_id}",
+        json={"status": "approved"},
+        headers=headers,
+    )
+
+
+def test_review_mutation_denied_to_viewer(
+    client: TestClient, store: ReviewStore, auth_env: dict[str, str]
+) -> None:
+    item_id = _pending(store, "a.md")
+    resp = _patch(
+        client, item_id, {**auth_env, "x-caller-email": "viewer@example.com"}
+    )
+    assert resp.status_code == 403
+    assert store.get_item(item_id).status != ReviewStatus.APPROVED
+
+
+def test_review_mutation_allowed_to_admin(
+    client: TestClient, store: ReviewStore, auth_env: dict[str, str]
+) -> None:
+    item_id = _pending(store, "a.md")
+    resp = _patch(
+        client, item_id, {**auth_env, "x-caller-email": "admin@example.com"}
+    )
+    assert resp.status_code == 200
+
+
+def test_review_mutation_denied_to_service_key(
+    client: TestClient, store: ReviewStore, auth_env: dict[str, str]
+) -> None:
+    """The shared service key resolves to operator — can read, cannot
+    mutate the review queue."""
+    item_id = _pending(store, "a.md")
+    resp = _patch(client, item_id, {"x-api-key": "svc"})
+    assert resp.status_code == 403
+    assert store.get_item(item_id).status != ReviewStatus.APPROVED
+
+
+def test_review_mutation_denied_without_identity(
+    client: TestClient, store: ReviewStore, auth_env: dict[str, str]
+) -> None:
+    item_id = _pending(store, "a.md")
+    resp = _patch(client, item_id, {})
+    assert resp.status_code == 403
+    assert store.get_item(item_id).status != ReviewStatus.APPROVED
+
+
+def test_review_read_allowed_to_viewer(
+    client: TestClient, store: ReviewStore, auth_env: dict[str, str]
+) -> None:
+    item_id = _default(store, "a.md")
+    resp = client.get(
+        f"/review/items/{item_id}",
+        headers={**auth_env, "x-caller-email": "viewer@example.com"},
+    )
+    assert resp.status_code == 200

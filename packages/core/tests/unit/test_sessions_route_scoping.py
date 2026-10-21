@@ -104,3 +104,90 @@ def test_sessions_list_email_case_insensitive(client: TestClient) -> None:
     resp = client.get("/sessions", headers={"x-caller-email": "Sabin@Example.COM"})
     assert resp.status_code == 200
     assert [s["session_id"] for s in resp.json()] == ["sabin-s1"]
+
+
+# ---------------------------------------------------------------------------
+# F03: direct-read / delete ownership — the list filter alone was not enough
+# ---------------------------------------------------------------------------
+
+
+def _two_people_with_sessions() -> tuple[int, int]:
+    alex_id = people_store.upsert_person(
+        full_name="Alex", is_principal=True, email="alex@example.com"
+    )
+    sabin_id = people_store.upsert_person(
+        full_name="Sabin", email="sabin@example.com"
+    )
+    session_store.create_session(
+        "alex-private", "Alex private", "2024-01-01T00:00:00", caller_person_id=alex_id
+    )
+    session_store.save_message("alex-private", "user", "PRIVATE_CONTENT_ALEX")
+    return alex_id, sabin_id
+
+
+def test_session_detail_refused_to_other_person(client: TestClient) -> None:
+    """F03 regression: knowing a session_id must not expose another
+    person's chat — same 404 as a session that does not exist."""
+    _two_people_with_sessions()
+    resp = client.get(
+        "/sessions/alex-private", headers={"x-caller-email": "sabin@example.com"}
+    )
+    assert resp.status_code == 404
+
+
+def test_session_messages_refused_to_other_person(client: TestClient) -> None:
+    """The IDOR the coordinator's probe reproduced on 28fabe7: GET
+    /sessions/{id}/messages returned another person's private content."""
+    _two_people_with_sessions()
+    resp = client.get(
+        "/sessions/alex-private/messages",
+        headers={"x-caller-email": "sabin@example.com"},
+    )
+    assert resp.status_code == 404
+    assert "PRIVATE_CONTENT_ALEX" not in resp.text
+
+
+def test_session_detail_and_messages_served_to_owner(client: TestClient) -> None:
+    _two_people_with_sessions()
+    meta = client.get(
+        "/sessions/alex-private", headers={"x-caller-email": "alex@example.com"}
+    )
+    msgs = client.get(
+        "/sessions/alex-private/messages",
+        headers={"x-caller-email": "alex@example.com"},
+    )
+    assert meta.status_code == 200
+    assert meta.json()["session_id"] == "alex-private"
+    assert msgs.status_code == 200
+    assert "PRIVATE_CONTENT_ALEX" in msgs.text
+
+
+def test_session_read_refused_for_unknown_caller(client: TestClient) -> None:
+    """A signed-in email absent from the roster resolves to no person —
+    it must not read anything, not even via the principal fallback."""
+    _two_people_with_sessions()
+    resp = client.get(
+        "/sessions/alex-private/messages",
+        headers={"x-caller-email": "stranger@example.com"},
+    )
+    assert resp.status_code == 404
+
+
+def test_session_delete_refused_to_other_person(client: TestClient) -> None:
+    _two_people_with_sessions()
+    resp = client.delete(
+        "/sessions/alex-private", headers={"x-caller-email": "sabin@example.com"}
+    )
+    assert resp.status_code == 404
+    assert session_store.get_session_metadata("alex-private") is not None
+
+
+def test_session_detail_refused_for_legacy_null_owner(client: TestClient) -> None:
+    """Legacy rows (caller_person_id NULL) are refused to everyone — the
+    list already hides them; direct access now matches."""
+    people_store.upsert_person(
+        full_name="Alex", is_principal=True, email="alex@example.com"
+    )
+    session_store.create_session("legacy", "old", "2024-01-01T00:00:00")
+    assert client.get("/sessions/legacy").status_code == 404
+    assert client.get("/sessions/legacy/messages").status_code == 404

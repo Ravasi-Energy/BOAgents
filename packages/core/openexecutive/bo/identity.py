@@ -86,6 +86,13 @@ _CAP_MIN_ROLE: dict[str, Role] = {
     # is the operator holding the shared secret (is_service → operator) or a
     # delegated admin; a viewer can never reset roster authority (R4).
     "auth:recover": "operator",
+    # Review queue (F02): reads stay viewer-safe like every other read;
+    # EVERY mutation — item status/priority/notes, bulk approve, curation,
+    # annotations create/edit/delete — is admin-only. Approving or editing
+    # knowledge the Executive then trusts is a privileged write, not a
+    # viewer action.
+    "review:read": "viewer",
+    "review:write": "admin",
 }
 
 

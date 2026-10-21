@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from openexecutive.bo import identity as bo_identity
 from openexecutive.knowledge.review_store import (
     BULK_MAX_IDS,
     Annotation,
@@ -22,6 +23,35 @@ def _store() -> ReviewStore:
     from openexecutive.memory.episodic import DB_PATH
 
     return ReviewStore(db_path=DB_PATH)
+
+
+def _read_ident(request: Request) -> bo_identity.Identity:
+    return bo_identity.require_http(request, "review:read")
+
+
+def _write_ident(request: Request) -> bo_identity.Identity:
+    """F02: poarta fiecarei mutatii /review. Refuzul se jurnalizeaza
+    persistent (negarea e si ea un fapt de audit) si iese ca 403 fara sa
+    distinga „fara identitate" de „rol insuficient" — fara efect in store."""
+    ident: bo_identity.Identity | None = None
+    try:
+        ident = bo_identity.resolve_identity(request)
+        bo_identity.require(ident, "review:write")
+    except bo_identity.IdentityError as exc:
+        from openexecutive.audit import log_event as audit_log
+
+        audit_log(
+            "review_mutation_denied",
+            f"Refused {request.method} {request.url.path}",
+            actor=ident.actor if ident is not None else "unauthenticated",
+            details={"status": exc.status_code},
+        )
+        raise HTTPException(status_code=403, detail="forbidden") from exc
+    return ident
+
+
+ReadIdent = Annotated[bo_identity.Identity, Depends(_read_ident)]
+WriteIdent = Annotated[bo_identity.Identity, Depends(_write_ident)]
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +130,7 @@ class ReviewItemDetail(BaseModel):
 
 @router.get("/items", response_model=list[ReviewItem])
 async def list_review_items(
+    ident: ReadIdent,
     status: ReviewStatus | None = None,
     domain: str | None = None,
     content_type: ContentType | None = None,
@@ -116,7 +147,7 @@ async def list_review_items(
 
 
 @router.get("/items/{item_id}", response_model=ReviewItemDetail)
-async def get_review_item(item_id: str) -> ReviewItemDetail:
+async def get_review_item(item_id: str, ident: ReadIdent) -> ReviewItemDetail:
     store = _store()
     item = store.get_item(item_id)
     if item is None:
@@ -126,7 +157,7 @@ async def get_review_item(item_id: str) -> ReviewItemDetail:
 
 
 @router.get("/stats", response_model=ReviewStats)
-async def get_review_stats() -> ReviewStats:
+async def get_review_stats(ident: ReadIdent) -> ReviewStats:
     counts = _store().count_by_status()
     return ReviewStats(
         pending=counts.get("pending", 0),
@@ -138,7 +169,7 @@ async def get_review_stats() -> ReviewStats:
 
 
 @router.patch("/items/{item_id}", response_model=ReviewItem)
-async def update_review_item(item_id: str, body: ReviewItemPatch) -> ReviewItem:
+async def update_review_item(item_id: str, body: ReviewItemPatch, ident: WriteIdent) -> ReviewItem:
     store = _store()
     item = store.get_item(item_id)
     if item is None:
@@ -158,7 +189,7 @@ async def update_review_item(item_id: str, body: ReviewItemPatch) -> ReviewItem:
 
 
 @router.post("/bulk-approve", response_model=BulkApproveResponse)
-async def bulk_approve(body: BulkApproveRequest) -> BulkApproveResponse:
+async def bulk_approve(body: BulkApproveRequest, ident: WriteIdent) -> BulkApproveResponse:
     if body.domain is None and body.item_ids is None and not body.all_pending:
         raise HTTPException(
             status_code=400,
@@ -171,7 +202,7 @@ async def bulk_approve(body: BulkApproveRequest) -> BulkApproveResponse:
         audit_log(
             "review_bulk_approve",
             f"Bulk approve: {len(ids)} knowledge item(s)",
-            actor="user",
+            actor=ident.actor,
             details={
                 "count": len(ids),
                 "item_ids": ids[:100],
@@ -183,7 +214,7 @@ async def bulk_approve(body: BulkApproveRequest) -> BulkApproveResponse:
 
 
 @router.post("/curate", response_model=CurateResponse)
-async def curate_domain(body: CurateRequest) -> CurateResponse:
+async def curate_domain(body: CurateRequest, ident: WriteIdent) -> CurateResponse:
     """Opt one domain's shipped defaults into (or out of) the review queue.
 
     Built-in knowledge ships as a trusted default, so the queue is empty until
@@ -205,7 +236,7 @@ async def curate_domain(body: CurateRequest) -> CurateResponse:
         audit_log(
             "review_curate",
             f"{count} item(s) in '{body.domain}' {verb}",
-            actor="user",
+            actor=ident.actor,
             details={
                 "domain": body.domain,
                 "action": body.action,
@@ -216,7 +247,7 @@ async def curate_domain(body: CurateRequest) -> CurateResponse:
 
 
 @router.get("/trusted-defaults", response_model=dict[str, int])
-async def trusted_defaults_by_domain() -> dict[str, int]:
+async def trusted_defaults_by_domain(ident: ReadIdent) -> dict[str, int]:
     """Domain → count of never-reviewed shipped defaults, for the curate UI."""
     return _store().count_trusted_defaults_by_domain()
 
@@ -227,12 +258,12 @@ async def trusted_defaults_by_domain() -> dict[str, int]:
 
 
 @router.get("/annotations", response_model=list[Annotation])
-async def list_all_annotations(active_only: bool = True) -> list[Annotation]:
+async def list_all_annotations(ident: ReadIdent, active_only: bool = True) -> list[Annotation]:
     return _store().list_annotations(active_only=active_only)
 
 
 @router.get("/items/{item_id}/annotations", response_model=list[Annotation])
-async def list_item_annotations(item_id: str) -> list[Annotation]:
+async def list_item_annotations(item_id: str, ident: ReadIdent) -> list[Annotation]:
     store = _store()
     if store.get_item(item_id) is None:
         raise HTTPException(status_code=404, detail="Review item not found")
@@ -240,7 +271,7 @@ async def list_item_annotations(item_id: str) -> list[Annotation]:
 
 
 @router.post("/items/{item_id}/annotations", response_model=Annotation)
-async def add_annotation(item_id: str, body: AnnotationCreate) -> Annotation:
+async def add_annotation(item_id: str, body: AnnotationCreate, ident: WriteIdent) -> Annotation:
     store = _store()
     item = store.get_item(item_id)
     if item is None:
@@ -249,7 +280,7 @@ async def add_annotation(item_id: str, body: AnnotationCreate) -> Annotation:
 
 
 @router.patch("/annotations/{annotation_id}", response_model=dict[str, Any])
-async def update_annotation(annotation_id: str, body: AnnotationPatch) -> dict[str, Any]:
+async def update_annotation(annotation_id: str, body: AnnotationPatch, ident: WriteIdent) -> dict[str, Any]:
     store = _store()
     if body.correction is not None:
         store.update_annotation(annotation_id, body.correction)
@@ -259,6 +290,6 @@ async def update_annotation(annotation_id: str, body: AnnotationPatch) -> dict[s
 
 
 @router.delete("/annotations/{annotation_id}", response_model=dict[str, Any])
-async def delete_annotation(annotation_id: str) -> dict[str, Any]:
+async def delete_annotation(annotation_id: str, ident: WriteIdent) -> dict[str, Any]:
     _store().delete_annotation(annotation_id)
     return {"deleted": annotation_id}

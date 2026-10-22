@@ -230,7 +230,9 @@ jobs:
           mkdir -p "$BO_READ_ERROR_OUTPUT"
           cd packages/ui
           npm run --silent test:review-actions > "$BO_READ_ERROR_OUTPUT/JUNIT.xml"
+          node scripts/ui-evidence.mjs actions "$BO_READ_ERROR_OUTPUT"
         env:
+          BO_UI_SOURCE_SHA: ${{ github.sha }}
           BO_READ_ERROR_OUTPUT: ${{ runner.temp }}/bo-review-actions
 
       - name: Review action regression evidence
@@ -247,7 +249,9 @@ jobs:
           mkdir -p "$BO_READ_ERROR_OUTPUT"
           cd packages/ui
           npm run --silent test:review-changes > "$BO_READ_ERROR_OUTPUT/JUNIT.xml"
+          node scripts/ui-evidence.mjs changes "$BO_READ_ERROR_OUTPUT"
         env:
+          BO_UI_SOURCE_SHA: ${{ github.sha }}
           BO_READ_ERROR_OUTPUT: ${{ runner.temp }}/bo-review-changes
 
       - name: Review correction regression evidence
@@ -264,7 +268,9 @@ jobs:
           mkdir -p "$BO_READ_ERROR_OUTPUT"
           cd packages/ui
           npm run --silent test:reference-async > "$BO_READ_ERROR_OUTPUT/JUNIT.xml"
+          node scripts/ui-evidence.mjs reference "$BO_READ_ERROR_OUTPUT"
         env:
+          BO_UI_SOURCE_SHA: ${{ github.sha }}
           BO_READ_ERROR_OUTPUT: ${{ runner.temp }}/bo-reference-async
 
       - name: Reference asynchronous navigation evidence

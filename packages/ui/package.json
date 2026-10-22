@@ -27,7 +27,8 @@
     "test:review-details": "node --test --test-reporter=junit scripts/review-detail-states.mjs",
     "test:review-actions": "node --test --test-reporter=junit scripts/review-action-states.mjs",
     "test:review-changes": "node --test --test-reporter=junit scripts/review-change-states.mjs",
-    "test:reference-async": "node --test --test-reporter=junit scripts/reference-async-states.mjs"
+    "test:reference-async": "node --test --test-reporter=junit scripts/reference-async-states.mjs",
+    "test:review-roles": "node --test --test-reporter=junit scripts/review-roles-proxy.mjs"
   },
   "dependencies": {
     "@dagrejs/dagre": "^3.1.0",

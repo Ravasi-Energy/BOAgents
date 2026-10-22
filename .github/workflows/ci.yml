@@ -274,3 +274,38 @@ jobs:
           name: bo-reference-async-${{ github.sha }}
           path: ${{ runner.temp }}/bo-reference-async
           if-no-files-found: error
+
+      # F02 needs the REAL FastAPI backend behind the real Next proxy — a
+      # viewer role must be refused at the delegated-identity layer, with the
+      # denial persisted in the on-disk audit log. That requires Python +
+      # the synced core venv, not just Node.
+      - name: Set up Python for the real backend
+        if: steps.diff.outputs.ui == 'true'
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        if: steps.diff.outputs.ui == 'true'
+        run: pip install uv
+
+      - name: Install backend dependencies
+        if: steps.diff.outputs.ui == 'true'
+        run: cd packages/core && uv sync --extra dev
+
+      - name: Review role matrix through real proxy and persistent audit
+        if: steps.diff.outputs.ui == 'true'
+        run: |
+          mkdir -p "$BO_READ_ERROR_OUTPUT"
+          cd packages/ui
+          npm run --silent test:review-roles > "$BO_READ_ERROR_OUTPUT/JUNIT.xml"
+        env:
+          BO_READ_ERROR_OUTPUT: ${{ runner.temp }}/bo-review-roles
+
+      - name: Review role matrix regression evidence
+        if: always() && steps.diff.outputs.ui == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bo-review-roles-${{ github.sha }}
+          path: ${{ runner.temp }}/bo-review-roles
+          if-no-files-found: error

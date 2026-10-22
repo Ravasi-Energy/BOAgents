@@ -1,12 +1,14 @@
 {
- "sursa": "Hire@3f30640 codex/livrare-completa — backend/hire/ (copii byte-identice, NU rescriere)",
+ "sursa": "Hire@51def7a codex/livrare-completa — backend/hire/ (copii byte-identice, NU rescriere)",
  "scop": "fixture CI pentru test_f5_extern_runneri — adaptorul Oblio REAL, nu o implementare falsa",
  "sha256": {
   "hire/connectors/base.py": "71f25ebaba37f5a70aebe0d507d4b65cd494f0f9577add01088d01af68a9c531",
   "hire/connectors/serviciu/providers/baza.py": "93fe8c81cb794789f0e123c141689a6c05a8b4dfc9544911b6fb83a2fdcdbedd",
-  "hire/connectors/serviciu/providers/oblio.py": "4591160d2bb05dfc34f2a8b165353562130c7365db2c435700267d5ea4182e72",
+  "hire/connectors/serviciu/providers/oblio.py": "c00c32869fdf0dc430e0fcebeedf1d8adbbb05aebbc2cef72795d7399c88416d",
   "hire/connectors/serviciu/secrete.py": "70f4d77b320ee8819b9fa02e417f4c2c4ee6683db4c7ec3d84dc255ac285911e",
-  "backups/restic-backup.sh": "04a8a4aa6f11e98198b9e87ac86b9881a8f38ad93d93f76d9ca62b4de6418d08"
+  "backups/restic-backup.sh": "04a8a4aa6f11e98198b9e87ac86b9881a8f38ad93d93f76d9ca62b4de6418d08",
+  "hire/core/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "hire/core/domeniu.py": "269c37d50054009342d3665619212bb290605a059368cb886a6fe35a82005faa"
  },
  "regula": "la orice schimbare in adaptorul real, copia se re-sincronizeaza si hashul se re-consemneaza; driftul e detectat de testul hash_fixtura (Mac, cand checkoutul Hire exista)"
 }

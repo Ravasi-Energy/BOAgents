@@ -119,53 +119,29 @@ def test_oblio_emit_fara_cui_refuzat(tmp_path, capsys, monkeypatch):
     assert oblio_r.main(a) == 2
 
 
-def test_oblio_pozitiv_transport_instrumentat(tmp_path, capsys, monkeypatch):
-    """Adaptorul Hire REAL pe transport instrumentat la limita externa:
-    auth → listare → emitere proforma cu schema reala (cif_emitent,
-    client.nume, moneda, serie) → readback EXACT al referintei emise."""
+def test_oblio_emit_refuza_domeniu_zero_http(tmp_path, capsys, monkeypatch):
+    """Adaptorul Hire REAL post-eliminare (decizia 19.10.2026): orice
+    contact — autentificare inclusa — refuza din domeniu INAINTE de
+    transport. Proba pozitiva de transport nu mai exista: dovada e
+    zero apeluri HTTP pe transport instrumentat, verdict REFUZ."""
     monkeypatch.setenv("CONECTOR_SECRET_OBLIO_TEST", "x")
 
     apeluri = []
-    corpi = []
-
-    import urllib.error
 
     def fals(req, *a, **kw):
-        apeluri.append((req.get_method(), req.full_url))
-        corp = req.data or b"{}"
-        if b"valoare-gresita-deliberat" in corp:
-            raise urllib.error.HTTPError(
-                req.full_url, 401, "Unauthorized", {}, None)
-        if "authorize/token" in req.full_url:
-            corpi.append(json.loads(corp))
-            return _RaspFals({"access_token": "tok"})
-        if req.get_method() == "POST" and "docs/proforma" in req.full_url:
-            corpi.append(json.loads(req.data))
-            # raspuns ca Oblio: ref = serie-numar, cerut la readback
-            return _RaspFals({"seriesName": "PROBA", "number": "7",
-                              "id": 7007, "link": "x"})
-        return _RaspFals({"data": [{"seriesName": "PROBA", "number": "7",
-                                    "id": 7007}]})
+        apeluri.append(req.full_url)
+        return _RaspFals({"access_token": "tok"})
 
     monkeypatch.setattr(oblio_r, "_urlopen_real", fals)
     cod = oblio_r.main(_argv_oblio(str(tmp_path), emit=True))
     out = json.loads(capsys.readouterr().out)
-    assert cod == 0 and out["verdict"] == "PASS", out
-    assert out["proforme_emise"] == 1 and out["apeluri_http"] >= 4
-    assert all(u.startswith("https://") for _m, u in apeluri)
-    # contractul de request REAL: schema adaptorului, nu nume inventate
-    emis = [c for c in corpi if "products" in c]
-    assert len(emis) == 1
-    assert emis[0]["cif"] == "RO12345678"
-    assert emis[0]["client"]["name"] == "Client Sintetic SRL"
-    assert emis[0]["client"].get("email") in (None, "")
-    assert emis[0]["currency"] == "RON" and emis[0]["seriesName"] == "PROBA"
-    assert emis[0]["document"] == "proforma"
-    assert emis[0]["idempotency"].startswith("proba-extern-")
-    # readback exact al referintei emise
-    pas = [p for p in out["pasi"] if p["pas"].startswith("readback")]
-    assert pas and all(p["ok"] and p["detalii"] == "gasit" for p in pas)
-    # tokenul si secretul nu ajung in raport
+    assert cod == 2 and out["verdict"] == "REFUZ", out
+    assert out["apeluri_http"] == 0 and apeluri == []
+    assert out["proforme_emise"] == 0
+    pas = [p for p in out["pasi"] if p["pas"] == "refuz de domeniu"]
+    assert pas and pas[0]["ok"], out
+    assert "ELIMINAT DIN DOMENIU" in pas[0]["detalii"]
+    # motivul de domeniu nu poarta secretul si nu e clasat transport
     assert "tok" not in json.dumps(out) and "client_secret" not in json.dumps(out)
 
 
@@ -188,32 +164,9 @@ def test_oblio_emit_fara_client_refuza_inainte_http(tmp_path, capsys,
     assert apeluri == [] and out["apeluri_http"] == 0
 
 
-def test_oblio_secret_gresit_clasat_auth(tmp_path, capsys, monkeypatch):
-    """Refuzul 401 vine DIN TRANSPORT (adaptor real), nu din cod local —
-    trebuie clasat 'auth', nu outage/raspuns invalid."""
-    import urllib.error
-
-    monkeypatch.setenv("CONECTOR_SECRET_OBLIO_TEST", "x")
-
-    def fals(req, *a, **kw):
-        corp = req.data or b"{}"
-        if b"valoare-gresita-deliberat" in corp:
-            raise urllib.error.HTTPError(
-                req.full_url, 401, "Unauthorized", {}, None)
-        if "authorize/token" in req.full_url:
-            return _RaspFals({"access_token": "tok"})
-        return _RaspFals({"data": []})
-
-    monkeypatch.setattr(oblio_r, "_urlopen_real", fals)
-    cod = oblio_r.main(_argv_oblio(str(tmp_path)))
-    out = json.loads(capsys.readouterr().out)
-    assert cod == 0 and out["verdict"] == "PASS"
-    pas = [p for p in out["pasi"] if p["pas"] == "refuz pe secret gresit"]
-    assert pas and pas[0]["ok"] and "auth" in pas[0]["detalii"]
-
-
-def test_oblio_outage_clasat_distinct(tmp_path, capsys, monkeypatch):
-    """Outage-ul (URLError) nu se claseaza auth si nu devine PASS."""
+def test_oblio_refuz_domeniu_clasat_distinct(tmp_path, capsys, monkeypatch):
+    """Refuzul de domeniu se claseaza 'domeniu-exclus', nu auth/outage —
+    distinct de orice eroare de transport, pe care n-o mai atinge."""
     import urllib.error
 
     monkeypatch.setenv("CONECTOR_SECRET_OBLIO_TEST", "x")
@@ -224,9 +177,32 @@ def test_oblio_outage_clasat_distinct(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(oblio_r, "_urlopen_real", fals)
     cod = oblio_r.main(_argv_oblio(str(tmp_path)))
     out = json.loads(capsys.readouterr().out)
-    assert cod == 1 and out["verdict"] == "FAIL"
-    pas = [p for p in out["pasi"] if p["pas"] == "lant adaptor"]
-    assert pas and not pas[0]["ok"] and "outage" in pas[0]["detalii"]
+    assert cod == 2 and out["verdict"] == "REFUZ", out
+    assert out["apeluri_http"] == 0
+    pas = [p for p in out["pasi"] if p["pas"] == "refuz de domeniu"]
+    assert pas and pas[0]["ok"]
+    # daca adaptorul ar atinge transportul, URLError ar da FAIL, nu REFUZ
+    assert not any(p["pas"] == "lant adaptor" for p in out["pasi"])
+
+
+def test_oblio_outage_neatins_de_refuzul_de_domeniu(tmp_path, capsys,
+                                                    monkeypatch):
+    """Niciun outage nu poate fi provocat: adaptorul refuza inainte de
+    transport — URLError instrumentat nu se declanseaza niciodata."""
+    import urllib.error
+
+    monkeypatch.setenv("CONECTOR_SECRET_OBLIO_TEST", "x")
+    apeluri = []
+
+    def fals(req, *a, **kw):
+        apeluri.append(req.full_url)
+        raise urllib.error.URLError("simulated outage")
+
+    monkeypatch.setattr(oblio_r, "_urlopen_real", fals)
+    cod = oblio_r.main(_argv_oblio(str(tmp_path)))
+    out = json.loads(capsys.readouterr().out)
+    assert cod == 2 and out["verdict"] == "REFUZ", out
+    assert apeluri == [] and out["apeluri_http"] == 0
 
 
 def test_fixtura_hire_hash_pin():
@@ -252,7 +228,9 @@ def test_fixtura_hire_drift_vs_checkout_real():
     for rel in ("connectors/base.py",
                 "connectors/serviciu/providers/baza.py",
                 "connectors/serviciu/providers/oblio.py",
-                "connectors/serviciu/secrete.py"):
+                "connectors/serviciu/secrete.py",
+                "core/__init__.py",
+                "core/domeniu.py"):
         a = Path(FIXTURA_HIRE, "hire", rel)
         b = Path(HIRE_REAL, "hire", rel)
         assert a.read_bytes() == b.read_bytes(), f"drift: {rel}"

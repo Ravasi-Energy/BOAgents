@@ -39,10 +39,19 @@ from hire.connectors.serviciu.providers.baza import (
     NEDETERMINAT, EroareFurnizor,
 )
 from hire.connectors.serviciu.secrete import SecretLipsesc, rezolva
+from hire.core import domeniu
 
 CAPABILITATI = {
     "oblio.write": {"document": "proforma"},
 }
+
+
+def _refuza_scop() -> None:
+    """Oblio e eliminat din domeniul activ (decizia Stefan, 19.10.2026):
+    adaptorul ramane ca istoric, dar nicio cerere nu mai pleaca spre
+    furnizor. Toate metodele de contact trec prin autentificare —
+    refuzul e pus o singura data, acolo."""
+    raise EroareFurnizor(domeniu.MOTIV_OBLIO_EXCLUS)
 
 
 def _json_http(metoda: str, url: str, corp: dict | None,
@@ -86,6 +95,7 @@ class AdaptorOblio:
     # -- autentificare ------------------------------------------------
 
     def _autentifica(self) -> str:
+        _refuza_scop()
         if self._token:
             return self._token
         secret = rezolva(self._secret_ref)
@@ -103,6 +113,7 @@ class AdaptorOblio:
     # -- citire -------------------------------------------------------
 
     def documente(self, tenant_id: str) -> list[SourceDocument]:
+        _refuza_scop()
         # Lista documentelor emise — pentru citirea de intrări Oblio are
         # `nomenclatures`; facturile primite vin pe calea de scan/e-Factura.
         rasp = _json_http("GET", f"{self._base}/api/docs/proforma", None,
@@ -118,6 +129,7 @@ class AdaptorOblio:
         return out
 
     def extras(self, tenant_id: str) -> list[BankStatementLine]:
+        _refuza_scop()
         raise EroareFurnizor(
             "Oblio nu expune extrase bancare; liniile vin din fișier "
             "importat (HIR-REQ-139)")
@@ -126,6 +138,7 @@ class AdaptorOblio:
 
     def executa(self, capabilitate: str, parametri: dict,
                 cheie_idempotenta: str, cont=None) -> dict:
+        _refuza_scop()
         if capabilitate not in CAPABILITATI:
             raise EroareFurnizor(f"capabilitate necunoscută: {capabilitate}")
         # Instanța e construită pe contul rezolvat din binding — `cont` e
@@ -153,6 +166,7 @@ class AdaptorOblio:
                 "detalii": {"link": date.get("link")}}
 
     def cauta(self, provider_ref: str, tenant_id: str) -> str:
+        _refuza_scop()
         try:
             rasp = _json_http("GET", f"{self._base}/api/docs/proforma", None,
                               self._antete())

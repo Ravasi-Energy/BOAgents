@@ -137,6 +137,7 @@ def main(argv=None) -> int:
         AdaptorOblio,
         EroareFurnizor,
     )
+    from hire.core import domeniu  # noqa: E402
 
     os.makedirs(out, exist_ok=True)
     raport = {"verdict": "PASS", "pasi": [], "emit": args.emit,
@@ -151,8 +152,12 @@ def main(argv=None) -> int:
             raport["verdict"] = "FAIL"
 
     def clasa_eroare(e) -> str:
-        """auth | outage | invalid — nu orice eroare e refuz de auth."""
+        """domeniu-exclus | auth | outage | invalid — nu orice eroare
+        e refuz de auth. Oblio e eliminat din domeniu (19.10.2026):
+        refuzul vine din adaptor inainte de orice trafic."""
         m = str(e)
+        if domeniu.MOTIV_OBLIO_EXCLUS in m:
+            return "domeniu-exclus"
         if re.search(r"Oblio (401|403)\b", m):
             return "auth"
         if "inaccesibil" in m or "timeout" in m.lower():
@@ -206,15 +211,21 @@ def main(argv=None) -> int:
         finally:
             del os.environ[nume_secret + "_GRESIT"]
     except EroareFurnizor as e:
-        pas("lant adaptor", False, f"clasa={clasa_eroare(e)} {_curata(e)}")
-        raport["verdict"] = "FAIL"
+        if clasa_eroare(e) == "domeniu-exclus":
+            # Refuzul de domeniu E contractul: zero trafic e dovada.
+            pas("refuz de domeniu", True, _curata(e))
+            raport["verdict"] = "REFUZ"
+        else:
+            pas("lant adaptor", False,
+                f"clasa={clasa_eroare(e)} {_curata(e)}")
+            raport["verdict"] = "FAIL"
     finally:
         raport["apeluri_http"] = _apeluri_http["n"]
 
     with open(os.path.join(out, "PROBA-EXTERN-OBLIO.json"), "w") as f:
         json.dump(raport, f, indent=1, ensure_ascii=False)
     print(json.dumps(raport, ensure_ascii=False))
-    return 0 if raport["verdict"] == "PASS" else 1
+    return {"PASS": 0, "REFUZ": 2}.get(raport["verdict"], 1)
 
 
 if __name__ == "__main__":

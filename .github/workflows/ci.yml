@@ -227,11 +227,11 @@ jobs:
       - name: Review actions, refusal, readback and lost acknowledgement
         if: steps.diff.outputs.ui == 'true'
         run: |
-          mkdir -p "$BO_REVIEW_ACTIONS_OUTPUT"
+          mkdir -p "$BO_READ_ERROR_OUTPUT"
           cd packages/ui
-          npm run --silent test:review-actions > "$BO_REVIEW_ACTIONS_OUTPUT/JUNIT.xml"
+          npm run --silent test:review-actions > "$BO_READ_ERROR_OUTPUT/JUNIT.xml"
         env:
-          BO_REVIEW_ACTIONS_OUTPUT: ${{ runner.temp }}/bo-review-actions
+          BO_READ_ERROR_OUTPUT: ${{ runner.temp }}/bo-review-actions
 
       - name: Review action regression evidence
         if: always() && steps.diff.outputs.ui == 'true'
@@ -244,11 +244,11 @@ jobs:
       - name: Review corrections, file namespaces and refused mutation readback
         if: steps.diff.outputs.ui == 'true'
         run: |
-          mkdir -p "$BO_REVIEW_CHANGES_OUTPUT"
+          mkdir -p "$BO_READ_ERROR_OUTPUT"
           cd packages/ui
-          npm run --silent test:review-changes > "$BO_REVIEW_CHANGES_OUTPUT/JUNIT.xml"
+          npm run --silent test:review-changes > "$BO_READ_ERROR_OUTPUT/JUNIT.xml"
         env:
-          BO_REVIEW_CHANGES_OUTPUT: ${{ runner.temp }}/bo-review-changes
+          BO_READ_ERROR_OUTPUT: ${{ runner.temp }}/bo-review-changes
 
       - name: Review correction regression evidence
         if: always() && steps.diff.outputs.ui == 'true'
@@ -261,11 +261,11 @@ jobs:
       - name: Reference navigation during deferred content and diagram layout
         if: steps.diff.outputs.ui == 'true'
         run: |
-          mkdir -p "$BO_REFERENCE_ASYNC_OUTPUT"
+          mkdir -p "$BO_READ_ERROR_OUTPUT"
           cd packages/ui
-          npm run --silent test:reference-async > "$BO_REFERENCE_ASYNC_OUTPUT/JUNIT.xml"
+          npm run --silent test:reference-async > "$BO_READ_ERROR_OUTPUT/JUNIT.xml"
         env:
-          BO_REFERENCE_ASYNC_OUTPUT: ${{ runner.temp }}/bo-reference-async
+          BO_READ_ERROR_OUTPUT: ${{ runner.temp }}/bo-reference-async
 
       - name: Reference asynchronous navigation evidence
         if: always() && steps.diff.outputs.ui == 'true'

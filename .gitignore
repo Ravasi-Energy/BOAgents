@@ -88,3 +88,4 @@ scripts/setup-flyctl.sh
 scripts/seed-google-workspace.sh
 .github/workflows/deploy.yml
 .github/workflows/deploy-qa.yml
+packages/ui/ui-evidence-unit-results/

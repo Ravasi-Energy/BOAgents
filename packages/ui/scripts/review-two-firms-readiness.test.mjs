@@ -1,0 +1,7 @@
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';
+const file=process.env.BO_TWO_FIRMS_SOURCE||new URL('./review-two-firms-proxy.mjs',import.meta.url),text=fs.readFileSync(file,'utf8');const match=text.match(/async function ready\(url,p\)\{[^\n]+/);assert(match,'Actual readiness helper not found');
+function ready(fetch){let now=0;const clock={now:()=>now};const fn=new Function('assert','fetch','setTimeout','Date','AbortSignal','return '+match[0])(assert,fetch,(cb,ms)=>{now+=ms;cb()},clock,{timeout:()=>null});return{run:fn,now:()=>now}}
+test('cold backend ready after30s is awaited rather than failing at20s',async()=>{let h;h=ready(async()=>({status:h.now()>=30000?200:503}));await h.run('synthetic-health',{exitCode:null});assert(h.now()>=30000);assert(h.now()<60000)});
+test('unready backend reaches bounded deadline and cannot be reported ready',async()=>{const h=ready(async()=>({status:503}));await assert.rejects(()=>h.run('synthetic-health',{exitCode:null}),/readiness timeout/);assert(h.now()>=60000);assert(h.now()<=60100)});
+test('exited owned backend is refused immediately',async()=>{const h=ready(async()=>({status:200}));await assert.rejects(()=>h.run('synthetic-health',{exitCode:1}),/Owned server exited/);assert.equal(h.now(),0)});
+test('refused connection retries then accepts only real HTTP below500',async()=>{let calls=0;const h=ready(async()=>{if(++calls<4)throw Error('ECONNREFUSED');return{status:200}});await h.run('synthetic-health',{exitCode:null});assert.equal(calls,4)});

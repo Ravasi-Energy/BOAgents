@@ -28,7 +28,8 @@
     "test:review-actions": "node --test --test-reporter=junit scripts/review-action-states.mjs",
     "test:review-changes": "node --test --test-reporter=junit scripts/review-change-states.mjs",
     "test:reference-async": "node --test --test-reporter=junit scripts/reference-async-states.mjs",
-    "test:review-roles": "node --test --test-concurrency=1 --test-reporter=junit scripts/review-roles-proxy.mjs scripts/review-two-firms-proxy.mjs"
+    "test:review-roles": "node --test --test-concurrency=1 --test-reporter=junit scripts/review-roles-proxy.mjs scripts/review-two-firms-proxy.mjs",
+    "test:oct22-security": "node --test --test-reporter=junit scripts/oct22-dependency-security-browser.mjs"
   },
   "dependencies": {
     "@dagrejs/dagre": "^3.1.0",
@@ -36,7 +37,7 @@
     "@xyflow/react": "^12.11.6",
     "lucide-react": "^0.545.0",
     "mermaid": "^12.0.0",
-    "next": "^16.3.8",
+    "next": "16.4.1",
     "next-auth": "^5.0.0-beta.32",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
@@ -51,7 +52,7 @@
     "@types/react-dom": "^19",
     "autoprefixer": "^10.5.6",
     "eslint": "^10",
-    "eslint-config-next": "^16.3.8",
+    "eslint-config-next": "16.4.1",
     "postcss": "^8.5.28",
     "tailwindcss": "^4.3.3",
     "typescript": "^5.9.3",
@@ -63,7 +64,8 @@
       "postcss-selector-parser": "7.1.6"
     },
     "mermaid": {
-      "katex": "0.18.2"
+      "katex": "0.18.2",
+      "dompurify": "3.4.17"
     }
   }
 }

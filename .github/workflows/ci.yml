@@ -159,6 +159,25 @@ jobs:
         if: steps.diff.outputs.ui == 'true'
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
+      - name: R01 October22 dependency regressions, real Chromium sandbox
+        if: steps.diff.outputs.ui == 'true'
+        run: |
+          cd packages/ui
+          mkdir -p "$BO_OCT22_OUTPUT"
+          npm run --silent test:oct22-security > "$BO_OCT22_OUTPUT/JUNIT.xml"
+        env:
+          BO_OCT22_OUTPUT: ${{ runner.temp }}/bo-oct22-security
+
+      - name: R01 October22 dependency evidence
+        if: always() && steps.diff.outputs.ui == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bo-oct22-security-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/bo-oct22-security/JUNIT.xml
+            ${{ runner.temp }}/bo-oct22-security/BROWSER.json
+          if-no-files-found: error
+
       - name: Reference geometry, real Chromium sandbox, three viewports
         if: steps.diff.outputs.ui == 'true'
         run: cd packages/ui && npm run test:geometry

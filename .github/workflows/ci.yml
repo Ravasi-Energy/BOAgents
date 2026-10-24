@@ -176,6 +176,8 @@ jobs:
           path: |
             ${{ runner.temp }}/bo-oct22-security/JUNIT.xml
             ${{ runner.temp }}/bo-oct22-security/BROWSER.json
+            ${{ runner.temp }}/bo-oct22-security/MERMAID-*.json
+            ${{ runner.temp }}/bo-oct22-security/mermaid-*.png
           if-no-files-found: error
 
       - name: Reference geometry, real Chromium sandbox, three viewports

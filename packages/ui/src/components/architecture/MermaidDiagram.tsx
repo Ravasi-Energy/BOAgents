@@ -46,7 +46,14 @@ export default function MermaidDiagram({ definition, id }: Props) {
           startOnLoad: false,
           theme: 'dark',
           darkMode: true,
-          securityLevel: 'loose', // required for <br/> in node labels
+          // Section content is generated/server-supplied; sanitize SVG and disable callbacks.
+          // Mermaid strict preserves the <br/> labels used by our diagrams.
+          securityLevel: 'strict',
+          // Strict still lets <img src> through in labels, which fetches the URL on
+          // render. Our diagrams only use <b>/<br/>; drop media so content cannot beacon.
+          dompurifyConfig: {
+            FORBID_TAGS: ['img', 'image', 'picture', 'source', 'video', 'audio', 'iframe', 'object', 'embed'],
+          },
           flowchart: {
             padding: 24,
             nodeSpacing: 60,

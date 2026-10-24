@@ -1082,7 +1082,7 @@ function ItemRow({
   onPriorityChange: (p: ReviewPriority) => void;
 }) {
   return (
-    <div className="bg-surface-elevated/40 border border-line rounded-lg px-4 py-3 flex items-center gap-3">
+    <div className="bg-surface-elevated/40 border border-line rounded-lg px-4 py-3 flex flex-wrap sm:flex-nowrap items-center gap-3">
       {/* Icon */}
       <div className="flex-shrink-0 text-fg-subtle">
         {item.content_type === "builtin" || item.content_type === "failure" ? (
@@ -1096,10 +1096,11 @@ function ItemRow({
         )}
       </div>
 
-      {/* Info */}
-      <div className="flex-1 min-w-0">
+      {/* Info — full row on narrow screens so the filename and date stay readable;
+          priority and actions wrap below it. */}
+      <div className="flex-1 min-w-0 basis-[calc(100%-1.75rem)] sm:basis-auto">
         <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-sm text-fg font-medium truncate">{item.filename}</span>
+          <span className="text-sm text-fg font-medium truncate max-w-full">{item.filename}</span>
           <span className="text-[10px] bg-surface-overlay text-fg-muted border border-line-strong rounded px-1.5 py-0.5">{item.domain}</span>
           <StatusPill
                 status={item.status}

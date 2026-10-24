@@ -28,7 +28,7 @@
     "test:review-actions": "node --test --test-reporter=junit scripts/review-action-states.mjs",
     "test:review-changes": "node --test --test-reporter=junit scripts/review-change-states.mjs",
     "test:reference-async": "node --test --test-reporter=junit scripts/reference-async-states.mjs",
-    "test:review-roles": "node --test --test-concurrency=1 --test-reporter=junit scripts/review-roles-proxy.mjs scripts/review-two-firms-proxy.mjs",
+    "test:review-roles": "node --test --test-concurrency=1 --test-reporter=junit scripts/review-roles-proxy.mjs scripts/review-two-firms-proxy.mjs scripts/mermaid-consumer-proxy.mjs scripts/review-row-geometry.mjs",
     "test:oct22-security": "node --test --test-reporter=junit scripts/oct22-dependency-security-browser.mjs"
   },
   "dependencies": {

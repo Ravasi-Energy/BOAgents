@@ -1430,6 +1430,12 @@ export default function Briefing({ onContinue, showHeader = false, firstName }: 
   const [today, setToday] = useState<Today | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // A failed card action (approve / dismiss / bulk dismiss / re-check / reopen) is reverted
+  // optimistically; this keeps the reason visible instead of only in the console.
+  const [actionError, setActionError] = useState<string | null>(null);
+  const reportActionError = useCallback((what: string, e: unknown) => {
+    setActionError(`${what} failed — nothing was changed. ${e instanceof Error ? e.message : String(e)}`);
+  }, []);
   // The healthy ("on track") and inactive departments collapse into a single
   // quiet toggle so the section has one disclosure pattern instead of three.
   const [showAllDeptsOpen, setShowAllDeptsOpen] = useState(false);
@@ -1490,8 +1496,9 @@ export default function Briefing({ onContinue, showHeader = false, firstName }: 
       setActedAlertIds(prev);
       // eslint-disable-next-line no-console
       console.error("Approve failed", e);
+      reportActionError("Approve", e);
     }
-  }, [actedAlertIds, onContinue, refreshToday]);
+  }, [actedAlertIds, onContinue, refreshToday, reportActionError]);
 
   // Dismiss is a record-and-forget decision: the card disappears
   // immediately, the backend marks the alert ``dismissed`` (so the
@@ -1503,6 +1510,7 @@ export default function Briefing({ onContinue, showHeader = false, firstName }: 
   // revert the optimistic removal so the user can see the card came
   // back and retry.
   const handleDismiss = useCallback(async (proposal: ProposalItem) => {
+    setActionError(null);
     const prev = actedAlertIds;
     setActedAlertIds(new Set(prev).add(proposal.alert_id));
     try {
@@ -1518,14 +1526,16 @@ export default function Briefing({ onContinue, showHeader = false, firstName }: 
       setActedAlertIds(prev);
       // eslint-disable-next-line no-console
       console.error("Dismiss failed", e);
+      reportActionError("Dismiss", e);
     }
-  }, [actedAlertIds, refreshToday]);
+  }, [actedAlertIds, refreshToday, reportActionError]);
 
   // Bulk dismiss: the footer under a lane sends explicit ids (the cards the
   // caller can see), never a server-side age sweep. Same optimistic-removal
   // + rollback pattern as the single-card handlers.
   const handleBulkDismiss = useCallback(async (ids: number[]) => {
     if (ids.length === 0) return;
+    setActionError(null);
     const prev = actedAlertIds;
     const next = new Set(prev);
     ids.forEach((id) => next.add(id));
@@ -1537,8 +1547,9 @@ export default function Briefing({ onContinue, showHeader = false, firstName }: 
       setActedAlertIds(prev);
       // eslint-disable-next-line no-console
       console.error("Bulk dismiss failed", e);
+      reportActionError("Bulk dismiss", e);
     }
-  }, [actedAlertIds, refreshToday]);
+  }, [actedAlertIds, refreshToday, reportActionError]);
 
   // Re-check relevance: ask the Executive to review every open alert now
   // (route / escalate / draft / merge / resolve within authority), then
@@ -1551,10 +1562,11 @@ export default function Briefing({ onContinue, showHeader = false, firstName }: 
     } catch (e) {
       // eslint-disable-next-line no-console
       console.error("Alert review failed", e);
+      reportActionError("Alert review", e);
     } finally {
       setRecheckBusy(false);
     }
-  }, [refreshToday]);
+  }, [refreshToday, reportActionError]);
 
   // Undo an autonomous close from the handled rail (HandledOvernightPanel). The rail is
   // rebuilt from the audit log on every fetch (the "closed" row persists after
@@ -1571,8 +1583,9 @@ export default function Briefing({ onContinue, showHeader = false, firstName }: 
       }
       // eslint-disable-next-line no-console
       console.error("Reopen failed", e);
+      reportActionError("Reopen", e);
     }
-  }, [refreshToday]);
+  }, [refreshToday, reportActionError]);
 
   // Approve-with-edits: user has tweaked the draft text and wants OE to
   // send exactly what they wrote (no LLM rephrasing). Same optimistic-
@@ -1595,8 +1608,9 @@ export default function Briefing({ onContinue, showHeader = false, firstName }: 
       setActedAlertIds(prev);
       // eslint-disable-next-line no-console
       console.error("Approve-with-edits failed", e);
+      reportActionError("Approve-with-edits", e);
     }
-  }, [actedAlertIds, onContinue]);
+  }, [actedAlertIds, onContinue, reportActionError]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1716,6 +1730,11 @@ export default function Briefing({ onContinue, showHeader = false, firstName }: 
           {error && (
             <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 text-sm mb-4">
               {error}
+            </div>
+          )}
+          {actionError && (
+            <div role="alert" className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 text-sm mb-4">
+              {actionError}
             </div>
           )}
 

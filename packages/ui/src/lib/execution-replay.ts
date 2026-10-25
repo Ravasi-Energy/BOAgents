@@ -20,3 +20,10 @@ export function parseRunDraft(raw: string): RunSubmission {
   else requiredExecutionBudgetInput(moneyInputValue(v.budget_amount),v.budget_currency,false);
   return {mandate_id:v.mandate_id,correlation_id:v.correlation_id,budget_amount:v.budget_amount,budget_currency:v.budget_currency,steps:v.steps};
 }
+
+export const UNCERTAIN_SUBMIT_TEXT = "Trimitere neconfirmată păstrată. Verifică rularea existentă; reluarea folosește aceeași corelare și același draft.";
+/** A failed submit stays "uncertain" (kept for same-correlation replay) only when its outcome is unknown:
+ * no HTTP answer (null) or a 5xx. A 4xx is a definitive refusal — no run exists, nothing to replay. */
+export function submitOutcome(status: number | null): "uncertain" | "refused" {
+  return status === null || status >= 500 ? "uncertain" : "refused";
+}

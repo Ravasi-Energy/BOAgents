@@ -16,8 +16,10 @@ import {
   Pill,
   StateBlock,
 } from "@/components/bo/ui";
+import BoTime from "@/components/bo/BoTime";
 import {
   BoApiError,
+  boErrorDetail,
   createBoCatalogEntry,
   flushBoRoutingObservations,
   getBoRoutingCatalog,
@@ -172,9 +174,17 @@ function EntryEditor({
     if(conflict)return;
     setErr(null);setBusy(true);
     try {
-      const draft=payload();
-      if (base) {
-        await updateBoCatalogEntry(base.entry_id, catalogPatch(draft, originalPayload.current!, base, {capabilities:removeCaps,regions:removeRegions}));
+      let draft: ReturnType<typeof payload>, patch: ReturnType<typeof catalogPatch> | null = null;
+      try {
+        draft = payload();
+        if (base) patch = catalogPatch(draft, originalPayload.current!, base, {capabilities:removeCaps,regions:removeRegions});
+      } catch (e) {
+        // Local validation (e.g. negative price) names its own cause; nothing was sent.
+        setErr(e instanceof Error ? e.message : "Valoare invalidă.");
+        return;
+      }
+      if (base && patch) {
+        await updateBoCatalogEntry(base.entry_id, patch);
       } else {
         await createBoCatalogEntry(draft);
       }
@@ -186,7 +196,7 @@ function EntryEditor({
           "Altă sesiune a modificat intrarea între timp — editura este păstrată; citește baza curentă.",
         );
       } else if (e instanceof BoApiError) {
-        setErr(`${e.code}${e.detail ? ` — ${String(e.detail)}` : ""}`);
+        setErr(`${e.code}${e.detail ? ` — ${boErrorDetail(e.detail)}` : ""}`);
       } else {
         setErr("Eroare neașteptată la salvare.");
       }
@@ -706,7 +716,7 @@ export default function BoRoutingPage() {
                           </Pill>
                         ) : null}
                       </td>
-                      <td>{e.quality?.observed_at?.slice(0, 10) ?? "—"}</td>
+                      <td>{e.quality?.observed_at ? <BoTime iso={e.quality.observed_at} dateOnly /> : "—"}</td>
                       {canWrite ? (
                         <td>
                           <button
@@ -771,7 +781,7 @@ export default function BoRoutingPage() {
                 {observations.map((o) => (
                   <Fragment key={o.obs_id}>
                     <tr>
-                      <td>{o.occurred_at.slice(0, 19).replace("T", " ")}</td>
+                      <td><BoTime iso={o.occurred_at} /></td>
                       <td>{o.task_kind}</td>
                       <td>{choiceLabel(o.recommendation)}</td>
                       <td>{choiceLabel(o.actual_route)}</td>

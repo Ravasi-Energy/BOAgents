@@ -6,6 +6,8 @@ import { BoPage, Field, InlineAlert, Pill, StateBlock } from "@/components/bo/ui
 import { BoApiError, getBoMandates, listBoPackageImports, req, workBoRuns,
   reconcileBoRun, replayBoRunTelemetry, resumeBoRun,
   type BoMandate, type BoPackageImport, type BoRunTelemetry } from "@/lib/bo";
+import { PILOT_UNCONFIRMED_TEXT, pilotActionNotice } from "@/lib/bo-pilot";
+import BoTime from "@/components/bo/BoTime";
 
 type PilotRun = { run_id: string; state: string; health: string; correlation_id: string;
   block_reason?: string; observation: null | { observedAt: string; service: {
@@ -55,8 +57,7 @@ export default function PilotPage() {
     setBusy(true); setNotice("");
     try { await fn(); await load(); setNotice(message); }
     catch (err) {
-      setNotice(err instanceof BoApiError ? (err.status === 409 ? "Conflict CAS/stare: reîncarcă datele înainte de reluare. " : "Acțiune refuzată: ") +
-        (typeof err.detail === "string" ? err.detail : err.code) : "Cererea nu a fost confirmată; verifică dovezile înainte de repetare.");
+      setNotice(err instanceof BoApiError ? pilotActionNotice(err.status, err.code, err.detail) : PILOT_UNCONFIRMED_TEXT);
     } finally { setBusy(false); }
   }
   return <BoPage title="Pilot ERP sintetic" sub="BoBot determinist, fără LLM. Diagnostic local, fără conexiune la ERP real."
@@ -115,7 +116,7 @@ export default function PilotPage() {
             degradarea privește numai livrarea observației, nu rezultatul execuției.</p>}
           {run.block_reason && run.state !== "SUCCEEDED" && <InlineAlert kind="warn">{run.block_reason}</InlineAlert>}
           <p>Versiune: {run.observation?.service.version ?? "UNKNOWN"} · Coadă: {run.observation?.service.queuePending ?? "UNKNOWN"}</p>
-          <p>Observat: {run.observation?.observedAt ?? "Nemăsurat"} · Cel mai vechi în coadă: {run.observation?.service.oldestPendingAt ?? "Nicio dovadă de întârziere"}</p>
+          <p>Observat: {run.observation?.observedAt ? <BoTime iso={run.observation.observedAt} /> : "Nemăsurat"} · Cel mai vechi în coadă: {run.observation?.service.oldestPendingAt ? <BoTime iso={run.observation.service.oldestPendingAt} /> : "Nicio dovadă de întârziere"}</p>
           <p className="bo-mono">Corelație: {run.correlation_id}</p>
           {run.ledger.map(entry => <details key={entry.idempotency_key}><summary>Receipt: {entry.receipt_ref ?? "UNKNOWN — dovadă absentă"}</summary>
             <p className="bo-mono">Cheie: {entry.idempotency_key}</p><p className="bo-mono">Digest: {entry.payload_digest}</p><p>Ledger: {entry.status}</p></details>)}

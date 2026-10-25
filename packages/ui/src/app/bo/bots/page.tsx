@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 
 import IconBO from "@/components/bo/IconBO";
+import BoTime from "@/components/bo/BoTime";
 import { BoPage, InlineAlert, Pill, StateBlock } from "@/components/bo/ui";
 import { BoApiError, createExampleBoBot, listBoBots, type BoBot } from "@/lib/bo";
 
@@ -134,7 +135,7 @@ export default function BoBotsPage() {
                 </td>
                 <td className="bo-mono">d{b.draft_version}</td>
                 <td className="bo-muted">
-                  {new Date(b.updated_at).toLocaleString("ro-RO")}
+                  <BoTime iso={b.updated_at} />
                 </td>
                 <td>
                   <Link

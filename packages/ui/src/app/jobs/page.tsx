@@ -182,8 +182,15 @@ function JobsPageInner() {
   const handleDelete = useCallback(
     async (runId: string) => {
       if (!confirm("Delete this run?")) return;
-      await deleteWorkflowRun(runId);
-      refresh();
+      let failure: string | null = null;
+      try {
+        await deleteWorkflowRun(runId);
+      } catch (e) {
+        failure = e instanceof Error ? e.message : String(e);
+      }
+      // Resync first (refresh clears the banner), then surface the refusal.
+      await refresh();
+      if (failure) setError(failure);
     },
     [refresh]
   );
@@ -192,8 +199,14 @@ function JobsPageInner() {
     async (name: string) => {
       if (!confirm(`Delete the custom workflow “${name}”? This cannot be undone.`))
         return;
-      await deleteCustomWorkflow(name);
-      refresh();
+      let failure: string | null = null;
+      try {
+        await deleteCustomWorkflow(name);
+      } catch (e) {
+        failure = e instanceof Error ? e.message : String(e);
+      }
+      await refresh();
+      if (failure) setError(failure);
     },
     [refresh]
   );

@@ -7,6 +7,7 @@ import { useParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 
 import IconBO from "@/components/bo/IconBO";
+import BoTime from "@/components/bo/BoTime";
 import { BoPage, Pill, StateBlock } from "@/components/bo/ui";
 import { BoApiError, getBoRun, type BoRun } from "@/lib/bo";
 
@@ -96,7 +97,7 @@ export default function BoRunPage() {
           <dt>Plan (deterministic)</dt><dd className="bo-mono">{run.plan_hash}</dd>
           <dt>ConfigVersion</dt><dd className="bo-mono">cv{run.config_version}</dd>
           <dt>Pornit de</dt><dd>{run.created_by}</dd>
-          <dt>Pornit la</dt><dd>{new Date(run.started_at).toLocaleString("ro-RO")}</dd>
+          <dt>Pornit la</dt><dd><BoTime iso={run.started_at} /></dd>
           <dt>Limită pași</dt><dd>{result?.step_limit ?? "—"} {result?.capped_by_step_limit ? "(atingă — PARTIAL)" : ""}</dd>
         </dl>
       </div>

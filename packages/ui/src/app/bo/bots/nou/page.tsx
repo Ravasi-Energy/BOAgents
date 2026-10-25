@@ -7,7 +7,7 @@ import { useState } from "react";
 
 import IconBO from "@/components/bo/IconBO";
 import { BoPage, Field, InlineAlert } from "@/components/bo/ui";
-import { BoApiError, createBoBot } from "@/lib/bo";
+import { BoApiError, boErrorDetail, createBoBot } from "@/lib/bo";
 
 const TEMPLATE = `{
   "schema_version": "bo.bobot.v1",
@@ -53,7 +53,7 @@ export default function BoBotNewPage() {
         const detail = err.detail;
         setErrors(
           Array.isArray(detail)
-            ? detail.map(String)
+            ? detail.map((d) => boErrorDetail([d]))
             : [typeof detail === "string" ? detail : "Definiție invalidă."],
         );
       } else if (err instanceof BoApiError && err.status === 403) {

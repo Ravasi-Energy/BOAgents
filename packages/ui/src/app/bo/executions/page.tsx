@@ -10,8 +10,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useSession } from "next-auth/react";
 import { Money } from "@/lib/Money";
 import { requiredExecutionBudgetInput, moneyInputValue, moneyCurrency } from "@/lib/money-format";
-import { replayPayload, parseRunDraft, type RunSubmission } from "@/lib/execution-replay";
+import { replayPayload, parseRunDraft, submitOutcome, UNCERTAIN_SUBMIT_TEXT, type RunSubmission } from "@/lib/execution-replay";
 import IconBO from "@/components/bo/IconBO";
+import BoTime from "@/components/bo/BoTime";
 import { BoPage, InlineAlert, Pill, StateBlock } from "@/components/bo/ui";
 import {
   BoApiError,
@@ -446,7 +447,7 @@ function SubmitRunForm({
         attempted.current = draft; correlation.current = draft.correlation_id;
         setMandateId(draft.mandate_id); setBudget(moneyInputValue(draft.budget_amount)); setBudgetCurrency(draft.budget_currency??"");
         setSteps(JSON.stringify(draft.steps)); setOpen(true);
-        setNotice({kind:"danger",text:"Trimitere neconfirmată păstrată. Verifică rularea existentă; reluarea folosește aceeași corelare și același draft."});
+        setNotice({kind:"danger",text:UNCERTAIN_SUBMIT_TEXT});
       }
     } catch (error) { const message=error instanceof Error ? error.message : "Draftul păstrat nu poate fi citit."; setDraftError(message); setNotice({kind:"danger",text:message}); }
     setLoadedKey(storageKey);
@@ -491,9 +492,17 @@ function SubmitRunForm({
       setOpen(false);
       onChanged();
     } catch (err) {
+      // fetch rejects with TypeError when no HTTP answer arrived: outcome unknown, the draft stays for replay.
+      const status = err instanceof BoApiError ? err.status : err instanceof TypeError ? null : undefined;
+      if (status !== undefined && submitOutcome(status) === "refused" && storageKey) {
+        sessionStorage.removeItem(storageKey);
+        attempted.current = null;
+        correlation.current = null;
+      }
       const text =
         err instanceof BoApiError
           ? `${err.status} — ${typeof err.detail === "string" ? err.detail : err.code}`
+          : status === null ? UNCERTAIN_SUBMIT_TEXT
           : err instanceof Error ? err.message : "Trimiterea a eșuat.";
       setNotice({ kind: "danger", text });
     } finally {
@@ -1300,7 +1309,7 @@ function RunDetail({
           <span className="bo-hint">
             {m.mandate_id} · acțiuni [{m.allowed_actions.join(", ")}] ·
             resurse [{m.allowed_resources.join(", ")}] · buget{" "}
-            <ExecutionBudget amount={m.budget_limit} currency={m.budget_currency} /> · expiră {m.expires_at.slice(0, 19)}Z
+            <ExecutionBudget amount={m.budget_limit} currency={m.budget_currency} /> · expiră <BoTime iso={m.expires_at} />
             {m.guardian_ref ? ` · Guardian: ${m.guardian_ref}` : ""}
           </span>
         </div>
@@ -1373,7 +1382,7 @@ function RunDetail({
               pas {c.step} · v{c.checkpoint_version}
             </Pill>
             <span className="bo-hint">
-              {String(c.state.phase)} · {c.created_at.slice(11, 19)}Z ·
+              {String(c.state.phase)} · <BoTime iso={c.created_at} timeOnly /> ·
               stare de execuție (nu dovadă de efect)
             </span>
           </div>

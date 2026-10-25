@@ -1,4 +1,5 @@
 import { moneyChanged } from "./money-event.ts";
+import { boErrorDetail } from "./bo.ts";
 const API_BASE = "/api/backend";
 
 export type CommitteePhase = "drafting" | "reviewing" | "finalizing";
@@ -1031,8 +1032,8 @@ async function _writeCustom(
     } catch {
       /* keep statusText */
     }
-    const msg = Array.isArray(detail) ? detail.join("; ") : String(detail);
-    throw new Error(msg);
+    // Shape errors arrive as FastAPI validation objects; render them as "field: message".
+    throw new Error(boErrorDetail(detail ?? res.statusText));
   }
   return res.json();
 }

@@ -7,6 +7,7 @@ import { useParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import IconBO from "@/components/bo/IconBO";
+import BoTime from "@/components/bo/BoTime";
 import { BoPage, Field, InlineAlert, Pill, StateBlock } from "@/components/bo/ui";
 import {
   BoApiError,
@@ -470,7 +471,7 @@ export default function BoBotDetailPage() {
                   </td>
                   <td className="bo-mono">{shortHash(v.hash)}</td>
                   <td className="bo-muted">{v.created_by}</td>
-                  <td className="bo-muted">{new Date(v.created_at).toLocaleString("ro-RO")}</td>
+                  <td className="bo-muted"><BoTime iso={v.created_at} /></td>
                 </tr>
               ))}
             </tbody>
@@ -494,7 +495,7 @@ export default function BoBotDetailPage() {
               <tbody>
                 {runs.map((r) => (
                   <tr key={r.id}>
-                    <td className="bo-muted">{new Date(r.started_at).toLocaleString("ro-RO")}</td>
+                    <td className="bo-muted"><BoTime iso={r.started_at} /></td>
                     <td className="bo-mono">v{r.version_no}</td>
                     <td>
                       <Pill kind={r.status === "SUCCEEDED" ? "ok" : r.status === "PARTIAL" ? "warn" : "danger"}>

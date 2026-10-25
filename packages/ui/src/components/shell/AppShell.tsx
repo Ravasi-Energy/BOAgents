@@ -9,6 +9,7 @@ import AskOEPanel from "@/components/askoe/AskOEPanel";
 import BrandMark from "@/components/BrandMark";
 import Icon, { IconName } from "@/components/Icon";
 import UserBadge from "@/components/UserBadge";
+import { breadcrumbCrumbs } from "@/lib/breadcrumb";
 import {
   BRIEFING_DESCRIPTION,
   buildPrimaryNav,
@@ -297,17 +298,10 @@ function TopBar({
   segments: string[];
   onOpenDrawer: () => void;
 }) {
-  // Breadcrumb chain. Only the top-level section (segment[0]) is a real
-  // route in this app — intermediate segments like `runs` in
-  // `/jobs/runs/<id>` or `session` in `/audit/session/<id>` are not
-  // navigable pages, so we render them as plain text to avoid linking
-  // to a 404. Dynamic segments (slugs/uuids) also render as-is — pages
-  // own their own H1 with the entity name.
-  const crumbs = segments.map((segment, idx) => {
-    const linkable = idx === 0;
-    const href = linkable ? "/" + segment : null;
-    return { href, label: labelFor(segment) };
-  });
+  const crumbs = breadcrumbCrumbs(segments).map(({ segment, href }) => ({
+    href,
+    label: labelFor(segment),
+  }));
 
   return (
     <header className="h-14 border-b border-line flex items-center justify-between px-4 sm:px-6 flex-shrink-0 gap-3">

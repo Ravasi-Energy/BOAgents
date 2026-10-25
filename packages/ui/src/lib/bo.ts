@@ -35,6 +35,23 @@ export async function req<T>(
   return body as T;
 }
 
+/** Human-readable error detail: FastAPI validation lists become "field: message". */
+export function boErrorDetail(detail: unknown): string {
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    return detail
+      .map((d) => {
+        if (d && typeof d === "object" && "msg" in d) {
+          const loc = Array.isArray((d as { loc?: unknown }).loc) ? (d as { loc: unknown[] }).loc.filter((x) => x !== "body").join(".") : "";
+          return `${loc ? `${loc}: ` : ""}${String((d as { msg: unknown }).msg)}`;
+        }
+        return typeof d === "string" ? d : JSON.stringify(d);
+      })
+      .join("; ");
+  }
+  return JSON.stringify(detail);
+}
+
 // ---------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------

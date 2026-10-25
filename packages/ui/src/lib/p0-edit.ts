@@ -33,7 +33,7 @@ export function trustDelta(draft: Doc, base: Doc): Doc {
   return out;
 }
 export function settingPatch(key:string,draft:string,base:{value:unknown;version:number},removeText='') {
-  if(!Number.isSafeInteger(base.version)||base.version<0)throw Error('Versiunea citită lipsește.');
+  if(!Number.isSafeInteger(base.version)||base.version<0)throw new P0EditError('Versiunea citită lipsește.');
   if(CSV_SETTINGS.has(key)) {
     const previous=csvItems(String(base.value??''));
     const add=csvItems(draft).filter(v=>!previous.includes(v));
@@ -41,10 +41,11 @@ export function settingPatch(key:string,draft:string,base:{value:unknown;version
     return {value:add.join(','),expected_version:base.version,...(remove.length?{remove}:{})};
   }
   if(key==='bo.packages.trust_store_json') {
-    const value=JSON.parse(draft),old=JSON.parse(String(base.value||'{}'));
-    if(!object(value)||!object(old))throw Error('Document JSON obiect obligatoriu.');
+    const parse=(text:string)=>{try{return JSON.parse(text);}catch{throw new P0EditError('JSON invalid — corectează documentul; nimic nu a fost trimis.');}};
+    const value=parse(draft),old=parse(String(base.value||'{}'));
+    if(!object(value)||!object(old))throw new P0EditError('Document JSON obiect obligatoriu.');
     const delta=trustDelta(value,old);
-    if(!Object.keys(delta).length)throw Error('Nicio modificare explicită de salvat.');
+    if(!Object.keys(delta).length)throw new P0EditError('Nicio modificare explicită de salvat.');
     return {value:JSON.stringify(delta),expected_version:base.version};
   }
   return {value:draft,expected_version:base.version};

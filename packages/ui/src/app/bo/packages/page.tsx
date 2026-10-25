@@ -7,6 +7,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useState, useRef } from "react";
 
 import IconBO from "@/components/bo/IconBO";
+import BoTime from "@/components/bo/BoTime";
 import {
   BoPage,
   Field,
@@ -300,7 +301,7 @@ export default function BoPackagesPage() {
                       {p.artifact_set_digest.slice(0, 20)}…
                     </td>
                     <td className="bo-muted">
-                      {new Date(p.created_at).toLocaleString("ro-RO")}
+                      <BoTime iso={p.created_at} />
                     </td>
                     <td>
                       <div className="bo-row">
@@ -380,7 +381,7 @@ export default function BoPackagesPage() {
                     <dt>verificat la</dt>
                     <dd>
                       {p.verdict.checkedAt
-                        ? new Date(p.verdict.checkedAt).toLocaleString("ro-RO")
+                        ? <BoTime iso={p.verdict.checkedAt} />
                         : "—"}
                     </dd>
                     <dt>politica</dt>
@@ -476,7 +477,7 @@ export default function BoPackagesPage() {
                           {a.artifact_set_digest.slice(0, 20)}…
                         </td>
                         <td className="bo-muted">
-                          {new Date(a.expires_at).toLocaleString("ro-RO")}
+                          <BoTime iso={a.expires_at} />
                         </td>
                         <td>
                           <Pill kind={s.kind}>{s.label}</Pill>

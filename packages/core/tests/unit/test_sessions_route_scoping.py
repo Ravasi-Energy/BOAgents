@@ -174,11 +174,13 @@ def test_session_read_refused_for_unknown_caller(client: TestClient) -> None:
 
 
 def test_session_delete_refused_to_other_person(client: TestClient) -> None:
+    # Contractul nou (BO-RBAC): scrierea cere admin; un non-admin primeste
+    # 403 inainte de orice efect — nu divulga existenta si nu sterge.
     _two_people_with_sessions()
     resp = client.delete(
         "/sessions/alex-private", headers={"x-caller-email": "sabin@example.com"}
     )
-    assert resp.status_code == 404
+    assert resp.status_code == 403
     assert session_store.get_session_metadata("alex-private") is not None
 
 

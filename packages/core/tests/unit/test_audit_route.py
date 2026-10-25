@@ -75,21 +75,34 @@ def test_pagination(client: TestClient) -> None:
 
 
 def test_post_audit_log_creates_entry(client: TestClient) -> None:
-    # The fixture pre-seeds 4 rows; auth_login starts at 0.
-    assert client.get("/audit/logs", params={"event_type": "auth_login"}).json()["total"] == 0
-
+    # Contractul nou (BO-AUDIT-FORGE): event_type din afara auth_*,
+    # actor derivat din identitate (dev = local-dev, rol admin).
     r = client.post(
         "/audit/log",
-        json={"event_type": "auth_login", "summary": "Login: test@example.com", "actor": "test@example.com"},
+        json={"event_type": "alert", "summary": "Nota: test@example.com"},
     )
     assert r.status_code == 201
     assert isinstance(r.json()["id"], int)
 
-    after = client.get("/audit/logs", params={"event_type": "auth_login"}).json()
+    after = client.get("/audit/logs", params={"event_type": "alert"}).json()
     assert after["total"] == 1
-    assert after["items"][0]["event_type"] == "auth_login"
-    assert after["items"][0]["actor"] == "test@example.com"
-    assert after["items"][0]["summary"] == "Login: test@example.com"
+    assert after["items"][0]["event_type"] == "alert"
+    assert after["items"][0]["actor"] == "local-dev"
+    assert after["items"][0]["summary"] == "Nota: test@example.com"
+
+
+def test_post_audit_log_refuza_auth_interne(client: TestClient) -> None:
+    # auth_login/auth_logout se emit doar de producatorii interni;
+    # endpointul generic le refuza oricui, fara rand nou.
+    r = client.post(
+        "/audit/log",
+        json={"event_type": "auth_login", "summary": "Login: x",
+              "actor": "x"},
+    )
+    assert r.status_code == 403
+    assert client.get(
+        "/audit/logs", params={"event_type": "auth_login"}
+    ).json()["total"] == 0
 
 
 def test_post_audit_log_rejects_unknown_event_type(client: TestClient) -> None:

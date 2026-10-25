@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 from openexecutive.audit import AuditLogger, get_audit_logger
 from openexecutive.audit.logger import EVENT_TYPES
+from openexecutive.bo.identity import require_http
 
 # Session IDs are integration-derived (e.g. "discord:dm:42", "slack:dm:U123",
 # "slack:thread:C1:1700000000.001", "telegram:5556677", "email:thread@host"). They
@@ -208,17 +209,32 @@ class AuditLogRequest(BaseModel):
     details: dict[str, Any] | None = None
 
 
+# Evenimente de securitate: le emit doar producatorii interni (auth,
+# conectori). Endpointul generic le refuza oricui — un rand fals de
+# auth_login ar falsifica urma de acces (BO-AUDIT-FORGE).
+INTERNAL_ONLY = frozenset(t for t in EVENT_TYPES if t.startswith("auth_"))
+
+
 @router.post("/audit/log", status_code=201)
 def create_audit_log(body: AuditLogRequest, request: Request) -> dict[str, int | None]:
+    identity = require_http(request, "audit:write")
     if body.event_type not in EVENT_TYPES:
         raise HTTPException(status_code=422, detail=f"Unknown event_type: {body.event_type!r}")
+    if body.event_type in INTERNAL_ONLY:
+        raise HTTPException(
+            status_code=403,
+            detail=f"{body.event_type}: se emite doar de producatorul intern")
+    if body.actor is not None and body.actor != identity.actor:
+        raise HTTPException(
+            status_code=403,
+            detail="actorul deriva din identitatea server — alt actor e refuzat")
     audit = _resolve_logger(request)
     row_id = audit.log(
         body.event_type,
         body.summary,
         session_id=body.session_id,
         turn_id=body.turn_id,
-        actor=body.actor,
+        actor=identity.actor,
         details=body.details,
     )
     return {"id": row_id}

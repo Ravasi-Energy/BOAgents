@@ -120,6 +120,11 @@ _CAP_MIN_ROLE: dict[str, Role] = {
     "knowledge:write": "admin",
     "scheduled:read": "viewer",
     "scheduled:write": "admin",
+    # Audit: citirea e viewer; scrierea prin endpointul generic e admin,
+    # cu actor derivat din identitate si fara evenimente interne
+    # (auth_*) — vezi routes/audit.py.
+    "audit:read": "viewer",
+    "audit:write": "admin",
 }
 
 

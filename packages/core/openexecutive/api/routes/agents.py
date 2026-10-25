@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel
 
 from openexecutive.agents.overrides import (
@@ -18,8 +18,15 @@ from openexecutive.agents.overrides import (
     set_override,
 )
 from openexecutive.audit.usage import log_model_usage
+from openexecutive.bo.identity import require_http
 
 logger = logging.getLogger(__name__)
+
+
+
+def _require_admin_write(request: Request) -> None:
+    require_http(request, "agents:write")
+
 
 router = APIRouter()
 
@@ -351,7 +358,7 @@ def get_agent(agent_id: str) -> AgentDetail:
     return _build_detail(agent_id)
 
 
-@router.patch("/agents/{agent_id}", response_model=AgentDetail)
+@router.patch("/agents/{agent_id}", response_model=AgentDetail, dependencies=[Depends(_require_admin_write)])
 def patch_agent(agent_id: str, patch: AgentPatch) -> AgentDetail:
     if not _is_known_agent(agent_id):
         raise HTTPException(status_code=404, detail="Unknown agent")
@@ -393,7 +400,7 @@ def patch_agent(agent_id: str, patch: AgentPatch) -> AgentDetail:
     )
 
 
-@router.delete("/agents/{agent_id}/override", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/agents/{agent_id}/override", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(_require_admin_write)])
 def reset_agent(agent_id: str) -> Response:
     if not _is_known_agent(agent_id):
         raise HTTPException(status_code=404, detail="Unknown agent")
@@ -414,6 +421,7 @@ def get_history(agent_id: str, limit: int = 50) -> list[AgentHistoryEntry]:
 @router.post(
     "/agents/{agent_id}/rollback/{history_id}",
     response_model=AgentDetail,
+dependencies=[Depends(_require_admin_write)],
 )
 def rollback_agent(agent_id: str, history_id: int) -> AgentDetail:
     if not _is_known_agent(agent_id):
@@ -476,7 +484,7 @@ async def _test_executive(req: AgentTestRequest) -> str:
     return text_blocks[0].text if text_blocks else ""
 
 
-@router.post("/agents/{agent_id}/test", response_model=AgentTestResponse)
+@router.post("/agents/{agent_id}/test", response_model=AgentTestResponse, dependencies=[Depends(_require_admin_write)])
 async def test_agent(agent_id: str, req: AgentTestRequest) -> AgentTestResponse:
     """Run a one-off analyze() with the draft config — never persisted."""
     if req.model is not None and req.model not in _allowed(agent_id):

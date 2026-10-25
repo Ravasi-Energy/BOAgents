@@ -14,11 +14,12 @@ import logging
 import sqlite3
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from openexecutive.alerts.models import AlertSeverity
 from openexecutive.audit import log_event as audit_log
+from openexecutive.bo.identity import require_http
 from openexecutive.monitoring import store as ms
 from openexecutive.monitoring.models import (
     DECLINE_KIND_EXPLICIT,
@@ -45,6 +46,12 @@ from openexecutive.monitoring.validation import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+
+def _require_admin_write(request: Request) -> None:
+    require_http(request, "watchlist:write")
+
 
 router = APIRouter()
 
@@ -183,6 +190,7 @@ def get_watchlist_signals(slug: str, limit: int = _SIGNALS_DEFAULT_LIMIT) -> lis
     "/watchlist",
     response_model=WatchlistItem,
     status_code=status.HTTP_201_CREATED,
+dependencies=[Depends(_require_admin_write)],
 )
 async def create_watchlist_entry(body: WatchlistCreate) -> WatchlistItem:
     slug = body.slug.strip()
@@ -299,7 +307,7 @@ async def create_watchlist_entry(body: WatchlistCreate) -> WatchlistItem:
     return created
 
 
-@router.patch("/watchlist/{slug}", response_model=WatchlistItem)
+@router.patch("/watchlist/{slug}", response_model=WatchlistItem, dependencies=[Depends(_require_admin_write)])
 def patch_watchlist_entry(slug: str, body: WatchlistPatch) -> WatchlistItem:
     item = ms.get_watchlist_item_by_slug(slug)
     if item is None:
@@ -394,7 +402,7 @@ def _record_decline(item: WatchlistItem, reason: str) -> None:
     watch_policy.record_outcome_for(item, watch_policy.OUTCOME_DECLINED)
 
 
-@router.delete("/watchlist/{slug}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/watchlist/{slug}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(_require_admin_write)])
 def delete_watchlist_entry(slug: str, reason: str | None = None) -> Response:
     item = ms.get_watchlist_item_by_slug(slug)
     if item is None:
@@ -445,7 +453,7 @@ def _pending_suggestion_or_409(slug: str) -> WatchlistItem:
     return item
 
 
-@router.post("/watchlist/{slug}/approve", response_model=WatchlistItem)
+@router.post("/watchlist/{slug}/approve", response_model=WatchlistItem, dependencies=[Depends(_require_admin_write)])
 def approve_watchlist_suggestion(slug: str) -> WatchlistItem:
     """Turn a research suggestion into a live watch (origin=research)."""
     from openexecutive.monitoring.research import watch_policy
@@ -468,7 +476,7 @@ def approve_watchlist_suggestion(slug: str) -> WatchlistItem:
     return updated
 
 
-@router.post("/watchlist/{slug}/decline", response_model=DeclineResponse)
+@router.post("/watchlist/{slug}/decline", response_model=DeclineResponse, dependencies=[Depends(_require_admin_write)])
 def decline_watchlist_suggestion(slug: str, body: DeclineBody | None = None) -> DeclineResponse:
     """Decline a research suggestion. The reason picks the remedy:
     not_relevant / wrong_source remove it and blacklist (entity / target);

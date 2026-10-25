@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from openexecutive.alerts import lifecycle, store
@@ -15,6 +15,13 @@ from openexecutive.alerts.models import Alert
 # queue-grooming endpoints the briefing calls: single ack, bulk ack, reopen
 # (the Undo for every autonomous close / expiry) and an on-demand run of the
 # Executive's relevance review.
+from openexecutive.bo.identity import require_http
+
+
+def _require_admin_write(request: Request) -> None:
+    require_http(request, "alerts:write")
+
+
 router = APIRouter()
 
 
@@ -26,7 +33,7 @@ class AckBody(BaseModel):
     mute_topic: str | bool | None = None
 
 
-@router.post("/alerts/{alert_id}/ack", response_model=Alert)
+@router.post("/alerts/{alert_id}/ack", response_model=Alert, dependencies=[Depends(_require_admin_write)])
 def ack_alert(alert_id: int, body: AckBody) -> Alert:
     existing = store.get_alert(alert_id)
     if existing is None:
@@ -61,7 +68,7 @@ class BulkAckResponse(BaseModel):
     count: int
 
 
-@router.post("/alerts/bulk-ack", response_model=BulkAckResponse)
+@router.post("/alerts/bulk-ack", response_model=BulkAckResponse, dependencies=[Depends(_require_admin_write)])
 def bulk_ack_alerts(body: BulkAckBody) -> BulkAckResponse:
     if body.alert_ids is None and body.older_than_days is None:
         raise HTTPException(
@@ -108,7 +115,7 @@ def bulk_ack_alerts(body: BulkAckBody) -> BulkAckResponse:
     return BulkAckResponse(count=count)
 
 
-@router.post("/alerts/{alert_id}/reopen", response_model=Alert)
+@router.post("/alerts/{alert_id}/reopen", response_model=Alert, dependencies=[Depends(_require_admin_write)])
 def reopen_alert(alert_id: int) -> Alert:
     """Undo for a close / dismiss / expiry: back to ``unread``, verdict cleared."""
     existing = store.get_alert(alert_id)
@@ -149,7 +156,7 @@ class ReviewResponse(BaseModel):
     annotated: int
 
 
-@router.post("/alerts/review", response_model=ReviewResponse)
+@router.post("/alerts/review", response_model=ReviewResponse, dependencies=[Depends(_require_admin_write)])
 async def review_alerts() -> ReviewResponse:
     """Run the Executive's relevance review on demand ("Re-check now").
 

@@ -1,15 +1,21 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
 from openexecutive.api.models import SessionSummary
 from openexecutive.api.routes.chat import _resolve_caller_person_id
+from openexecutive.bo.identity import require_http
 from openexecutive.memory.session_store import (
     delete_session,
     get_session_metadata,
     list_sessions,
     load_messages,
 )
+
+
+def _require_admin_write(request: Request) -> None:
+    require_http(request, "sessions:write")
+
 
 router = APIRouter()
 
@@ -53,7 +59,7 @@ def get_session_messages(request: Request, session_id: str) -> list[dict]:
     return load_messages(session_id)
 
 
-@router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(_require_admin_write)])
 def delete_session_route(request: Request, session_id: str) -> Response:
     _owned_session(request, session_id)
     delete_session(session_id)

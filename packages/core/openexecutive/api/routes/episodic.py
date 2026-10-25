@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel
 
+from openexecutive.bo.identity import require_http
 from openexecutive.memory.episodic import (
     Advice,
     Decision,
@@ -20,6 +21,11 @@ from openexecutive.memory.episodic import (
     update_decision,
     update_initiative,
 )
+
+
+def _require_admin_write(request: Request) -> None:
+    require_http(request, "episodic:write")
+
 
 router = APIRouter()
 
@@ -52,7 +58,7 @@ def get_decisions() -> list[Decision]:
     return list_decisions()
 
 
-@router.patch("/memories/decisions/{decision_id}", response_model=Decision)
+@router.patch("/memories/decisions/{decision_id}", response_model=Decision, dependencies=[Depends(_require_admin_write)])
 def patch_decision(decision_id: int, body: DecisionUpdate) -> Decision:
     if not update_decision(decision_id, **body.model_dump(exclude_unset=True)):
         raise HTTPException(status_code=404, detail="Decision not found")
@@ -62,7 +68,7 @@ def patch_decision(decision_id: int, body: DecisionUpdate) -> Decision:
     return updated
 
 
-@router.delete("/memories/decisions/{decision_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/memories/decisions/{decision_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(_require_admin_write)])
 def remove_decision(decision_id: int) -> Response:
     if not delete_decision(decision_id):
         raise HTTPException(status_code=404, detail="Decision not found")
@@ -77,7 +83,7 @@ def get_initiatives() -> list[Initiative]:
     return list_initiatives()
 
 
-@router.patch("/memories/initiatives/{initiative_id}", response_model=Initiative)
+@router.patch("/memories/initiatives/{initiative_id}", response_model=Initiative, dependencies=[Depends(_require_admin_write)])
 def patch_initiative(initiative_id: int, body: InitiativeUpdate) -> Initiative:
     if not update_initiative(initiative_id, **body.model_dump(exclude_unset=True)):
         raise HTTPException(status_code=404, detail="Initiative not found")
@@ -87,7 +93,7 @@ def patch_initiative(initiative_id: int, body: InitiativeUpdate) -> Initiative:
     return updated
 
 
-@router.delete("/memories/initiatives/{initiative_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/memories/initiatives/{initiative_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(_require_admin_write)])
 def remove_initiative(initiative_id: int) -> Response:
     if not delete_initiative(initiative_id):
         raise HTTPException(status_code=404, detail="Initiative not found")
@@ -102,7 +108,7 @@ def get_advice_list() -> list[Advice]:
     return list_advice()
 
 
-@router.patch("/memories/advice/{advice_id}", response_model=Advice)
+@router.patch("/memories/advice/{advice_id}", response_model=Advice, dependencies=[Depends(_require_admin_write)])
 def patch_advice(advice_id: int, body: AdviceUpdate) -> Advice:
     if not update_advice(advice_id, **body.model_dump(exclude_unset=True)):
         raise HTTPException(status_code=404, detail="Advice not found")
@@ -112,7 +118,7 @@ def patch_advice(advice_id: int, body: AdviceUpdate) -> Advice:
     return updated
 
 
-@router.delete("/memories/advice/{advice_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/memories/advice/{advice_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(_require_admin_write)])
 def remove_advice(advice_id: int) -> Response:
     if not delete_advice(advice_id):
         raise HTTPException(status_code=404, detail="Advice not found")

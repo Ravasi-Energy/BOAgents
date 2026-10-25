@@ -5,9 +5,10 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from openexecutive.bo.identity import require_http
 from openexecutive.knowledge.loader import (
     BUILTIN_KNOWLEDGE_PATH,
     DOMAIN_MAP,
@@ -16,6 +17,12 @@ from openexecutive.knowledge.loader import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+
+def _require_admin_write(request: Request) -> None:
+    require_http(request, "knowledge:write")
+
 
 router = APIRouter(prefix="/knowledge")
 
@@ -134,7 +141,7 @@ async def get_builtin_file(domain: str, filename: str) -> BuiltinFileContent:
     return BuiltinFileContent(domain=domain, filename=filename, content=path.read_text(encoding="utf-8"))
 
 
-@router.post("/builtin", response_model=BuiltinWriteResponse)
+@router.post("/builtin", response_model=BuiltinWriteResponse, dependencies=[Depends(_require_admin_write)])
 async def create_builtin_file(body: BuiltinFileWrite, request: Request) -> BuiltinWriteResponse:
     _validate_domain(body.domain)
     _validate_filename(body.filename)
@@ -174,7 +181,7 @@ async def create_builtin_file(body: BuiltinFileWrite, request: Request) -> Built
     return BuiltinWriteResponse(domain=body.domain, filename=body.filename, chunks_indexed=chunks)
 
 
-@router.put("/builtin/{domain}/{filename}", response_model=BuiltinWriteResponse)
+@router.put("/builtin/{domain}/{filename}", response_model=BuiltinWriteResponse, dependencies=[Depends(_require_admin_write)])
 async def update_builtin_file(
     domain: str, filename: str, body: BuiltinFileWrite, request: Request
 ) -> BuiltinWriteResponse:
@@ -382,7 +389,7 @@ async def peek_external_source(
     return ExternalPeekResponse(source_id=source_id, chunks=chunks)
 
 
-@router.delete("/builtin/{domain}/{filename}")
+@router.delete("/builtin/{domain}/{filename}", dependencies=[Depends(_require_admin_write)])
 async def delete_builtin_file(domain: str, filename: str, request: Request) -> dict:
     _validate_domain(domain)
     _validate_filename(filename)
@@ -443,7 +450,7 @@ async def get_failure_file(domain: str, filename: str) -> BuiltinFileContent:
     )
 
 
-@router.post("/failures", response_model=BuiltinWriteResponse)
+@router.post("/failures", response_model=BuiltinWriteResponse, dependencies=[Depends(_require_admin_write)])
 async def create_failure_file(body: BuiltinFileWrite, request: Request) -> BuiltinWriteResponse:
     _validate_domain(body.domain)
     _validate_filename(body.filename)
@@ -482,7 +489,7 @@ async def create_failure_file(body: BuiltinFileWrite, request: Request) -> Built
     return BuiltinWriteResponse(domain=body.domain, filename=body.filename, chunks_indexed=chunks)
 
 
-@router.put("/failures/{domain}/{filename}", response_model=BuiltinWriteResponse)
+@router.put("/failures/{domain}/{filename}", response_model=BuiltinWriteResponse, dependencies=[Depends(_require_admin_write)])
 async def update_failure_file(
     domain: str, filename: str, body: BuiltinFileWrite, request: Request
 ) -> BuiltinWriteResponse:
@@ -527,7 +534,7 @@ async def update_failure_file(
     return BuiltinWriteResponse(domain=domain, filename=filename, chunks_indexed=chunks)
 
 
-@router.delete("/failures/{domain}/{filename}")
+@router.delete("/failures/{domain}/{filename}", dependencies=[Depends(_require_admin_write)])
 async def delete_failure_file(domain: str, filename: str, request: Request) -> dict:
     _validate_domain(domain)
     _validate_filename(filename)
@@ -639,7 +646,7 @@ def _hits_from_chroma(
     return hits
 
 
-@router.post("/search", response_model=KnowledgeSearchResponse)
+@router.post("/search", response_model=KnowledgeSearchResponse, dependencies=[Depends(_require_admin_write)])
 async def search_knowledge(
     body: KnowledgeSearchRequest, request: Request
 ) -> KnowledgeSearchResponse:

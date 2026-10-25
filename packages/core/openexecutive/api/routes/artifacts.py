@@ -32,7 +32,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from openexecutive.alerts.models import Alert
@@ -45,6 +45,7 @@ from openexecutive.alerts.store import (
 from openexecutive.alerts.store import (
     initialize_db as initialize_alerts_db,
 )
+from openexecutive.bo.identity import require_http
 from openexecutive.workflows.persistence import (
     delete_run,
     get_run,
@@ -52,6 +53,11 @@ from openexecutive.workflows.persistence import (
     list_artifact_runs,
     set_run_archived,
 )
+
+
+def _require_admin_write(request: Request) -> None:
+    require_http(request, "artifacts:write")
+
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -169,21 +175,21 @@ async def get_artifact(composite_id: str) -> ArtifactDetail:
     )
 
 
-@router.post("/artifacts/{composite_id}/archive")
+@router.post("/artifacts/{composite_id}/archive", dependencies=[Depends(_require_admin_write)])
 async def archive_artifact(composite_id: str) -> dict[str, str]:
     """Soft-hide an artifact (reversible). Drops it from the default list."""
     _set_artifact_archived(composite_id, archived=True)
     return {"status": "archived", "id": composite_id}
 
 
-@router.post("/artifacts/{composite_id}/restore")
+@router.post("/artifacts/{composite_id}/restore", dependencies=[Depends(_require_admin_write)])
 async def restore_artifact(composite_id: str) -> dict[str, str]:
     """Un-archive an artifact, returning it to the active list."""
     _set_artifact_archived(composite_id, archived=False)
     return {"status": "restored", "id": composite_id}
 
 
-@router.delete("/artifacts/{composite_id}")
+@router.delete("/artifacts/{composite_id}", dependencies=[Depends(_require_admin_write)])
 async def delete_artifact(composite_id: str) -> dict[str, str]:
     """Permanently delete the underlying alert / workflow-run row."""
     kind, native_id = _parse_composite_id(composite_id)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from openexecutive.api.models import (
     SkillCreate,
@@ -10,6 +10,7 @@ from openexecutive.api.models import (
     SkillSearchHit,
     SkillSearchResponse,
 )
+from openexecutive.bo.identity import require_http
 from openexecutive.knowledge.skills import SkillParseError
 from openexecutive.knowledge.skills_index import search_skills as _search_skills
 from openexecutive.knowledge.skills_repo import (
@@ -24,6 +25,11 @@ from openexecutive.knowledge.skills_repo import (
     update_skill,
 )
 from openexecutive.knowledge.store import ChromaDBStore
+
+
+def _require_admin_write(request: Request) -> None:
+    require_http(request, "skills:write")
+
 
 router = APIRouter(prefix="/skills")
 
@@ -65,7 +71,7 @@ async def get_skill_endpoint(name: str) -> SkillDetail:
     return SkillDetail(**skill_to_dict(skill, include_body=True))
 
 
-@router.post("", response_model=SkillDetail, status_code=201)
+@router.post("", response_model=SkillDetail, status_code=201, dependencies=[Depends(_require_admin_write)])
 async def create_skill_endpoint(body: SkillCreate, request: Request) -> SkillDetail:
     try:
         skill = create_skill(
@@ -83,7 +89,7 @@ async def create_skill_endpoint(body: SkillCreate, request: Request) -> SkillDet
     return SkillDetail(**skill_to_dict(skill, include_body=True))
 
 
-@router.put("/{name}", response_model=SkillDetail)
+@router.put("/{name}", response_model=SkillDetail, dependencies=[Depends(_require_admin_write)])
 async def update_skill_endpoint(
     name: str, body: SkillCreate, request: Request
 ) -> SkillDetail:
@@ -109,7 +115,7 @@ async def update_skill_endpoint(
     return SkillDetail(**skill_to_dict(skill, include_body=True))
 
 
-@router.delete("/{name}", status_code=204)
+@router.delete("/{name}", status_code=204, dependencies=[Depends(_require_admin_write)])
 async def delete_skill_endpoint(name: str, request: Request) -> None:
     try:
         delete_skill(name, store=_get_store(request))

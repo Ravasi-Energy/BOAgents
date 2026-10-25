@@ -16,10 +16,11 @@ import time
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 
+from openexecutive.bo.identity import require_http
 from openexecutive.workflows import (
     get_workflow,
     list_workflows,
@@ -46,6 +47,11 @@ from openexecutive.workflows.persistence import (
     list_runs,
 )
 from openexecutive.workflows.wait_for_human import WaitForHumanEvent
+
+
+def _require_admin_write(request: Request) -> None:
+    require_http(request, "workflows:write")
+
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -81,7 +87,7 @@ async def get_workflow_run(run_id: str) -> dict[str, Any]:
     return run
 
 
-@router.delete("/workflows/runs/{run_id}")
+@router.delete("/workflows/runs/{run_id}", dependencies=[Depends(_require_admin_write)])
 async def delete_workflow_run(run_id: str) -> dict[str, str]:
     if not delete_run(run_id):
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
@@ -100,7 +106,7 @@ async def list_custom_workflows() -> dict[str, Any]:
     return {"definitions": [d.model_dump() for d in list_definitions(active_only=False)]}
 
 
-@router.post("/workflows/custom", status_code=201)
+@router.post("/workflows/custom", status_code=201, dependencies=[Depends(_require_admin_write)])
 async def create_custom_workflow(request: Request) -> dict[str, Any]:
     """Create a new dynamic workflow definition from a builder-UI submission."""
     defn = await _parse_definition(request)
@@ -124,7 +130,7 @@ async def get_custom_workflow(name: str) -> dict[str, Any]:
     return defn.model_dump()
 
 
-@router.put("/workflows/custom/{name}")
+@router.put("/workflows/custom/{name}", dependencies=[Depends(_require_admin_write)])
 async def update_custom_workflow(name: str, request: Request) -> dict[str, Any]:
     if get_definition(name) is None:
         raise HTTPException(status_code=404, detail=f"Custom workflow {name!r} not found")
@@ -141,7 +147,7 @@ async def update_custom_workflow(name: str, request: Request) -> dict[str, Any]:
     return stored.model_dump()
 
 
-@router.delete("/workflows/custom/{name}")
+@router.delete("/workflows/custom/{name}", dependencies=[Depends(_require_admin_write)])
 async def delete_custom_workflow(name: str) -> dict[str, str]:
     from openexecutive.workflows.dynamic_cadence import cancel_cadence_rows
 
@@ -151,7 +157,7 @@ async def delete_custom_workflow(name: str) -> dict[str, str]:
     return {"status": "deleted", "name": name}
 
 
-@router.post("/workflows/custom/{name}/activate")
+@router.post("/workflows/custom/{name}/activate", dependencies=[Depends(_require_admin_write)])
 async def activate_custom_workflow(name: str, request: Request) -> dict[str, Any]:
     try:
         body = await request.json()
@@ -193,7 +199,7 @@ async def get_workflow_sample(name: str) -> dict[str, Any]:
     return {"workflow": name, "inputs": sample}
 
 
-@router.post("/workflows/{name}/runs")
+@router.post("/workflows/{name}/runs", dependencies=[Depends(_require_admin_write)])
 async def start_workflow_run(name: str, request: Request) -> StreamingResponse:
     """Start a workflow run. Streams progress events as Server-Sent Events.
 

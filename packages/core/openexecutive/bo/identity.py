@@ -93,6 +93,33 @@ _CAP_MIN_ROLE: dict[str, Role] = {
     # viewer action.
     "review:read": "viewer",
     "review:write": "admin",
+    # BO-RBAC (control 25.10): acelasi prag pe toate suprafetele REST
+    # ramase — citirea e viewer, ORICE scriere (mutare stare, fisiere,
+    # index, cunostinte, cron) e admin. Un viewer nu produce efecte.
+    "agents:read": "viewer",
+    "agents:write": "admin",
+    "personas:read": "viewer",
+    "personas:write": "admin",
+    "sessions:read": "viewer",
+    "sessions:write": "admin",
+    "artifacts:read": "viewer",
+    "artifacts:write": "admin",
+    "decisions:read": "viewer",
+    "decisions:write": "admin",
+    "alerts:read": "viewer",
+    "alerts:write": "admin",
+    "skills:read": "viewer",
+    "skills:write": "admin",
+    "workflows:read": "viewer",
+    "workflows:write": "admin",
+    "episodic:read": "viewer",
+    "episodic:write": "admin",
+    "watchlist:read": "viewer",
+    "watchlist:write": "admin",
+    "knowledge:read": "viewer",
+    "knowledge:write": "admin",
+    "scheduled:read": "viewer",
+    "scheduled:write": "admin",
 }
 
 

@@ -17,9 +17,10 @@ import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from openexecutive.bo.identity import require_http
 from openexecutive.memory.decision_ledger import (
     STATUS_APPROVED_UNCHANGED,
     STATUS_APPROVED_WITH_EDIT,
@@ -33,6 +34,11 @@ from openexecutive.memory.decision_ledger import (
     mark_resolved,
     mark_reversed,
 )
+
+
+def _require_admin_write(request: Request) -> None:
+    require_http(request, "decisions:write")
+
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -142,7 +148,7 @@ def get_decision(instance_id: int) -> DecisionInstance:
     return instance
 
 
-@router.post("/decisions/{instance_id}/approve", response_model=DecisionInstance)
+@router.post("/decisions/{instance_id}/approve", response_model=DecisionInstance, dependencies=[Depends(_require_admin_write)])
 async def approve_decision(instance_id: int, body: ApproveBody) -> DecisionInstance:
     instance = get_decision_instance(instance_id)
     if instance is None:
@@ -236,7 +242,7 @@ async def approve_decision(instance_id: int, body: ApproveBody) -> DecisionInsta
     return updated
 
 
-@router.post("/decisions/{instance_id}/reject", response_model=DecisionInstance)
+@router.post("/decisions/{instance_id}/reject", response_model=DecisionInstance, dependencies=[Depends(_require_admin_write)])
 def reject_decision(instance_id: int, body: RejectBody) -> DecisionInstance:
     instance = get_decision_instance(instance_id)
     if instance is None:
@@ -254,7 +260,7 @@ def reject_decision(instance_id: int, body: RejectBody) -> DecisionInstance:
     return updated
 
 
-@router.post("/decisions/{instance_id}/cancel", response_model=DecisionInstance)
+@router.post("/decisions/{instance_id}/cancel", response_model=DecisionInstance, dependencies=[Depends(_require_admin_write)])
 async def cancel_decision(instance_id: int) -> DecisionInstance:
     """Cancel an approved/executed event (reverse it)."""
     instance = get_decision_instance(instance_id)

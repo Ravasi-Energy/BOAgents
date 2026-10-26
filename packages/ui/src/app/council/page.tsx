@@ -255,8 +255,8 @@ export default function CouncilPage() {
   };
 
   return (
-    <div className="flex flex-1 min-h-0 bg-surface text-fg overflow-hidden">
-      <aside className="w-64 flex-shrink-0 border-r border-line flex flex-col bg-surface-elevated">
+    <div className="flex flex-col md:flex-row flex-1 min-h-0 bg-surface text-fg overflow-hidden">
+      <aside className="w-full md:w-64 max-h-48 md:max-h-none flex-shrink-0 border-b md:border-b-0 md:border-r border-line flex flex-col bg-surface-elevated">
         <div className="px-3 py-4 overflow-y-auto">
           <p className="px-2 text-[10px] font-semibold uppercase tracking-widest text-fg-subtle mb-2">
             Agent Council
@@ -290,8 +290,8 @@ export default function CouncilPage() {
         </div>
       </aside>
 
-      <main className="flex-1 overflow-y-auto">
-        <div className="max-w-4xl mx-auto px-8 py-10 space-y-6">
+      <main className="flex-1 min-h-0 min-w-0 overflow-y-auto">
+        <div className="max-w-4xl mx-auto px-4 md:px-8 py-6 md:py-10 space-y-6">
           <div>
             <h1 className="text-2xl font-bold text-fg">Agent Council</h1>
             <p className="mt-2 text-sm text-fg-muted">

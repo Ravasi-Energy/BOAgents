@@ -92,9 +92,9 @@ export default function BoRunPage() {
       <div className="bo-card">
         <h2 className="bo-card-title">Proveniență</h2>
         <dl className="bo-kv" style={{ marginTop: 10 }}>
-          <dt>Definiție</dt><dd className="bo-mono">{run.definition_id}</dd>
-          <dt>Versiune</dt><dd className="bo-mono">v{run.version_no} · {run.version_hash.slice(0, 16)}…</dd>
-          <dt>Plan (deterministic)</dt><dd className="bo-mono">{run.plan_hash}</dd>
+          <dt>Definiție</dt><dd className="bo-mono" style={{ overflowWrap: "anywhere" }}>{run.definition_id}</dd>
+          <dt>Versiune</dt><dd className="bo-mono" style={{ overflowWrap: "anywhere" }}>v{run.version_no} · {run.version_hash.slice(0, 16)}…</dd>
+          <dt>Plan (deterministic)</dt><dd className="bo-mono" style={{ overflowWrap: "anywhere" }}>{run.plan_hash}</dd>
           <dt>ConfigVersion</dt><dd className="bo-mono">cv{run.config_version}</dd>
           <dt>Pornit de</dt><dd>{run.created_by}</dd>
           <dt>Pornit la</dt><dd><BoTime iso={run.started_at} /></dd>

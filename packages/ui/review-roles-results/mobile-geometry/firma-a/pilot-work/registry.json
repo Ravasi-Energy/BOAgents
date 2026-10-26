@@ -1,0 +1,42 @@
+{
+  "schemaVersion": "bo.package.registry.v1",
+  "registryId": "synthetic-pilot-only",
+  "version": "synthetic-1",
+  "updatedAt": "2026-09-26T00:00:00Z",
+  "publishers": [
+    {
+      "publisherId": "pub-synthetic-erp",
+      "status": "active",
+      "allowedKinds": [
+        "bobot"
+      ],
+      "keyIds": [
+        "synthetic-test-key"
+      ]
+    }
+  ],
+  "keys": [
+    {
+      "keyId": "synthetic-test-key",
+      "algorithm": "ed25519",
+      "publicKey": "/clYkxXcTPy8ZQOziMs6XVJClcEgLkhokOi7UiMtb54=",
+      "status": "active",
+      "notBefore": "2026-01-01T00:00:00Z",
+      "notAfter": null
+    }
+  ],
+  "policy": {
+    "allowedKinds": [
+      "bobot"
+    ],
+    "capabilityCatalog": [
+      "synth_erp:diagnose"
+    ],
+    "maxCapabilitiesPerKind": {
+      "bobot": 1
+    },
+    "maxPackageBytes": 65536,
+    "rollbackRequiresApproval": true,
+    "policyVersion": "synthetic-1"
+  }
+}

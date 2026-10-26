@@ -1,0 +1,17 @@
+{
+  "schema_version": "bo.bobot.v1",
+  "trigger": {
+    "type": "manual"
+  },
+  "steps": [
+    {
+      "id": "diagnose",
+      "type": "note",
+      "message": "Diagnostic ERP sintetic: health, versiune, coad\u0103 \u0219i receipt; f\u0103r\u0103 LLM."
+    }
+  ],
+  "capability_refs": [
+    "synth_erp:diagnose"
+  ],
+  "policy_refs": []
+}

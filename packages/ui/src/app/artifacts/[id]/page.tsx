@@ -117,14 +117,14 @@ export default function ArtifactDetailPage() {
     <div className="flex flex-col h-full bg-surface text-fg">
       <main className="flex-1 overflow-y-auto px-6 py-8">
         <div className="max-w-4xl mx-auto space-y-6">
-          <div className="flex items-start justify-between gap-4">
+          <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
             <div className="min-w-0">
-              <h1 className="text-2xl font-semibold text-fg mb-1">{art.title}</h1>
+              <h1 className="text-2xl font-semibold text-fg mb-1 break-words">{art.title}</h1>
               <div className="text-xs text-fg-muted">
                 {art.source_label} · created {formatTimestamp(art.created_at)}
               </div>
             </div>
-            <div className="flex items-center gap-2 flex-shrink-0">
+            <div className="flex flex-wrap items-center gap-2 sm:flex-shrink-0">
               <button
                 type="button"
                 onClick={handleCopy}

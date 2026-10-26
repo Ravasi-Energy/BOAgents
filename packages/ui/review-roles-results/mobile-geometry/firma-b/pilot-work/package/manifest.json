@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "bo.package.v1",
+  "packageId": "pkg.synthetic-erp",
+  "version": "1.0.0",
+  "kind": "bobot",
+  "publisherId": "pub-synthetic-erp",
+  "keyId": "synthetic-test-key",
+  "createdAt": "2026-09-26T00:00:00Z",
+  "artifactDigests": {
+    "bots/diagnostic.json": "sha256:b341aeef1c22c15e1b23e58275ccac1514a154cbea5e2bdbf067617bfc49790e"
+  },
+  "dependencies": [],
+  "compatibility": {
+    "minHost": "1.0.0",
+    "maxHost": "1.0.0"
+  },
+  "requestedCapabilities": [
+    "synth_erp:diagnose"
+  ],
+  "settingsSchemaRef": null,
+  "signature": {
+    "algorithm": "ed25519",
+    "value": "BaGf3fYU4BEp5rUC8NNRfki8VdI5DtO4xU8iXF7sb66ExQuu07MxD/lHGZGrNoJoEQoLFUve/G9JM6wncMsuAg=="
+  }
+}

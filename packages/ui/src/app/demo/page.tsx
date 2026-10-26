@@ -448,7 +448,7 @@ export default function DemoPage() {
         {/* Active-fixture banner */}
         {!loading && status.active_fixture && (
           <div className="mb-5 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 flex items-center gap-3 flex-wrap">
-            <div className="text-xs text-amber-200 flex-1 min-w-0">
+            <div className="text-xs text-amber-200 flex-1 min-w-[14rem]">
               <span className="font-medium">Simulated company active:</span>{" "}
               <span className="font-mono text-amber-100">{status.active_fixture}</span>
               {!status.has_snapshot && (
@@ -480,7 +480,7 @@ export default function DemoPage() {
         {/* Snapshot CTA when no fixture is active */}
         {!loading && !status.active_fixture && !error && fixtures.length > 0 && (
           <div className="mb-5 rounded-xl border border-line bg-surface-elevated px-4 py-3 flex items-center justify-between gap-3 flex-wrap">
-            <p className="text-xs text-fg-muted flex-1 min-w-0">
+            <p className="text-xs text-fg-muted flex-1 min-w-[14rem]">
               {status.has_snapshot ? (
                 <>Snapshot of your company exists. Loading a fixture will replace state; unload restores from the snapshot.</>
               ) : (

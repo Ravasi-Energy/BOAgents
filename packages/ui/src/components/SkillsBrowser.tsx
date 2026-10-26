@@ -126,9 +126,9 @@ export default function SkillsBrowser() {
         </p>
       )}
 
-      <div className="flex gap-6">
+      <div className="flex flex-col md:flex-row gap-6">
         {/* Sidebar */}
-        <div className="w-60 flex-shrink-0 space-y-5">
+        <div className="w-full md:w-60 max-h-64 md:max-h-none overflow-y-auto md:overflow-visible flex-shrink-0 space-y-5">
           {searchHits !== null ? (
             <div>
               <p className="text-xs font-semibold text-fg-muted uppercase tracking-widest mb-1.5 px-1">

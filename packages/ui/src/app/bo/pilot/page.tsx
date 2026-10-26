@@ -117,9 +117,9 @@ export default function PilotPage() {
           {run.block_reason && run.state !== "SUCCEEDED" && <InlineAlert kind="warn">{run.block_reason}</InlineAlert>}
           <p>Versiune: {run.observation?.service.version ?? "UNKNOWN"} · Coadă: {run.observation?.service.queuePending ?? "UNKNOWN"}</p>
           <p>Observat: {run.observation?.observedAt ? <BoTime iso={run.observation.observedAt} /> : "Nemăsurat"} · Cel mai vechi în coadă: {run.observation?.service.oldestPendingAt ? <BoTime iso={run.observation.service.oldestPendingAt} /> : "Nicio dovadă de întârziere"}</p>
-          <p className="bo-mono">Corelație: {run.correlation_id}</p>
-          {run.ledger.map(entry => <details key={entry.idempotency_key}><summary>Receipt: {entry.receipt_ref ?? "UNKNOWN — dovadă absentă"}</summary>
-            <p className="bo-mono">Cheie: {entry.idempotency_key}</p><p className="bo-mono">Digest: {entry.payload_digest}</p><p>Ledger: {entry.status}</p></details>)}
+          <p className="bo-mono" style={{ overflowWrap: "anywhere" }}>Corelație: {run.correlation_id}</p>
+          {run.ledger.map(entry => <details key={entry.idempotency_key}><summary style={{ overflowWrap: "anywhere" }}>Receipt: {entry.receipt_ref ?? "UNKNOWN — dovadă absentă"}</summary>
+            <p className="bo-mono" style={{ overflowWrap: "anywhere" }}>Cheie: {entry.idempotency_key}</p><p className="bo-mono" style={{ overflowWrap: "anywhere" }}>Digest: {entry.payload_digest}</p><p>Ledger: {entry.status}</p></details>)}
           {["UNKNOWN", "RECONCILIATION_REQUIRED"].includes(run.state) && <button className="bo-btn" disabled={!admin || busy}
             onClick={() => void action(() => reconcileBoRun(run.run_id, "receipt"), "Readback terminat. Reia numai după dovadă corelată; nu se retrimite efectul.")}>Caută receipt (fără reexecutare)</button>}
           {["UNKNOWN", "RECONCILIATION_REQUIRED", "PAUSED"].includes(run.state) && <button className="bo-btn" disabled={!admin || busy}

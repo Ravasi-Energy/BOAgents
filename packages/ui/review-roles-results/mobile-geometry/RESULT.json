@@ -1,0 +1,1782 @@
+{
+  "at": "2026-10-26T07:20:05.709Z",
+  "server": "next start:/Users/foldistefan/Programare/Codex/BOGuardian/agenti/BO-A01/boagents-val4-01/packages/ui",
+  "firms": [
+    {
+      "tenant": "firma-a",
+      "geometry": {
+        "council": {
+          "desktop": {
+            "innerWidth": 1440,
+            "docHScroll": 0,
+            "width": 832
+          },
+          "tablet": {
+            "innerWidth": 1024,
+            "docHScroll": 0,
+            "width": 480
+          },
+          "mobile": {
+            "innerWidth": 390,
+            "docHScroll": 0,
+            "width": 358
+          }
+        },
+        "skills": {
+          "desktop": {
+            "innerWidth": 1440,
+            "docHScroll": 0,
+            "width": 712
+          },
+          "tablet": {
+            "innerWidth": 1024,
+            "docHScroll": 0,
+            "width": 488
+          },
+          "mobile": {
+            "innerWidth": 390,
+            "docHScroll": 0,
+            "width": 342
+          }
+        },
+        "artifact": {
+          "desktop": {
+            "innerWidth": 1440,
+            "docHScroll": 0,
+            "width": 441,
+            "visible": [
+              {
+                "text": "Copy",
+                "left": 923,
+                "right": 978,
+                "width": 55
+              },
+              {
+                "text": "Download .md",
+                "left": 986,
+                "right": 1093,
+                "width": 107
+              },
+              {
+                "text": "Archive",
+                "left": 1101,
+                "right": 1189,
+                "width": 88
+              },
+              {
+                "text": "Delete",
+                "left": 1197,
+                "right": 1280,
+                "width": 83
+              }
+            ]
+          },
+          "tablet": {
+            "innerWidth": 1024,
+            "docHScroll": 0,
+            "width": 379,
+            "visible": [
+              {
+                "text": "Copy",
+                "left": 643,
+                "right": 698,
+                "width": 55
+              },
+              {
+                "text": "Download .md",
+                "left": 706,
+                "right": 813,
+                "width": 107
+              },
+              {
+                "text": "Archive",
+                "left": 821,
+                "right": 909,
+                "width": 88
+              },
+              {
+                "text": "Delete",
+                "left": 917,
+                "right": 1000,
+                "width": 83
+              }
+            ]
+          },
+          "mobile": {
+            "innerWidth": 390,
+            "docHScroll": 0,
+            "width": 342,
+            "visible": [
+              {
+                "text": "Copy",
+                "left": 24,
+                "right": 79,
+                "width": 55
+              },
+              {
+                "text": "Download .md",
+                "left": 87,
+                "right": 194,
+                "width": 107
+              },
+              {
+                "text": "Archive",
+                "left": 202,
+                "right": 290,
+                "width": 88
+              },
+              {
+                "text": "Delete",
+                "left": 24,
+                "right": 107,
+                "width": 83
+              }
+            ]
+          }
+        },
+        "demo": {
+          "desktop": {
+            "innerWidth": 1440,
+            "docHScroll": 0,
+            "width": 583
+          },
+          "tablet": {
+            "innerWidth": 1024,
+            "docHScroll": 0,
+            "width": 487
+          },
+          "mobile": {
+            "innerWidth": 390,
+            "docHScroll": 0,
+            "width": 308
+          }
+        },
+        "pilot": {
+          "desktop": {
+            "innerWidth": 1440,
+            "docHScroll": 0,
+            "contained": [
+              {
+                "text": "Corelație: corr_d33b60b854e0415f9896",
+                "el": {
+                  "left": 338,
+                  "right": 1326,
+                  "width": 988
+                },
+                "box": {
+                  "left": 317,
+                  "right": 1347,
+                  "width": 1030
+                },
+                "scroll": 0
+              },
+              {
+                "text": "Cheie: run_b0cbee8fdeb0455f8d81:0",
+                "el": {
+                  "left": 338,
+                  "right": 1326,
+                  "width": 988
+                },
+                "box": {
+                  "left": 317,
+                  "right": 1347,
+                  "width": 1030
+                },
+                "scroll": 0
+              },
+              {
+                "text": "Digest: e3ac351a501ada72374d2365ced113bc",
+                "el": {
+                  "left": 338,
+                  "right": 1326,
+                  "width": 988
+                },
+                "box": {
+                  "left": 317,
+                  "right": 1347,
+                  "width": 1030
+                },
+                "scroll": 0
+              },
+              {
+                "text": "Ledger: SUCCEEDED",
+                "el": {
+                  "left": 338,
+                  "right": 1326,
+                  "width": 988
+                },
+                "box": {
+                  "left": 317,
+                  "right": 1347,
+                  "width": 1030
+                },
+                "scroll": 0
+              }
+            ]
+          },
+          "tablet": {
+            "innerWidth": 1024,
+            "docHScroll": 0,
+            "contained": [
+              {
+                "text": "Corelație: corr_d33b60b854e0415f9896",
+                "el": {
+                  "left": 290,
+                  "right": 958,
+                  "width": 668
+                },
+                "box": {
+                  "left": 269,
+                  "right": 979,
+                  "width": 710
+                },
+                "scroll": 0
+              },
+              {
+                "text": "Cheie: run_b0cbee8fdeb0455f8d81:0",
+                "el": {
+                  "left": 290,
+                  "right": 958,
+                  "width": 668
+                },
+                "box": {
+                  "left": 269,
+                  "right": 979,
+                  "width": 710
+                },
+                "scroll": 0
+              },
+              {
+                "text": "Digest: e3ac351a501ada72374d2365ced113bc",
+                "el": {
+                  "left": 290,
+                  "right": 958,
+                  "width": 668
+                },
+                "box": {
+                  "left": 269,
+                  "right": 979,
+                  "width": 710
+                },
+                "scroll": 0
+              },
+              {
+                "text": "Ledger: SUCCEEDED",
+                "el": {
+                  "left": 290,
+                  "right": 958,
+                  "width": 668
+                },
+                "box": {
+                  "left": 269,
+                  "right": 979,
+                  "width": 710
+                },
+                "scroll": 0
+              }
+            ]
+          },
+          "mobile": {
+            "innerWidth": 390,
+            "docHScroll": 0,
+            "contained": [
+              {
+                "text": "Corelație: corr_d33b60b854e0415f9896",
+                "el": {
+                  "left": 50,
+                  "right": 340,
+                  "width": 290
+                },
+                "box": {
+                  "left": 33,
+                  "right": 357,
+                  "width": 324
+                },
+                "scroll": 0
+              },
+              {
+                "text": "Cheie: run_b0cbee8fdeb0455f8d81:0",
+                "el": {
+                  "left": 50,
+                  "right": 340,
+                  "width": 290
+                },
+                "box": {
+                  "left": 33,
+                  "right": 357,
+                  "width": 324
+                },
+                "scroll": 0
+              },
+              {
+                "text": "Digest: e3ac351a501ada72374d2365ced113bc",
+                "el": {
+                  "left": 50,
+                  "right": 340,
+                  "width": 290
+                },
+                "box": {
+                  "left": 33,
+                  "right": 357,
+                  "width": 324
+                },
+                "scroll": 0
+              },
+              {
+                "text": "Ledger: SUCCEEDED",
+                "el": {
+                  "left": 50,
+                  "right": 340,
+                  "width": 290
+                },
+                "box": {
+                  "left": 33,
+                  "right": 357,
+                  "width": 324
+                },
+                "scroll": 0
+              }
+            ]
+          }
+        },
+        "run": {
+          "desktop": {
+            "innerWidth": 1440,
+            "docHScroll": 0,
+            "contained": [
+              {
+                "text": "bot_295d8524b09a",
+                "el": {
+                  "left": 533,
+                  "right": 1347,
+                  "width": 814
+                },
+                "box": {
+                  "left": 296,
+                  "right": 1368,
+                  "width": 1072
+                },
+                "scroll": 0
+              },
+              {
+                "text": "v1 · bdfb4cb878cd9082…",
+                "el": {
+                  "left": 533,
+                  "right": 1347,
+                  "width": 814
+                },
+                "box": {
+                  "left": 296,
+                  "right": 1368,
+                  "width": 1072
+                },
+                "scroll": 0
+              },
+              {
+                "text": "3e6956fea47fa9b38ffbc4d40e4206202fc8f306",
+                "el": {
+                  "left": 533,
+                  "right": 1347,
+                  "width": 814
+                },
+                "box": {
+                  "left": 296,
+                  "right": 1368,
+                  "width": 1072
+                },
+                "scroll": 0
+              },
+              {
+                "text": "cv0",
+                "el": {
+                  "left": 533,
+                  "right": 1347,
+                  "width": 814
+                },
+                "box": {
+                  "left": 296,
+                  "right": 1368,
+                  "width": 1072
+                },
+                "scroll": 0
+              },
+              {
+                "text": "admin@firma-a.test",
+                "el": {
+                  "left": 533,
+                  "right": 1347,
+                  "width": 814
+                },
+                "box": {
+                  "left": 296,
+                  "right": 1368,
+                  "width": 1072
+                },
+                "scroll": 0
+              },
+              {
+                "text": "26.10.2026, 09:20:18",
+                "el": {
+                  "left": 533,
+                  "right": 1347,
+                  "width": 814
+                },
+                "box": {
+                  "left": 296,
+                  "right": 1368,
+                  "width": 1072
+                },
+                "scroll": 0
+              },
+              {
+                "text": "50",
+                "el": {
+                  "left": 533,
+                  "right": 1347,
+                  "width": 814
+                },
+                "box": {
+                  "left": 296,
+                  "right": 1368,
+                  "width": 1072
+                },
+                "scroll": 0
+              }
+            ]
+          },
+          "tablet": {
+            "innerWidth": 1024,
+            "docHScroll": 0,
+            "contained": [
+              {
+                "text": "bot_295d8524b09a",
+                "el": {
+                  "left": 485,
+                  "right": 979,
+                  "width": 494
+                },
+                "box": {
+                  "left": 248,
+                  "right": 1000,
+                  "width": 752
+                },
+                "scroll": 0
+              },
+              {
+                "text": "v1 · bdfb4cb878cd9082…",
+                "el": {
+                  "left": 485,
+                  "right": 979,
+                  "width": 494
+                },
+                "box": {
+                  "left": 248,
+                  "right": 1000,
+                  "width": 752
+                },
+                "scroll": 0
+              },
+              {
+                "text": "3e6956fea47fa9b38ffbc4d40e4206202fc8f306",
+                "el": {
+                  "left": 485,
+                  "right": 979,
+                  "width": 494
+                },
+                "box": {
+                  "left": 248,
+                  "right": 1000,
+                  "width": 752
+                },
+                "scroll": 0
+              },
+              {
+                "text": "cv0",
+                "el": {
+                  "left": 485,
+                  "right": 979,
+                  "width": 494
+                },
+                "box": {
+                  "left": 248,
+                  "right": 1000,
+                  "width": 752
+                },
+                "scroll": 0
+              },
+              {
+                "text": "admin@firma-a.test",
+                "el": {
+                  "left": 485,
+                  "right": 979,
+                  "width": 494
+                },
+                "box": {
+                  "left": 248,
+                  "right": 1000,
+                  "width": 752
+                },
+                "scroll": 0
+              },
+              {
+                "text": "26.10.2026, 09:20:18",
+                "el": {
+                  "left": 485,
+                  "right": 979,
+                  "width": 494
+                },
+                "box": {
+                  "left": 248,
+                  "right": 1000,
+                  "width": 752
+                },
+                "scroll": 0
+              },
+              {
+                "text": "50",
+                "el": {
+                  "left": 485,
+                  "right": 979,
+                  "width": 494
+                },
+                "box": {
+                  "left": 248,
+                  "right": 1000,
+                  "width": 752
+                },
+                "scroll": 0
+              }
+            ]
+          },
+          "mobile": {
+            "innerWidth": 390,
+            "docHScroll": 0,
+            "contained": [
+              {
+                "text": "bot_295d8524b09a",
+                "el": {
+                  "left": 249,
+                  "right": 357,
+                  "width": 108
+                },
+                "box": {
+                  "left": 16,
+                  "right": 374,
+                  "width": 358
+                },
+                "scroll": 0
+              },
+              {
+                "text": "v1 · bdfb4cb878cd9082…",
+                "el": {
+                  "left": 249,
+                  "right": 357,
+                  "width": 108
+                },
+                "box": {
+                  "left": 16,
+                  "right": 374,
+                  "width": 358
+                },
+                "scroll": 0
+              },
+              {
+                "text": "3e6956fea47fa9b38ffbc4d40e4206202fc8f306",
+                "el": {
+                  "left": 249,
+                  "right": 357,
+                  "width": 108
+                },
+                "box": {
+                  "left": 16,
+                  "right": 374,
+                  "width": 358
+                },
+                "scroll": 0
+              },
+              {
+                "text": "cv0",
+                "el": {
+                  "left": 249,
+                  "right": 357,
+                  "width": 108
+                },
+                "box": {
+                  "left": 16,
+                  "right": 374,
+                  "width": 358
+                },
+                "scroll": 0
+              },
+              {
+                "text": "admin@firma-a.test",
+                "el": {
+                  "left": 249,
+                  "right": 357,
+                  "width": 108
+                },
+                "box": {
+                  "left": 16,
+                  "right": 374,
+                  "width": 358
+                },
+                "scroll": 0
+              },
+              {
+                "text": "26.10.2026, 09:20:18",
+                "el": {
+                  "left": 249,
+                  "right": 357,
+                  "width": 108
+                },
+                "box": {
+                  "left": 16,
+                  "right": 374,
+                  "width": 358
+                },
+                "scroll": 0
+              },
+              {
+                "text": "50",
+                "el": {
+                  "left": 249,
+                  "right": 357,
+                  "width": 108
+                },
+                "box": {
+                  "left": 16,
+                  "right": 374,
+                  "width": 358
+                },
+                "scroll": 0
+              }
+            ]
+          }
+        },
+        "package-verdict": {
+          "desktop": {
+            "innerWidth": 1440,
+            "docHScroll": 0,
+            "contained": [
+              {
+                "text": "sha256:4ae9d132a5123b45676c3dac72010ff5b",
+                "el": {
+                  "left": 421,
+                  "right": 1347,
+                  "width": 926
+                },
+                "box": {
+                  "left": 296,
+                  "right": 1368,
+                  "width": 1072
+                },
+                "scroll": 0
+              },
+              {
+                "text": "synthetic-1",
+                "el": {
+                  "left": 421,
+                  "right": 1347,
+                  "width": 926
+                },
+                "box": {
+                  "left": 296,
+                  "right": 1368,
+                  "width": 1072
+                },
+                "scroll": 0
+              },
+              {
+                "text": "/Users/foldistefan/Programare/Codex/BOGu",
+                "el": {
+                  "left": 421,
+                  "right": 1347,
+                  "width": 926
+                },
+                "box": {
+                  "left": 296,
+                  "right": 1368,
+                  "width": 1072
+                },
+                "scroll": 0
+              }
+            ]
+          },
+          "tablet": {
+            "innerWidth": 1024,
+            "docHScroll": 0,
+            "contained": [
+              {
+                "text": "sha256:4ae9d132a5123b45676c3dac72010ff5b",
+                "el": {
+                  "left": 373,
+                  "right": 979,
+                  "width": 606
+                },
+                "box": {
+                  "left": 248,
+                  "right": 1000,
+                  "width": 752
+                },
+                "scroll": 0
+              },
+              {
+                "text": "synthetic-1",
+                "el": {
+                  "left": 373,
+                  "right": 979,
+                  "width": 606
+                },
+                "box": {
+                  "left": 248,
+                  "right": 1000,
+                  "width": 752
+                },
+                "scroll": 0
+              },
+              {
+                "text": "/Users/foldistefan/Programare/Codex/BOGu",
+                "el": {
+                  "left": 373,
+                  "right": 979,
+                  "width": 606
+                },
+                "box": {
+                  "left": 248,
+                  "right": 1000,
+                  "width": 752
+                },
+                "scroll": 0
+              }
+            ]
+          },
+          "mobile": {
+            "innerWidth": 390,
+            "docHScroll": 0,
+            "contained": [
+              {
+                "text": "sha256:4ae9d132a5123b45676c3dac72010ff5b",
+                "el": {
+                  "left": 137,
+                  "right": 357,
+                  "width": 220
+                },
+                "box": {
+                  "left": 16,
+                  "right": 374,
+                  "width": 358
+                },
+                "scroll": 0
+              },
+              {
+                "text": "synthetic-1",
+                "el": {
+                  "left": 137,
+                  "right": 357,
+                  "width": 220
+                },
+                "box": {
+                  "left": 16,
+                  "right": 374,
+                  "width": 358
+                },
+                "scroll": 0
+              },
+              {
+                "text": "/Users/foldistefan/Programare/Codex/BOGu",
+                "el": {
+                  "left": 137,
+                  "right": 357,
+                  "width": 220
+                },
+                "box": {
+                  "left": 16,
+                  "right": 374,
+                  "width": 358
+                },
+                "scroll": 0
+              }
+            ]
+          }
+        }
+      },
+      "failures": [],
+      "pageErrors": []
+    },
+    {
+      "tenant": "firma-b",
+      "geometry": {
+        "council": {
+          "desktop": {
+            "innerWidth": 1440,
+            "docHScroll": 0,
+            "width": 832
+          },
+          "tablet": {
+            "innerWidth": 1024,
+            "docHScroll": 0,
+            "width": 480
+          },
+          "mobile": {
+            "innerWidth": 390,
+            "docHScroll": 0,
+            "width": 358
+          }
+        },
+        "skills": {
+          "desktop": {
+            "innerWidth": 1440,
+            "docHScroll": 0,
+            "width": 712
+          },
+          "tablet": {
+            "innerWidth": 1024,
+            "docHScroll": 0,
+            "width": 488
+          },
+          "mobile": {
+            "innerWidth": 390,
+            "docHScroll": 0,
+            "width": 342
+          }
+        },
+        "artifact": {
+          "desktop": {
+            "innerWidth": 1440,
+            "docHScroll": 0,
+            "width": 441,
+            "visible": [
+              {
+                "text": "Copy",
+                "left": 923,
+                "right": 978,
+                "width": 55
+              },
+              {
+                "text": "Download .md",
+                "left": 986,
+                "right": 1093,
+                "width": 107
+              },
+              {
+                "text": "Archive",
+                "left": 1101,
+                "right": 1189,
+                "width": 88
+              },
+              {
+                "text": "Delete",
+                "left": 1197,
+                "right": 1280,
+                "width": 83
+              }
+            ]
+          },
+          "tablet": {
+            "innerWidth": 1024,
+            "docHScroll": 0,
+            "width": 379,
+            "visible": [
+              {
+                "text": "Copy",
+                "left": 643,
+                "right": 698,
+                "width": 55
+              },
+              {
+                "text": "Download .md",
+                "left": 706,
+                "right": 813,
+                "width": 107
+              },
+              {
+                "text": "Archive",
+                "left": 821,
+                "right": 909,
+                "width": 88
+              },
+              {
+                "text": "Delete",
+                "left": 917,
+                "right": 1000,
+                "width": 83
+              }
+            ]
+          },
+          "mobile": {
+            "innerWidth": 390,
+            "docHScroll": 0,
+            "width": 342,
+            "visible": [
+              {
+                "text": "Copy",
+                "left": 24,
+                "right": 79,
+                "width": 55
+              },
+              {
+                "text": "Download .md",
+                "left": 87,
+                "right": 194,
+                "width": 107
+              },
+              {
+                "text": "Archive",
+                "left": 202,
+                "right": 290,
+                "width": 88
+              },
+              {
+                "text": "Delete",
+                "left": 24,
+                "right": 107,
+                "width": 83
+              }
+            ]
+          }
+        },
+        "demo": {
+          "desktop": {
+            "innerWidth": 1440,
+            "docHScroll": 0,
+            "width": 583
+          },
+          "tablet": {
+            "innerWidth": 1024,
+            "docHScroll": 0,
+            "width": 487
+          },
+          "mobile": {
+            "innerWidth": 390,
+            "docHScroll": 0,
+            "width": 308
+          }
+        },
+        "pilot": {
+          "desktop": {
+            "innerWidth": 1440,
+            "docHScroll": 0,
+            "contained": [
+              {
+                "text": "Corelație: corr_4edb2c98f2b14f569846",
+                "el": {
+                  "left": 338,
+                  "right": 1326,
+                  "width": 988
+                },
+                "box": {
+                  "left": 317,
+                  "right": 1347,
+                  "width": 1030
+                },
+                "scroll": 0
+              },
+              {
+                "text": "Cheie: run_e75b88006d4642edbd08:0",
+                "el": {
+                  "left": 338,
+                  "right": 1326,
+                  "width": 988
+                },
+                "box": {
+                  "left": 317,
+                  "right": 1347,
+                  "width": 1030
+                },
+                "scroll": 0
+              },
+              {
+                "text": "Digest: bfcfdd946e4c922f7a267193319177f6",
+                "el": {
+                  "left": 338,
+                  "right": 1326,
+                  "width": 988
+                },
+                "box": {
+                  "left": 317,
+                  "right": 1347,
+                  "width": 1030
+                },
+                "scroll": 0
+              },
+              {
+                "text": "Ledger: SUCCEEDED",
+                "el": {
+                  "left": 338,
+                  "right": 1326,
+                  "width": 988
+                },
+                "box": {
+                  "left": 317,
+                  "right": 1347,
+                  "width": 1030
+                },
+                "scroll": 0
+              }
+            ]
+          },
+          "tablet": {
+            "innerWidth": 1024,
+            "docHScroll": 0,
+            "contained": [
+              {
+                "text": "Corelație: corr_4edb2c98f2b14f569846",
+                "el": {
+                  "left": 290,
+                  "right": 958,
+                  "width": 668
+                },
+                "box": {
+                  "left": 269,
+                  "right": 979,
+                  "width": 710
+                },
+                "scroll": 0
+              },
+              {
+                "text": "Cheie: run_e75b88006d4642edbd08:0",
+                "el": {
+                  "left": 290,
+                  "right": 958,
+                  "width": 668
+                },
+                "box": {
+                  "left": 269,
+                  "right": 979,
+                  "width": 710
+                },
+                "scroll": 0
+              },
+              {
+                "text": "Digest: bfcfdd946e4c922f7a267193319177f6",
+                "el": {
+                  "left": 290,
+                  "right": 958,
+                  "width": 668
+                },
+                "box": {
+                  "left": 269,
+                  "right": 979,
+                  "width": 710
+                },
+                "scroll": 0
+              },
+              {
+                "text": "Ledger: SUCCEEDED",
+                "el": {
+                  "left": 290,
+                  "right": 958,
+                  "width": 668
+                },
+                "box": {
+                  "left": 269,
+                  "right": 979,
+                  "width": 710
+                },
+                "scroll": 0
+              }
+            ]
+          },
+          "mobile": {
+            "innerWidth": 390,
+            "docHScroll": 0,
+            "contained": [
+              {
+                "text": "Corelație: corr_4edb2c98f2b14f569846",
+                "el": {
+                  "left": 50,
+                  "right": 340,
+                  "width": 290
+                },
+                "box": {
+                  "left": 33,
+                  "right": 357,
+                  "width": 324
+                },
+                "scroll": 0
+              },
+              {
+                "text": "Cheie: run_e75b88006d4642edbd08:0",
+                "el": {
+                  "left": 50,
+                  "right": 340,
+                  "width": 290
+                },
+                "box": {
+                  "left": 33,
+                  "right": 357,
+                  "width": 324
+                },
+                "scroll": 0
+              },
+              {
+                "text": "Digest: bfcfdd946e4c922f7a267193319177f6",
+                "el": {
+                  "left": 50,
+                  "right": 340,
+                  "width": 290
+                },
+                "box": {
+                  "left": 33,
+                  "right": 357,
+                  "width": 324
+                },
+                "scroll": 0
+              },
+              {
+                "text": "Ledger: SUCCEEDED",
+                "el": {
+                  "left": 50,
+                  "right": 340,
+                  "width": 290
+                },
+                "box": {
+                  "left": 33,
+                  "right": 357,
+                  "width": 324
+                },
+                "scroll": 0
+              }
+            ]
+          }
+        },
+        "run": {
+          "desktop": {
+            "innerWidth": 1440,
+            "docHScroll": 0,
+            "contained": [
+              {
+                "text": "bot_9ec8d1beace0",
+                "el": {
+                  "left": 533,
+                  "right": 1347,
+                  "width": 814
+                },
+                "box": {
+                  "left": 296,
+                  "right": 1368,
+                  "width": 1072
+                },
+                "scroll": 0
+              },
+              {
+                "text": "v1 · bdfb4cb878cd9082…",
+                "el": {
+                  "left": 533,
+                  "right": 1347,
+                  "width": 814
+                },
+                "box": {
+                  "left": 296,
+                  "right": 1368,
+                  "width": 1072
+                },
+                "scroll": 0
+              },
+              {
+                "text": "3e6956fea47fa9b38ffbc4d40e4206202fc8f306",
+                "el": {
+                  "left": 533,
+                  "right": 1347,
+                  "width": 814
+                },
+                "box": {
+                  "left": 296,
+                  "right": 1368,
+                  "width": 1072
+                },
+                "scroll": 0
+              },
+              {
+                "text": "cv0",
+                "el": {
+                  "left": 533,
+                  "right": 1347,
+                  "width": 814
+                },
+                "box": {
+                  "left": 296,
+                  "right": 1368,
+                  "width": 1072
+                },
+                "scroll": 0
+              },
+              {
+                "text": "admin@firma-b.test",
+                "el": {
+                  "left": 533,
+                  "right": 1347,
+                  "width": 814
+                },
+                "box": {
+                  "left": 296,
+                  "right": 1368,
+                  "width": 1072
+                },
+                "scroll": 0
+              },
+              {
+                "text": "26.10.2026, 09:20:41",
+                "el": {
+                  "left": 533,
+                  "right": 1347,
+                  "width": 814
+                },
+                "box": {
+                  "left": 296,
+                  "right": 1368,
+                  "width": 1072
+                },
+                "scroll": 0
+              },
+              {
+                "text": "50",
+                "el": {
+                  "left": 533,
+                  "right": 1347,
+                  "width": 814
+                },
+                "box": {
+                  "left": 296,
+                  "right": 1368,
+                  "width": 1072
+                },
+                "scroll": 0
+              }
+            ]
+          },
+          "tablet": {
+            "innerWidth": 1024,
+            "docHScroll": 0,
+            "contained": [
+              {
+                "text": "bot_9ec8d1beace0",
+                "el": {
+                  "left": 485,
+                  "right": 979,
+                  "width": 494
+                },
+                "box": {
+                  "left": 248,
+                  "right": 1000,
+                  "width": 752
+                },
+                "scroll": 0
+              },
+              {
+                "text": "v1 · bdfb4cb878cd9082…",
+                "el": {
+                  "left": 485,
+                  "right": 979,
+                  "width": 494
+                },
+                "box": {
+                  "left": 248,
+                  "right": 1000,
+                  "width": 752
+                },
+                "scroll": 0
+              },
+              {
+                "text": "3e6956fea47fa9b38ffbc4d40e4206202fc8f306",
+                "el": {
+                  "left": 485,
+                  "right": 979,
+                  "width": 494
+                },
+                "box": {
+                  "left": 248,
+                  "right": 1000,
+                  "width": 752
+                },
+                "scroll": 0
+              },
+              {
+                "text": "cv0",
+                "el": {
+                  "left": 485,
+                  "right": 979,
+                  "width": 494
+                },
+                "box": {
+                  "left": 248,
+                  "right": 1000,
+                  "width": 752
+                },
+                "scroll": 0
+              },
+              {
+                "text": "admin@firma-b.test",
+                "el": {
+                  "left": 485,
+                  "right": 979,
+                  "width": 494
+                },
+                "box": {
+                  "left": 248,
+                  "right": 1000,
+                  "width": 752
+                },
+                "scroll": 0
+              },
+              {
+                "text": "26.10.2026, 09:20:41",
+                "el": {
+                  "left": 485,
+                  "right": 979,
+                  "width": 494
+                },
+                "box": {
+                  "left": 248,
+                  "right": 1000,
+                  "width": 752
+                },
+                "scroll": 0
+              },
+              {
+                "text": "50",
+                "el": {
+                  "left": 485,
+                  "right": 979,
+                  "width": 494
+                },
+                "box": {
+                  "left": 248,
+                  "right": 1000,
+                  "width": 752
+                },
+                "scroll": 0
+              }
+            ]
+          },
+          "mobile": {
+            "innerWidth": 390,
+            "docHScroll": 0,
+            "contained": [
+              {
+                "text": "bot_9ec8d1beace0",
+                "el": {
+                  "left": 249,
+                  "right": 357,
+                  "width": 108
+                },
+                "box": {
+                  "left": 16,
+                  "right": 374,
+                  "width": 358
+                },
+                "scroll": 0
+              },
+              {
+                "text": "v1 · bdfb4cb878cd9082…",
+                "el": {
+                  "left": 249,
+                  "right": 357,
+                  "width": 108
+                },
+                "box": {
+                  "left": 16,
+                  "right": 374,
+                  "width": 358
+                },
+                "scroll": 0
+              },
+              {
+                "text": "3e6956fea47fa9b38ffbc4d40e4206202fc8f306",
+                "el": {
+                  "left": 249,
+                  "right": 357,
+                  "width": 108
+                },
+                "box": {
+                  "left": 16,
+                  "right": 374,
+                  "width": 358
+                },
+                "scroll": 0
+              },
+              {
+                "text": "cv0",
+                "el": {
+                  "left": 249,
+                  "right": 357,
+                  "width": 108
+                },
+                "box": {
+                  "left": 16,
+                  "right": 374,
+                  "width": 358
+                },
+                "scroll": 0
+              },
+              {
+                "text": "admin@firma-b.test",
+                "el": {
+                  "left": 249,
+                  "right": 357,
+                  "width": 108
+                },
+                "box": {
+                  "left": 16,
+                  "right": 374,
+                  "width": 358
+                },
+                "scroll": 0
+              },
+              {
+                "text": "26.10.2026, 09:20:41",
+                "el": {
+                  "left": 249,
+                  "right": 357,
+                  "width": 108
+                },
+                "box": {
+                  "left": 16,
+                  "right": 374,
+                  "width": 358
+                },
+                "scroll": 0
+              },
+              {
+                "text": "50",
+                "el": {
+                  "left": 249,
+                  "right": 357,
+                  "width": 108
+                },
+                "box": {
+                  "left": 16,
+                  "right": 374,
+                  "width": 358
+                },
+                "scroll": 0
+              }
+            ]
+          }
+        },
+        "package-verdict": {
+          "desktop": {
+            "innerWidth": 1440,
+            "docHScroll": 0,
+            "contained": [
+              {
+                "text": "sha256:4ae9d132a5123b45676c3dac72010ff5b",
+                "el": {
+                  "left": 421,
+                  "right": 1347,
+                  "width": 926
+                },
+                "box": {
+                  "left": 296,
+                  "right": 1368,
+                  "width": 1072
+                },
+                "scroll": 0
+              },
+              {
+                "text": "synthetic-1",
+                "el": {
+                  "left": 421,
+                  "right": 1347,
+                  "width": 926
+                },
+                "box": {
+                  "left": 296,
+                  "right": 1368,
+                  "width": 1072
+                },
+                "scroll": 0
+              },
+              {
+                "text": "/Users/foldistefan/Programare/Codex/BOGu",
+                "el": {
+                  "left": 421,
+                  "right": 1347,
+                  "width": 926
+                },
+                "box": {
+                  "left": 296,
+                  "right": 1368,
+                  "width": 1072
+                },
+                "scroll": 0
+              }
+            ]
+          },
+          "tablet": {
+            "innerWidth": 1024,
+            "docHScroll": 0,
+            "contained": [
+              {
+                "text": "sha256:4ae9d132a5123b45676c3dac72010ff5b",
+                "el": {
+                  "left": 373,
+                  "right": 979,
+                  "width": 606
+                },
+                "box": {
+                  "left": 248,
+                  "right": 1000,
+                  "width": 752
+                },
+                "scroll": 0
+              },
+              {
+                "text": "synthetic-1",
+                "el": {
+                  "left": 373,
+                  "right": 979,
+                  "width": 606
+                },
+                "box": {
+                  "left": 248,
+                  "right": 1000,
+                  "width": 752
+                },
+                "scroll": 0
+              },
+              {
+                "text": "/Users/foldistefan/Programare/Codex/BOGu",
+                "el": {
+                  "left": 373,
+                  "right": 979,
+                  "width": 606
+                },
+                "box": {
+                  "left": 248,
+                  "right": 1000,
+                  "width": 752
+                },
+                "scroll": 0
+              }
+            ]
+          },
+          "mobile": {
+            "innerWidth": 390,
+            "docHScroll": 0,
+            "contained": [
+              {
+                "text": "sha256:4ae9d132a5123b45676c3dac72010ff5b",
+                "el": {
+                  "left": 137,
+                  "right": 357,
+                  "width": 220
+                },
+                "box": {
+                  "left": 16,
+                  "right": 374,
+                  "width": 358
+                },
+                "scroll": 0
+              },
+              {
+                "text": "synthetic-1",
+                "el": {
+                  "left": 137,
+                  "right": 357,
+                  "width": 220
+                },
+                "box": {
+                  "left": 16,
+                  "right": 374,
+                  "width": 358
+                },
+                "scroll": 0
+              },
+              {
+                "text": "/Users/foldistefan/Programare/Codex/BOGu",
+                "el": {
+                  "left": 137,
+                  "right": 357,
+                  "width": 220
+                },
+                "box": {
+                  "left": 16,
+                  "right": 374,
+                  "width": 358
+                },
+                "scroll": 0
+              }
+            ]
+          }
+        }
+      },
+      "failures": [],
+      "pageErrors": []
+    }
+  ],
+  "browser": {
+    "chromiumSandbox": true,
+    "version": "151.0.7922.34"
+  },
+  "captures": [
+    {
+      "file": "firma-a/artifact-desktop.png",
+      "sha256": "1430445a82357937289614b7a79e877c7fe88f78bd0f0a6e5468c30a1b95bfda"
+    },
+    {
+      "file": "firma-a/artifact-mobile.png",
+      "sha256": "1683ce3275f59b47189a6738563faaab3ea923f113340eba38d242c71fbf9af2"
+    },
+    {
+      "file": "firma-a/artifact-tablet.png",
+      "sha256": "fa02a5bd3e2e8c63724a0b52a4c0cbf27a983dcb84f931b0bdfe051f553b087f"
+    },
+    {
+      "file": "firma-a/council-desktop.png",
+      "sha256": "0ac695292497f71eacbc79615a66a0ce8ac8e631c85767db101a5c78e3c292eb"
+    },
+    {
+      "file": "firma-a/council-mobile.png",
+      "sha256": "d4dab055d9b4fe1d448b2742032f52425cd0ef6e0fa364c6fb046ec90600843b"
+    },
+    {
+      "file": "firma-a/council-tablet.png",
+      "sha256": "cf32abb32f1739e6d6ae3c4bdd255bfb3113dab6aa93a6db75fcd4b5914515fc"
+    },
+    {
+      "file": "firma-a/demo-desktop.png",
+      "sha256": "b6f51bdbd0ce54317d79a1a742ffb3d7c379de58cb3f2dc8b7633bb4ae61b4a0"
+    },
+    {
+      "file": "firma-a/demo-mobile.png",
+      "sha256": "fc69f8b7f7c61c387c0ae89def95925213c0a91a602c5bad206782381bab7159"
+    },
+    {
+      "file": "firma-a/demo-tablet.png",
+      "sha256": "cc049fcd54fe3d1f8aa179afd6c04af7a96feb14256229da9f93bd2320854904"
+    },
+    {
+      "file": "firma-a/package-verdict-desktop.png",
+      "sha256": "2271c95824adbdd44242d15f3ba9ba89bb920c25e9db31f9676e90ff050f7752"
+    },
+    {
+      "file": "firma-a/package-verdict-mobile.png",
+      "sha256": "85c1a1e44da342fad335b1717edf26c23fd5401f0fdf07a02801a85ef3c8447f"
+    },
+    {
+      "file": "firma-a/package-verdict-tablet.png",
+      "sha256": "7d19af5121bc24f595a87e383a080463058c2cf1a093a9eed9e511c4e1792550"
+    },
+    {
+      "file": "firma-a/pilot-desktop.png",
+      "sha256": "184fe659c31085cfbdd068ee1fd2aebe5fd348de930ba5693355c33c40def2e2"
+    },
+    {
+      "file": "firma-a/pilot-mobile.png",
+      "sha256": "4acb92cfefd40cb69216997f3708d2c61e547bf5bbecc95f3e2de04b3e92d452"
+    },
+    {
+      "file": "firma-a/pilot-tablet.png",
+      "sha256": "db2c66c694fd00c8bf1ae3e82525327f6b9d90bc98c32f971850b12ed9cdde0d"
+    },
+    {
+      "file": "firma-a/run-desktop.png",
+      "sha256": "57d1c1f4aac84a75bf61388937b25e6980aade87abd9761eb0c71da949cda939"
+    },
+    {
+      "file": "firma-a/run-mobile.png",
+      "sha256": "0e98edf29ade70a0663a1aebab151206659c2b77355090b6f63553542e1d6834"
+    },
+    {
+      "file": "firma-a/run-tablet.png",
+      "sha256": "d2b471b1e7d5d85717fbace174895281f61d31c3cb326b28938d861f016adbaf"
+    },
+    {
+      "file": "firma-a/skills-desktop.png",
+      "sha256": "ab68f14df8081eecedce803b825e7d7d81e688a979e74be080536fd63f1f18c1"
+    },
+    {
+      "file": "firma-a/skills-mobile.png",
+      "sha256": "1bf67ed0df34cc7b6a8eaa0a587a765f5dd586b8c0cfa9a0c307eddf1f6b92da"
+    },
+    {
+      "file": "firma-a/skills-tablet.png",
+      "sha256": "8a942f11f1a4a14213a06239b58ae2ed54e5f0c6f797d8c99212f2876fc9d610"
+    },
+    {
+      "file": "firma-b/artifact-desktop.png",
+      "sha256": "3de8490a70d94da8527751e9adceb6d7f945f17ff374f330398538ca39428569"
+    },
+    {
+      "file": "firma-b/artifact-mobile.png",
+      "sha256": "2c40803073dc640b15ae35ce20f5a20a55ca12bec942101e25af0a06680930e3"
+    },
+    {
+      "file": "firma-b/artifact-tablet.png",
+      "sha256": "f0dce77450baed3c9502c20578cbcee952af479143ee23f2ea2a9919b796b4be"
+    },
+    {
+      "file": "firma-b/council-desktop.png",
+      "sha256": "7ef39f3945090ff1c5ab85986caaf0c4279223250407ca5f8dca67596643b90e"
+    },
+    {
+      "file": "firma-b/council-mobile.png",
+      "sha256": "d4dab055d9b4fe1d448b2742032f52425cd0ef6e0fa364c6fb046ec90600843b"
+    },
+    {
+      "file": "firma-b/council-tablet.png",
+      "sha256": "90e8342d6f458ff05ca2eb74fe5ecf090cb400f7995b1c4a1bacbfc8a6a828fb"
+    },
+    {
+      "file": "firma-b/demo-desktop.png",
+      "sha256": "df1b4fdf8a4adc46788d8575ced4880bae1f57211e2b2c06e491d4ae69d08bcd"
+    },
+    {
+      "file": "firma-b/demo-mobile.png",
+      "sha256": "fc69f8b7f7c61c387c0ae89def95925213c0a91a602c5bad206782381bab7159"
+    },
+    {
+      "file": "firma-b/demo-tablet.png",
+      "sha256": "c1a58858251505ad26594bad7d8adb88c0c61284e418a2c1f6aada1f492eef1a"
+    },
+    {
+      "file": "firma-b/package-verdict-desktop.png",
+      "sha256": "2dfb7032c8b33b567c35006ae0a0782245e1729161aac2cf1bb8a01d12dc7eb9"
+    },
+    {
+      "file": "firma-b/package-verdict-mobile.png",
+      "sha256": "92477786c9a2aac85f8f7461e1c3d237b20dd4fd7428936a38fd33bd41970df8"
+    },
+    {
+      "file": "firma-b/package-verdict-tablet.png",
+      "sha256": "7c2f83127e67c297c720873be84141a89729c15e3848af07d901eb4e911796b8"
+    },
+    {
+      "file": "firma-b/pilot-desktop.png",
+      "sha256": "8e61c395c55c92009cb1e7b7068ed57e75f39136ac70f96b9fe782275dcaceed"
+    },
+    {
+      "file": "firma-b/pilot-mobile.png",
+      "sha256": "505e452f0e0c234ae4111703bfae725c91110810b42d274ddd5da8692d308fa9"
+    },
+    {
+      "file": "firma-b/pilot-tablet.png",
+      "sha256": "0079ea7bc3ec58fa6d51bdf3f94562070eabb400dca7d4bcf914c383ecbbe647"
+    },
+    {
+      "file": "firma-b/run-desktop.png",
+      "sha256": "e439fcf0f8097ebbdfa310d27800634e30f6ef877e48301ee93e35e7c8c9e488"
+    },
+    {
+      "file": "firma-b/run-mobile.png",
+      "sha256": "32a1bcea915c0a78c116a6bd58f748165793049d0872f6cb01075de913be3548"
+    },
+    {
+      "file": "firma-b/run-tablet.png",
+      "sha256": "b9898d2dc8be925d6873df3ee392d3b4cb90ed1257558d2ed3c0af54fbec9029"
+    },
+    {
+      "file": "firma-b/skills-desktop.png",
+      "sha256": "109462a2fd05da8545f71013d895166a118cee937c4017dddd50be8400c7c9f7"
+    },
+    {
+      "file": "firma-b/skills-mobile.png",
+      "sha256": "1bf67ed0df34cc7b6a8eaa0a587a765f5dd586b8c0cfa9a0c307eddf1f6b92da"
+    },
+    {
+      "file": "firma-b/skills-tablet.png",
+      "sha256": "6150a6e0906eb5aa2da7e6c64708b0f5c4b22e7a2808790b4661b6ba6ad29f3b"
+    }
+  ]
+}

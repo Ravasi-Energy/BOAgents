@@ -1,0 +1,362 @@
+09:20:33  INFO     mcp_server.server            │ mcp_server mounted at /mcp
+INFO:     Started server process [36267]
+INFO:     Waiting for application startup.
+09:20:33  INFO     app                          │ openexecutive API starting (LOG_LEVEL=INFO) — chat turn logs will appear below
+09:20:40  INFO     departments.store            │ departments.seed inserted=8
+09:20:40  WARNING  app                          │ org-completeness: Department 'Board & Investor Comms' has no head person configured.
+09:20:40  WARNING  app                          │ org-completeness: Department 'Finance' has no head person configured.
+09:20:40  WARNING  app                          │ org-completeness: Department 'People & Talent' has no head person configured.
+09:20:40  WARNING  app                          │ org-completeness: Department 'Legal' has no head person configured.
+09:20:40  WARNING  app                          │ org-completeness: Department 'Marketing' has no head person configured.
+09:20:40  WARNING  app                          │ org-completeness: Department 'Operations' has no head person configured.
+09:20:40  WARNING  app                          │ org-completeness: Department 'Product' has no head person configured.
+09:20:40  WARNING  app                          │ org-completeness: Department 'Strategy' has no head person configured.
+09:20:40  WARNING  app                          │ org-completeness: No non-principal approver for scope 'spend_lt_2k'.
+09:20:40  WARNING  app                          │ org-completeness: No non-principal approver for scope 'spend_lt_10k'.
+09:20:40  WARNING  app                          │ org-completeness: No non-principal approver for scope 'spend_gt_10k'.
+09:20:40  WARNING  app                          │ org-completeness: No non-principal approver for scope 'hiring_signoff'.
+09:20:40  WARNING  app                          │ org-completeness: No non-principal approver for scope 'vendor_onboarding'.
+09:20:40  WARNING  app                          │ org-completeness: No non-principal approver for scope 'customer_credit'.
+09:20:40  WARNING  app                          │ org-completeness: No non-principal approver for scope 'legal_sign'.
+09:20:40  WARNING  app                          │ org-completeness: No non-principal approver for scope 'board_comms'.
+09:20:40  WARNING  app                          │ org-completeness: No non-principal approver for scope 'meeting_scheduling'.
+09:20:40  INFO     departments.cadence          │ cadence.bootstrap: enqueued 'board_comms' at 2026-10-27T07:00:00+00:00
+09:20:40  INFO     departments.cadence          │ cadence.bootstrap: enqueued 'finance' at 2026-10-27T07:00:00+00:00
+09:20:40  INFO     departments.cadence          │ cadence.bootstrap: enqueued 'hr' at 2026-10-27T07:00:00+00:00
+09:20:40  INFO     departments.cadence          │ cadence.bootstrap: enqueued 'legal' at 2026-10-27T07:00:00+00:00
+09:20:40  INFO     departments.cadence          │ cadence.bootstrap: enqueued 'marketing' at 2026-10-27T07:00:00+00:00
+09:20:40  INFO     departments.cadence          │ cadence.bootstrap: enqueued 'operations' at 2026-10-27T07:00:00+00:00
+09:20:40  INFO     departments.cadence          │ cadence.bootstrap: enqueued 'product' at 2026-10-27T07:00:00+00:00
+09:20:40  INFO     departments.cadence          │ cadence.bootstrap: enqueued 'strategy' at 2026-10-27T07:00:00+00:00
+09:20:40  INFO     scheduler.nudge_engine       │ nudge_engine.bootstrap: heartbeat scheduled at 2026-10-26T07:35:40.573907+00:00 (id=9)
+09:20:40  INFO     monitoring.pipeline          │ monitoring.bootstrap: heartbeat scheduled at 2026-10-26T07:25:40.589332+00:00 (id=10)
+09:20:40  INFO     monitoring.research.schedul… │ research.scheduler.bootstrap: heartbeat at 2026-10-26T13:20:40.592627+00:00 (id=11)
+09:20:40  INFO     scheduler.runner             │ scheduler: seeded principal_brief_morning at 2026-10-26T08:00:00+00:00 (id=12)
+09:20:40  INFO     scheduler.runner             │ scheduler: seeded principal_brief_eod at 2026-10-26T18:00:00+00:00 (id=13)
+09:20:40  INFO     scheduler.runner             │ scheduler: seeded executive_reflection at 2026-10-26T07:30:00+00:00 (id=14)
+09:20:40  INFO     scheduler.runner             │ scheduler: seeded 3 principal brief row(s)
+09:20:40  INFO     alerts.review                │ alert_review.bootstrap: heartbeat scheduled at 2026-10-26T13:20:40.670493+00:00 (id=15)
+09:20:40  INFO     scheduler.runner             │ scheduler started (poll_interval=30s)
+09:20:40  WARNING  scheduler.runner             │ scheduler: no active company profile — holding all scheduled actions until one is configured
+09:20:40  INFO     workflows.resumer            │ resumer started (poll_interval=60s)
+[10/26/26 09:20:40] INFO     StreamableHTTP       streamable_http_manager.py:164
+                             session manager                                    
+                             started                                            
+INFO:     Application startup complete.
+09:20:40  WARNING  knowledge.loader             │ reconcile_company_docs: /Users/foldistefan/Programare/Codex/BOGuardian/agenti/BO-A01/boagents-val4-01/packages/ui/review-roles-results/mobile-geometry/firma-b/company/docs does not exist — skipping (cannot distinguish an empty docs dir from an unmounted one)
+INFO:     Uvicorn running on http://127.0.0.1:63422 (Press CTRL+C to quit)
+INFO:     127.0.0.1:63484 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "POST /bo/bots/example HTTP/1.1" 201 Created
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /bo/bots/bot_9ec8d1beace0 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "POST /bo/bots/bot_9ec8d1beace0/publish HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "POST /bo/bots/bot_9ec8d1beace0/simulate HTTP/1.1" 201 Created
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /bo/bots/bot_9ec8d1beace0/runs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /bo/settings HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "PUT /bo/settings/bo.exec.enabled HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "PUT /bo/settings/bo.packages.enabled HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "PUT /bo/settings/bo.packages.trust_store_json HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "PUT /bo/settings/bo.pilot.enabled HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "PUT /bo/settings/bo.pilot.profile HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "PUT /bo/settings/bo.pilot.endpoint HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "PUT /bo/settings/bo.pilot.allowlist HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "POST /bo/packages/import HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "POST /bo/packages/imp_b99a759b283a/promote HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "PUT /bo/pilot/activation HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "POST /bo/execution/mandates HTTP/1.1" 201 Created
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "POST /bo/pilot/runs HTTP/1.1" 201 Created
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "POST /bo/execution/work HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63502 - "GET /agents HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63503 - "GET /agents/models HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63504 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /personas HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63502 - "GET /agents HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63503 - "GET /personas HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63502 - "GET /agents/models?agent_id=executive HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63503 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /agents/executive HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /personas/default HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63502 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /agents HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63502 - "GET /agents/models HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63503 - "GET /personas HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63504 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /agents HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63504 - "GET /agents/models?agent_id=executive HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63503 - "GET /agents/executive HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63502 - "GET /personas HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63505 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /personas/default HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /agents HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63502 - "GET /agents/models HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63504 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63503 - "GET /personas HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63502 - "GET /agents HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63503 - "GET /agents/executive HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63504 - "GET /agents/models?agent_id=executive HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /personas HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63505 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /personas/default HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63502 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /skills HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63502 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /skills/board-prep-deck HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /skills HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63502 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63502 - "GET /skills/board-prep-deck HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /skills HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63502 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /skills/board-prep-deck HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63502 - "GET /artifacts/alert%3A1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /artifacts/alert%3A1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /artifacts/alert%3A1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63502 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63502 - "GET /fixtures HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63503 - "GET /fixtures/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /bo/settings HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63502 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /fixtures HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63502 - "GET /fixtures/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63503 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /bo/settings HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63502 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /fixtures HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63502 - "GET /fixtures/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63503 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /bo/settings HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63502 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63502 - "GET /bo/execution/mandates HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /bo/packages HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63577 - "GET /bo/settings HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63578 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63503 - "GET /bo/pilot HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63577 - "GET /bo/execution/mandates HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63502 - "GET /bo/packages HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63503 - "GET /bo/settings HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63578 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /bo/pilot HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /bo/packages HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63503 - "GET /bo/execution/mandates HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63577 - "GET /bo/settings HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63578 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63502 - "GET /bo/pilot HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /bo/runs/run_c57825eca651 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63502 - "GET /bo/settings HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63503 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63502 - "GET /bo/runs/run_c57825eca651 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /bo/settings HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63503 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63502 - "GET /bo/runs/run_c57825eca651 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /bo/settings HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63503 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /bo/packages HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63577 - "GET /bo/settings HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63503 - "GET /bo/settings HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63502 - "GET /bo/packages-approvals HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63578 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63502 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63577 - "GET /bo/packages-approvals HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /bo/packages HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63503 - "GET /bo/settings HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /bo/settings HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63502 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63502 - "GET /bo/packages-approvals HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /bo/packages HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63577 - "GET /bo/settings HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63503 - "GET /bo/settings HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63578 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63489 - "GET /auth/allowed-emails HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+[10/26/26 09:20:54] INFO     StreamableHTTP       streamable_http_manager.py:168
+                             session manager                                    
+                             shutting down                                      
+09:20:54  INFO     workflows.resumer            │ resumer cancelled — exiting
+INFO:     Application shutdown complete.
+INFO:     Finished server process [36267]

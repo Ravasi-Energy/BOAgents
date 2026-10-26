@@ -72,9 +72,11 @@ def test_builder_failure_on_final_answer_is_retryable(
     assert resp.json()["completed"] is True
     assert calls == ["boom", "ok"]
 
-    # ...and only then does the session refuse further answers.
+    # ...and only then does the session refuse further answers — 409
+    # conflict, the stale-write contract (a repeat of a completed session
+    # is not a validation error).
     resp = client.post("/onboard/answer", json={"session_id": session_id, "answer": "again"})
-    assert resp.status_code == 400
+    assert resp.status_code == 409
 
 
 def test_issue_84_answer_completes_through_the_real_builder(

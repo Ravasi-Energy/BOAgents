@@ -222,6 +222,7 @@ def resolve_identity(request: Request) -> Identity:
         if (not proxy_secret or proxy_secret == service_secret
                 or not hmac.compare_digest(supplied, proxy_secret)):
             raise UnauthenticatedError("untrusted delegated identity")
+        assert_session_not_revoked(request)
         role: Role = (
             "admin" if email in _admin_emails() or _is_principal_email(email) else "viewer"
         )
@@ -268,6 +269,22 @@ def _auth_material_configured() -> bool:
         os.environ.get("BACKEND_PROXY_SECRET", "").strip()
         or os.environ.get("BACKEND_SHARED_SECRET", "").strip()
     )
+
+
+def assert_session_not_revoked(request: Request) -> None:
+    """C10 per-session revocation — the session proxy stamps the JWT's
+    ``jti``; a logout writes it to the revocation table and any replay of
+    that token is refused afterwards (other sessions of the same user are
+    unaffected — a session revoke, not a roster revoke). Missing header =
+    older proxy: no check. Shared by ``resolve_identity`` and the legacy
+    caller-resolution path, so every proxied call is covered.
+    """
+    jti = request.headers.get("x-caller-session-jti")
+    if jti:
+        from openexecutive.memory import session_revocation
+
+        if session_revocation.is_revoked(jti):
+            raise UnauthenticatedError("session revoked")
 
 
 def require(identity: Identity, capability: str) -> None:

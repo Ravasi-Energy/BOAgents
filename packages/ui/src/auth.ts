@@ -58,6 +58,42 @@ function auditAuth(
   });
 }
 
+// C10 logout-replay: the signOut event persists the session's jti into
+// the backend revocation table, so a token copied before logout is refused
+// on every later request — across processes and restarts (server-side row),
+// while other sessions of the same user stay valid. Fire-and-forget like
+// auditAuth — a backend hiccup must never break logout itself.
+function revokeSession(jti: unknown, email: string | null): void {
+  if (typeof jti !== "string" || !jti || !BACKEND_SHARED_SECRET) return;
+  fetch(`${BACKEND_BASE}/sessions/revoke`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": BACKEND_SHARED_SECRET,
+    },
+    body: JSON.stringify({ email: email ?? "unknown", jti }),
+  }).catch(() => {
+    // Revocation delivery failures must never surface to users.
+  });
+}
+
+// Fail-closed revocation check used by the `authorized` callback: the row
+// lives in the backend's durable store, so a copied token stays dead
+// through both processes' restarts.
+async function isSessionRevoked(jti: unknown): Promise<boolean> {
+  if (typeof jti !== "string" || !jti || !BACKEND_SHARED_SECRET) return false;
+  try {
+    const resp = await fetch(`${BACKEND_BASE}/sessions/revoked/${encodeURIComponent(jti)}`, {
+      headers: { "x-api-key": BACKEND_SHARED_SECRET },
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!resp.ok) return true; // unreachable authority = deny
+    return (await resp.json())?.revoked === true;
+  } catch {
+    return true; // fail closed — an unverifiable session is a denied session
+  }
+}
+
 export const { handlers, auth, signIn, signOut } = NextAuth({
   // @auth/core auto-detects trustHost via `AUTH_URL ?? AUTH_TRUST_HOST ??
   // VERCEL ?? CF_PAGES ?? NODE_ENV !== "production"` — a chain of `??`
@@ -126,6 +162,21 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       }
       return true;
     },
+    // Every JWT gets a stable per-session id — the revocation key. Assigned
+    // once at sign-in, it survives refresh so logout can name exactly this
+    // session (not the whole account).
+    jwt: async ({ token }) => {
+      if (!token.jti) token.jti = crypto.randomUUID();
+      return token;
+    },
+    session: async ({ session, token }) => {
+      // The proxy route stamps this as x-caller-session-jti for the
+      // backend's revocation check; it is never exposed to the page.
+      if (typeof token.jti === "string") {
+        (session as { jti?: string }).jti = token.jti;
+      }
+      return session;
+    },
     // Re-runs on every request gated by the middleware (see middleware.ts).
     // Without this, a user removed from the roster mid-session — or one
     // whose JWT predates the roster being installed — would keep coasting
@@ -138,6 +189,9 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       const decision = await checkEmailAllowed(email);
       // Exhaustive on purpose: a `!== "revoke"` test would admit any future
       // SessionAction, i.e. fail open. This way adding one is a build error.
+      // C10: a revoked session loses even before it reaches an endpoint —
+      // a copied token must not render pages either.
+      if (await isSessionRevoked((auth as { jti?: string }).jti)) return deniedAuthResponse(request);
       switch (decideSessionAction(decision)) {
         case "allow":
           return true;
@@ -170,6 +224,8 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       const token = "token" in message ? message.token : undefined;
       const email = typeof token?.email === "string" ? token.email.toLowerCase() : null;
       auditAuth("auth_logout", `Logout: ${email ?? "unknown"}`, email, {});
+      // Revoke exactly this session server-side (C10 logout-replay).
+      revokeSession(token?.jti, email);
     },
   },
 });

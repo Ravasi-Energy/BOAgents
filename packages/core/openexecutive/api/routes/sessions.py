@@ -20,6 +20,41 @@ def _require_admin_write(request: Request) -> None:
 router = APIRouter()
 
 
+class _RevokeBody(__import__("pydantic").BaseModel):
+    email: str
+    jti: str
+
+
+def _service_identity(request: Request) -> None:
+    """Revocation is written by the UI's NextAuth signOut event — the
+    service identity only, never a delegated user (a user revoking a
+    session is exactly the signOut path itself)."""
+    ident = require_http(request, "sessions:read")
+    if not ident.is_service:
+        raise HTTPException(status_code=403, detail="service identity required")
+
+
+@router.post("/sessions/revoke", status_code=status.HTTP_204_NO_CONTENT,
+             dependencies=[Depends(_service_identity)])
+def revoke_session(body: _RevokeBody) -> Response:
+    """Per-session revoke (C10): marks ``jti`` dead for any later replay.
+    Idempotent; durable across restarts (episodic DB row)."""
+    from openexecutive.memory import session_revocation
+
+    session_revocation.revoke(body.jti, actor=body.email.strip().lower())
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/sessions/revoked/{jti}",
+            dependencies=[Depends(_service_identity)])
+def session_revoked(jti: str) -> dict:
+    """Revocation readback for the UI middleware — fail-closed on the
+    service gate, so a down backend means denied, not admitted."""
+    from openexecutive.memory import session_revocation
+
+    return {"revoked": session_revocation.is_revoked(jti)}
+
+
 def _owned_session(request: Request, session_id: str) -> dict:
     """F03: detail/messages/delete serve only the session's owner.
 

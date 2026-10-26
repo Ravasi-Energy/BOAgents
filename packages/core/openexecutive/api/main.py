@@ -292,6 +292,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from openexecutive.knowledge.skills_index import seed_builtin_skills
     from openexecutive.knowledge.store import ChromaDBStore
     from openexecutive.memory.episodic import initialize_db
+    from openexecutive.memory.session_revocation import (
+        initialize_db as initialize_session_revocations,
+    )
 
     # Re-assert logging config AFTER uvicorn's own dictConfig, then announce.
     _configure_logging()
@@ -371,6 +374,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.reconcile_task = _reconcile_task
 
     initialize_db()
+    initialize_session_revocations()
     initialize_alerts_db()
 
     # BOAgents slice: own database file (bo_agents.db / BOAGENTS_DB_PATH).

@@ -133,6 +133,9 @@ def _resolve_caller_person_id(request: Request) -> int | None:
       - header absent → fall back to the principal (CLI / direct curl,
         plus channel paths without the header).
     """
+    from openexecutive.bo import identity as bo_identity
+
+    bo_identity.assert_session_not_revoked(request)
     caller_email = (request.headers.get("x-caller-email") or "").strip().lower()
     try:
         from openexecutive.people.store import (

@@ -2088,15 +2088,31 @@ class TestRebindAuditDurability:
         monkeypatch.undo()
         self._journal(tmp_path, monkeypatch)
         iid = store.pending_audit_intents(db_path=db)[0]["intent_id"]
-        now = datetime.now(UTC).isoformat(
+        # Ceas controlat: generatia (drain_until) provine din
+        # ``store.datetime.now`` — il inghetam si il avansam peste
+        # lease intre cele doua claim-uri, in loc sa ne bazam pe faptul
+        # ca ceasul real a schimbat milisecunda intre apeluri (flake in
+        # CI: gen_b == gen_a cand ambele cadeau in aceeasi ms).
+        real_now = datetime.now(UTC)
+
+        class _Clock(datetime):  # type: ignore[misc]
+            _instant = real_now
+
+            @classmethod
+            def now(cls, tz=None):  # type: ignore[override]
+                return cls._instant.astimezone(tz) if tz else cls._instant
+
+        monkeypatch.setattr(store, "datetime", _Clock)
+        now = _Clock.now(UTC).isoformat(
             timespec="milliseconds").replace("+00:00", "Z")
         with bo_db.get_conn(db) as conn:
             gen_a = store._claim_audit_intent(conn, iid, "A", now, 60)
             assert gen_a
-        # Lease A expires; B re-claims with a new generation.
+        # Lease A expires; B re-claims cu ceasul avansat peste lease.
         with bo_db.get_conn(db) as conn:
             conn.execute(
                 "UPDATE bo_audit_intents SET drain_until='2020-01-01T00:00:00Z'")
+        _Clock._instant = real_now + timedelta(seconds=90)
         with bo_db.get_conn(db) as conn:
             gen_b = store._claim_audit_intent(conn, iid, "B", now, 60)
             assert gen_b and gen_b != gen_a

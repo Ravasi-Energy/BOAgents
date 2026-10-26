@@ -120,11 +120,83 @@ def _admin_ident(request: Request) -> bo_identity.Identity:
     return bo_identity.require_http(request, "people:write")
 
 
+def _assert_actor_retains_access(
+    ident: bo_identity.Identity, post: list[Person]
+) -> None:
+    """ROSTER-LOCKOUT — refuse a roster write that strands the acting admin.
+
+    Once ``administered`` is true the sign-in gate admits roster emails only,
+    so the first roster write is an explicit authority transition and it must
+    preserve the acting operator: their own person row (sign-in email,
+    admin-capable via is_principal or BO_ADMIN_EMAILS) must exist afterwards.
+    Same rule guards archiving / clearing the caller's own row while the
+    roster is administered. Refuses with 409 before anything is written.
+    """
+    if ident.auth_source != "proxy_email":
+        return
+    actor = ident.actor
+    env_admins = bo_identity._admin_emails()
+    if any(
+        not p.archived
+        and p.email
+        and p.email.lower() == actor
+        and (p.is_principal or actor in env_admins)
+        for p in post
+    ):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "error": "roster_lockout",
+            "message": (
+                "Scrierea ar revoca propriul acces: odată administrat, "
+                "rosterul autentifică doar emailurile din el. Includeți "
+                "propria persoană (email de autentificare, admin-capabilă) "
+                "în roster înainte de a continua."
+            ),
+        },
+    )
+
+
+def _retention_post_state(
+    *,
+    person_id: int | None,
+    email: str | None,
+    is_principal: bool,
+    archived: bool,
+) -> list[Person]:
+    """Post-write roster for the lockout check: ``person_id`` rows are
+    replaced by the simulated row; ``None`` appends a brand-new row."""
+    post: list[Person] = []
+    for p in people_store.list_people(include_archived=True):
+        if p.id == person_id:
+            post.append(p.model_copy(
+                update={"email": email, "is_principal": is_principal,
+                        "archived": archived}
+            ))
+        else:
+            post.append(p)
+    if person_id is None:
+        post.append(Person(
+            full_name="(new)", role="", is_principal=is_principal,
+            email=email, archived=archived,
+        ))
+    return post
+
+
 @router.post("/people", response_model=Person, status_code=status.HTTP_201_CREATED)
 def create_person(
     body: PersonCreate,
     ident: Annotated[bo_identity.Identity, Depends(_admin_ident)],
 ) -> Person:
+    if not people_store.roster_administered():
+        _assert_actor_retains_access(
+            ident,
+            _retention_post_state(
+                person_id=None, email=body.email,
+                is_principal=body.is_principal, archived=False,
+            ),
+        )
     try:
         pid = people_store.upsert_person(
             full_name=body.full_name,
@@ -159,10 +231,30 @@ def patch_person(
     body: PersonPatch,
     ident: Annotated[bo_identity.Identity, Depends(_admin_ident)],
 ) -> Person:
-    if people_store.get_person(person_id) is None:
+    target = people_store.get_person(person_id)
+    if target is None:
         raise HTTPException(status_code=404, detail="Person not found")
 
     raw = body.model_dump(exclude_unset=True)
+    # ROSTER-LOCKOUT: refuse before any write when the transition
+    # (unadministered roster) or the caller's own row would lose their
+    # access. PATCH cannot touch is_principal — only the email fields are
+    # retention-relevant.
+    if ident.auth_source == "proxy_email" and (
+        not people_store.roster_administered()
+        or (target.email or "").lower() == ident.actor
+    ):
+        post_email = (
+            None if body.clear_email
+            else (body.email if "email" in raw else target.email)
+        )
+        _assert_actor_retains_access(
+            ident,
+            _retention_post_state(
+                person_id=person_id, email=post_email,
+                is_principal=target.is_principal, archived=False,
+            ),
+        )
     # Explicit-clear contract (CONTROL R12): a JSON null on a nullable
     # field is ambiguous (clear vs. don't-touch) — refused; the clear_* op
     # must be named. A clear_* flag together with a concrete value for the
@@ -265,8 +357,20 @@ def archive_person(
     person_id: int,
     ident: Annotated[bo_identity.Identity, Depends(_admin_ident)],
 ) -> Response:
-    if people_store.get_person(person_id) is None:
+    target = people_store.get_person(person_id)
+    if target is None:
         raise HTTPException(status_code=404, detail="Person not found")
+    if ident.auth_source == "proxy_email" and (
+        not people_store.roster_administered()
+        or (target.email or "").lower() == ident.actor
+    ):
+        _assert_actor_retains_access(
+            ident,
+            _retention_post_state(
+                person_id=person_id, email=target.email,
+                is_principal=target.is_principal, archived=True,
+            ),
+        )
     people_store.archive_person(person_id)
     people_registry.invalidate()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

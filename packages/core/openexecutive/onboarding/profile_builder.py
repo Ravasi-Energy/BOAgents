@@ -54,7 +54,10 @@ def _save_wizard_people(answers: dict) -> None:  # type: ignore[type-arg]
         init_people_db()
         for rec in records:
             raw_scopes: list[str] = rec.pop("authority_scope", [])
-            pid = upsert_person(**rec)
+            # mark_administered=False — see people.store.upsert_person:
+            # seeded roster data must not flip the sign-in gate or the
+            # operator who just onboarded loses access (ROSTER-LOCKOUT).
+            pid = upsert_person(**rec, mark_administered=False)
             scopes = []
             for tok in raw_scopes:
                 with contextlib.suppress(ValueError):

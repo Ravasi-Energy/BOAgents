@@ -75,12 +75,14 @@ def save_onboarding_people(drafts: list[PersonDraft]) -> dict[str, int]:
             prior = existing.get(name.lower())
             if prior is None:
                 pid = upsert_person(
+                    mark_administered=False,
                     full_name=name,
                     role=draft.role.strip(),
                     is_principal=draft.is_principal,
                 )
             else:
                 pid = upsert_person(
+                    mark_administered=False,
                     person_id=prior.id,
                     full_name=name,
                     # An empty drafted role means "not mentioned", not "clear it".
@@ -137,7 +139,10 @@ def _demote_stale_principals(keep_ids: set[int]) -> None:
     for person in list_people():
         if not person.is_principal or person.id is None or person.id in keep_ids:
             continue
+        # mark_administered=False — demotion is part of seeding, not a
+        # deliberate roster administration act by the operator.
         upsert_person(
+            mark_administered=False,
             person_id=person.id,
             full_name=person.full_name,
             role=person.role,

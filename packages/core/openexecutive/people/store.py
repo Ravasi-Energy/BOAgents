@@ -294,9 +294,16 @@ def upsert_person(
     on_leave_until: date | None = None,
     reports_to_person_id: int | None = None,
     person_id: int | None = None,
+    mark_administered: bool = True,
     db_path: Path | None = None,
 ) -> int:
-    """Insert or update a Person row. Returns the person_id."""
+    """Insert or update a Person row. Returns the person_id.
+
+    ``mark_administered=False`` is for seed/restore paths (fixture load,
+    onboarding, client slots): loading roster DATA is not roster
+    ADMINISTRATION — flipping the flag would revoke the env bootstrap and
+    lock out an operator who never touched the roster (ROSTER-LOCKOUT).
+    """
     # Validate against the Literal — a bogus channel would land in the row
     # and break every subsequent Person read.
     if preferred_channel not in get_args(PreferredChannel):
@@ -310,7 +317,8 @@ def upsert_person(
     leave_str = on_leave_until.isoformat() if on_leave_until else None
 
     with _get_conn(db_path) as conn:
-        _mark_roster_administered(conn)
+        if mark_administered:
+            _mark_roster_administered(conn)
         if person_id is not None and person_id > 0:
             conn.execute(
                 """

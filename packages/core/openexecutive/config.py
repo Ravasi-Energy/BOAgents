@@ -617,7 +617,7 @@ class Settings(BaseSettings):
     # side before the sweep runs). Monitoring = unrouted low/medium watchlist
     # signals; action = everything a human should look at. 0 disables expiry
     # for that category. Artifacts and decision-backed alerts never expire.
-    alert_ttl_days_monitoring: int = Field(3, alias="ALERT_TTL_DAYS_MONITORING")
+    alert_ttl_days_monitoring: int = Field(5, alias="ALERT_TTL_DAYS_MONITORING")
     alert_ttl_days_action: int = Field(14, alias="ALERT_TTL_DAYS_ACTION")
 
     # Executive alert review (alerts/review.py) — a scheduler heartbeat that

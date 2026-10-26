@@ -95,9 +95,23 @@ def test_people_create_viewer_403_admin_201_and_persists(
     assert client.post("/people", json=body, headers=VIEWER).status_code == 403
     assert people_store.list_people(db_path=db) == []
 
+    # ROSTER-LOCKOUT: prima scriere pe un roster neadministrat trebuie sa
+    # pastreze accesul actorului — un POST care nu il include este refuzat
+    # cu 409 inainte de orice efect.
+    refused = client.post("/people", json=body, headers=ADMIN)
+    assert refused.status_code == 409, refused.text
+    assert people_store.list_people(db_path=db) == []
+
+    me = client.post(
+        "/people",
+        json={"full_name": "Probe Admin", "email": "admin@probe.local"},
+        headers=ADMIN,
+    )
+    assert me.status_code == 201, me.text
+
     created = client.post("/people", json=body, headers=ADMIN)
     assert created.status_code == 201, created.text
-    assert len(people_store.list_people(db_path=db)) == 1
+    assert len(people_store.list_people(db_path=db)) == 2
 
     principal = client.post(
         "/people",
@@ -178,7 +192,7 @@ def test_onboard_commit_viewer_403_admin_writes_profile(
     monkeypatch.setattr(route, "_interview_sessions", OrderedDict())
     monkeypatch.setattr(route, "_onboarding_research_fired", set())
     monkeypatch.setattr(
-        route, "_get_interview", lambda sid: SimpleNamespace(saved=False)
+        route, "_get_interview", lambda sid, ident=None: SimpleNamespace(saved=False)
     )
     monkeypatch.setattr(
         "openexecutive.onboarding.commit.save_onboarding_people", lambda d: {}

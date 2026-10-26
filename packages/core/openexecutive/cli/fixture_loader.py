@@ -1712,7 +1712,12 @@ def _seed_people(people_path: Path) -> int:
         person_id = (
             id_by_email.get(email.strip().lower()) if email else None
         ) or id_by_name.get(full_name.strip().lower())
+        # mark_administered=False: a demo fixture carries roster DATA, it is
+        # not the operator administering the roster. Marking here would flip
+        # the sign-in gate to roster-only and lock the operator out
+        # (ROSTER-LOCKOUT — "demo nu rescrie autoritatea reala").
         person_id = people_store.upsert_person(
+            mark_administered=False,
             full_name=full_name,
             role=row.get("role", ""),
             email=row.get("email"),

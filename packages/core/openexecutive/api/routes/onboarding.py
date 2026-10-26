@@ -55,6 +55,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _wizard_sessions: dict[str, WizardState] = {}
+# Session → owning actor (ONBOARD-AUTH-CAS): a wizard session is bound to the
+# identity that created it; other admins get 404, never the session's data.
+_wizard_session_owners: dict[str, str] = {}
 # Hold strong refs to background research runs so GC can't cancel
 # them mid-flight (mirrors alerts/pipeline.py). Auto-cleared via
 # add_done_callback after the task finishes.
@@ -71,11 +74,21 @@ _onboarding_research_fired: set[str] = set()
 _RESEARCH_WALLCLOCK_TIMEOUT_SECONDS = 600
 
 
+def _get_wizard(session_id: str, ident: bo_identity.Identity) -> WizardState:
+    state = _wizard_sessions.get(session_id)
+    if state is None or _wizard_session_owners.get(session_id) != ident.actor:
+        raise HTTPException(status_code=404, detail="Onboarding session not found")
+    return state
+
+
 @router.get("/onboard/start", response_model=OnboardStatusResponse)
-async def start_onboarding() -> OnboardStatusResponse:
+async def start_onboarding(
+    ident: Annotated[bo_identity.Identity, Depends(_admin_ident)],
+) -> OnboardStatusResponse:
     session_id = str(uuid.uuid4())
     state = WizardState()
     _wizard_sessions[session_id] = state
+    _wizard_session_owners[session_id] = ident.actor
 
     question = get_current_question(state)
     progress = state.get_progress()
@@ -91,12 +104,15 @@ async def start_onboarding() -> OnboardStatusResponse:
 
 
 @router.post("/onboard/answer", response_model=OnboardStatusResponse)
-async def submit_answer(body: OnboardAnswerRequest) -> OnboardStatusResponse:
-    state = _wizard_sessions.get(body.session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Onboarding session not found")
+async def submit_answer(
+    body: OnboardAnswerRequest,
+    ident: Annotated[bo_identity.Identity, Depends(_admin_ident)],
+) -> OnboardStatusResponse:
+    state = _get_wizard(body.session_id, ident)
     if state.completed:
-        raise HTTPException(status_code=400, detail="Onboarding already completed")
+        # Stale write on an already-committed session — CAS-style 409,
+        # not a validation error.
+        raise HTTPException(status_code=409, detail="Onboarding already completed")
     if len(body.answer) > ONBOARD_ANSWER_MAX_CHARS:
         raise HTTPException(
             status_code=422,
@@ -245,10 +261,11 @@ async def _fire_post_onboarding_research(session_id: str) -> None:
 
 
 @router.get("/onboard/status/{session_id}", response_model=OnboardStatusResponse)
-async def get_onboard_status(session_id: str) -> OnboardStatusResponse:
-    state = _wizard_sessions.get(session_id)
-    if state is None:
-        raise HTTPException(status_code=404, detail="Onboarding session not found")
+async def get_onboard_status(
+    session_id: str,
+    ident: Annotated[bo_identity.Identity, Depends(_admin_ident)],
+) -> OnboardStatusResponse:
+    state = _get_wizard(session_id, ident)
 
     question = get_current_question(state) if not state.completed else None
     progress = state.get_progress()
@@ -292,6 +309,7 @@ class InterviewSession:
     last_hint: str = ""
     saved: bool = False
     last_touched: float = field(default_factory=time.monotonic)
+    owner: str = ""
 
 
 # In-memory, single-process — same assumption as _wizard_sessions above, but
@@ -316,10 +334,14 @@ def _sweep_interview_sessions() -> None:
         _interview_sessions.popitem(last=False)
 
 
-def _get_interview(session_id: str) -> InterviewSession:
+def _get_interview(
+    session_id: str, ident: bo_identity.Identity | None = None
+) -> InterviewSession:
     _sweep_interview_sessions()
     session = _interview_sessions.get(session_id)
-    if session is None:
+    if session is None or (
+        ident is not None and session.owner and session.owner != ident.actor
+    ):
         raise HTTPException(status_code=404, detail="Setup session not found or expired.")
     session.last_touched = time.monotonic()
     _interview_sessions.move_to_end(session_id)
@@ -419,6 +441,7 @@ async def _advance_interview(
 
 @router.post("/onboard/interview/start", response_model=OnboardTurnResponse)
 async def start_interview(
+    ident: Annotated[bo_identity.Identity, Depends(_admin_ident)],
     description: str = Form(""),
     files: list[UploadFile] = File(  # noqa: B008 — FastAPI multipart marker, mirrors chat.py
         default_factory=list
@@ -442,7 +465,7 @@ async def start_interview(
     extracted = await _gather_intake_attachments(files or [])
 
     session_id = str(uuid.uuid4())
-    session = InterviewSession()
+    session = InterviewSession(owner=ident.actor)
     _interview_sessions[session_id] = session
     # Sweep AFTER inserting: the cap is an invariant on what is stored, and
     # sweeping first would let the dict sit one over the cap until the next
@@ -470,7 +493,10 @@ async def start_interview(
 
 
 @router.post("/onboard/interview/message", response_model=OnboardTurnResponse)
-async def interview_message(body: OnboardMessageRequest) -> OnboardTurnResponse:
+async def interview_message(
+    body: OnboardMessageRequest,
+    ident: Annotated[bo_identity.Identity, Depends(_admin_ident)],
+) -> OnboardTurnResponse:
     # Bounded here, not with Field(max_length=...) — FastAPI's 422 body echoes
     # the rejected input, and this message may carry financials.
     if len(body.message) > ONBOARD_MESSAGE_MAX_CHARS:
@@ -478,7 +504,7 @@ async def interview_message(body: OnboardMessageRequest) -> OnboardTurnResponse:
             status_code=422,
             detail=f"Message is too long (limit {ONBOARD_MESSAGE_MAX_CHARS:,} characters).",
         )
-    session = _get_interview(body.session_id)
+    session = _get_interview(body.session_id, ident)
     if session.saved:
         raise HTTPException(status_code=409, detail="This setup session was already saved.")
     if not body.message.strip():
@@ -504,9 +530,12 @@ async def interview_message(body: OnboardMessageRequest) -> OnboardTurnResponse:
 
 
 @router.post("/onboard/interview/draft", response_model=OnboardTurnResponse)
-async def interview_draft(body: OnboardSessionRequest) -> OnboardTurnResponse:
+async def interview_draft(
+    body: OnboardSessionRequest,
+    ident: Annotated[bo_identity.Identity, Depends(_admin_ident)],
+) -> OnboardTurnResponse:
     """Force a draft now, however much is still unknown."""
-    session = _get_interview(body.session_id)
+    session = _get_interview(body.session_id, ident)
     if session.saved:
         raise HTTPException(status_code=409, detail="This setup session was already saved.")
     if not session.transcript:
@@ -518,9 +547,12 @@ async def interview_draft(body: OnboardSessionRequest) -> OnboardTurnResponse:
 
 
 @router.get("/onboard/interview/{session_id}", response_model=OnboardSessionResponse)
-async def get_interview(session_id: str) -> OnboardSessionResponse:
+async def get_interview(
+    session_id: str,
+    ident: Annotated[bo_identity.Identity, Depends(_admin_ident)],
+) -> OnboardSessionResponse:
     """Resume after a page refresh: the transcript plus any existing draft."""
-    session = _get_interview(session_id)
+    session = _get_interview(session_id, ident)
     base = _turn_response(session_id, session)
     return OnboardSessionResponse(
         **base.model_dump(),
@@ -553,7 +585,7 @@ async def commit_interview(
     )
     from openexecutive.onboarding.interview import DepartmentDraft, PersonDraft
 
-    session = _get_interview(body.session_id)
+    session = _get_interview(body.session_id, ident)
     if session.saved:
         raise HTTPException(
             status_code=409,
@@ -561,6 +593,18 @@ async def commit_interview(
                 "This setup session was already saved. Edit your company "
                 "profile on the Company Profile page."
             ),
+        )
+
+    if (
+        body.expected_version is not None
+        and body.expected_version != len(session.transcript)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "stale_draft",
+                "message": "The draft changed since you reviewed it — reload and commit again.",
+            },
         )
 
     settings = get_settings()

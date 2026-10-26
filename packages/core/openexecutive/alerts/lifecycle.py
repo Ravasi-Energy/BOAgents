@@ -76,7 +76,7 @@ def _ttl_settings() -> tuple[int, int]:
         s = get_settings()
         return int(s.alert_ttl_days_monitoring), int(s.alert_ttl_days_action)
     except Exception:
-        return 3, 14
+        return 5, 14
 
 
 def ttl_days_for(alert: Alert, *, monitoring_days: int, action_days: int) -> int | None:

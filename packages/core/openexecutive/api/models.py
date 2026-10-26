@@ -357,6 +357,9 @@ class OnboardSessionResponse(OnboardTurnResponse):
 
 class OnboardCommitRequest(BaseModel):
     session_id: str
+    # Optional CAS on the reviewed draft: the client sends the transcript
+    # length it saw; a newer turn/draft means the commit is stale → 409.
+    expected_version: int | None = None
     # Reuses the PATCH model: all-optional fields merged onto a fresh
     # CompanyProfile(), so the client never has to send a complete profile.
     profile: CompanyProfileUpdateRequest

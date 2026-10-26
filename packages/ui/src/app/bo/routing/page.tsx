@@ -19,7 +19,7 @@ import {
 import BoTime from "@/components/bo/BoTime";
 import {
   BoApiError,
-  boErrorDetail,
+  boValidationReasonRo,
   createBoCatalogEntry,
   flushBoRoutingObservations,
   getBoRoutingCatalog,
@@ -55,6 +55,20 @@ const REASON_LABELS: Record<string, string> = {
   STALE_EVALUATION: "evaluare expirată",
   QUALITY_BAR_UNMET: "sub pragul de calitate",
   CATALOG_EMPTY: "catalog gol",
+};
+
+// Catalog fields named as the form labels them, for the server's validation refusal.
+const CATALOG_FIELD_LABELS: Record<string, string> = {
+  provider: "Provider",
+  model_id: "Model",
+  model_version: "Versiune",
+  state: "Stare",
+  capabilities: "Capabilități",
+  regions: "Regiuni",
+  cost: "Cost",
+  quality: "Calitate",
+  purpose: "Scop",
+  source: "Sursă",
 };
 
 function reasonLabel(r: string): string {
@@ -176,6 +190,8 @@ function EntryEditor({
     try {
       let draft: ReturnType<typeof payload>, patch: ReturnType<typeof catalogPatch> | null = null;
       try {
+        const missing = [!provider.trim() && "Provider", !modelId.trim() && "Model"].filter(Boolean);
+        if (missing.length) throw new Error(`Câmp obligatoriu: ${missing.join(", ")} — nimic nu a fost trimis.`);
         draft = payload();
         if (base) patch = catalogPatch(draft, originalPayload.current!, base, {capabilities:removeCaps,regions:removeRegions});
       } catch (e) {
@@ -196,7 +212,7 @@ function EntryEditor({
           "Altă sesiune a modificat intrarea între timp — editura este păstrată; citește baza curentă.",
         );
       } else if (e instanceof BoApiError) {
-        setErr(`${e.code}${e.detail ? ` — ${boErrorDetail(e.detail)}` : ""}`);
+        setErr(`${e.code}${e.detail ? ` — ${boValidationReasonRo(e.detail, CATALOG_FIELD_LABELS)}` : ""}`);
       } else {
         setErr("Eroare neașteptată la salvare.");
       }

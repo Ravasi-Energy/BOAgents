@@ -52,6 +52,40 @@ export function boErrorDetail(detail: unknown): string {
   return JSON.stringify(detail);
 }
 
+// Pydantic v2 validation items carry a stable `type` and `ctx`. The common ones are named in Romanian for
+// the operator; the server's own message stays alongside, so the refusal is not rewritten or hidden.
+const VALIDATION_RO: Record<string, (ctx: Record<string, unknown>) => string> = {
+  missing: () => "câmp obligatoriu",
+  string_too_short: (c) => (c.min_length === 1 ? "câmp obligatoriu, nu poate fi gol" : `cel puțin ${c.min_length} caractere`),
+  string_too_long: (c) => `cel mult ${c.max_length} caractere`,
+  too_short: (c) => `cel puțin ${c.min_length} elemente`,
+  too_long: (c) => `cel mult ${c.max_length} elemente`,
+  greater_than_equal: (c) => `cel puțin ${c.ge}`,
+  less_than_equal: (c) => `cel mult ${c.le}`,
+  int_parsing: () => "trebuie să fie un număr întreg",
+  float_parsing: () => "trebuie să fie un număr",
+  decimal_parsing: () => "trebuie să fie un număr",
+  literal_error: (c) => `valoare nepermisă${c.expected ? ` (permis: ${c.expected})` : ""}`,
+  enum: (c) => `valoare nepermisă${c.expected ? ` (permis: ${c.expected})` : ""}`,
+};
+
+/** Server validation refusal in Romanian: "Câmp: cauză (server: original)". Unknown items fall back to boErrorDetail. */
+export function boValidationReasonRo(detail: unknown, labels: Record<string, string> = {}): string {
+  if (!Array.isArray(detail)) return boErrorDetail(detail);
+  return detail
+    .map((d) => {
+      if (!d || typeof d !== "object" || !("type" in d)) return boErrorDetail([d]);
+      const item = d as { type: unknown; loc?: unknown; msg?: unknown; ctx?: unknown };
+      const reason = VALIDATION_RO[String(item.type)];
+      if (!reason) return boErrorDetail([d]);
+      const path = Array.isArray(item.loc) ? item.loc.filter((x) => x !== "body").map(String) : [];
+      const field = labels[path.join(".")] ?? labels[path[0] ?? ""] ?? path.join(".");
+      const ctx = item.ctx && typeof item.ctx === "object" ? (item.ctx as Record<string, unknown>) : {};
+      return `${field ? `${field}: ` : ""}${reason(ctx)}${item.msg ? ` (server: ${String(item.msg)})` : ""}`;
+    })
+    .join("; ");
+}
+
 // ---------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------

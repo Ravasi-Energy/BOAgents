@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { auth } from "@/auth";
 import { backendUrl } from "@/lib/backend-url";
+import { mutationOriginRefusal, ownOrigins } from "@/lib/request-origin";
 
 // Streaming-aware proxy to the FastAPI backend. Replaces the `rewrites()` rule
 // in next.config.ts, which buffers SSE responses in dev so the chat stream
@@ -17,6 +18,12 @@ const BACKEND_BASE = process.env.BACKEND_BASE_URL ?? "http://localhost:8000";
 const BACKEND_SHARED_SECRET = process.env.BACKEND_SHARED_SECRET?.trim() ?? "";
 
 async function proxy(req: NextRequest, params: { path: string[] }): Promise<Response> {
+  // Refused before the session is even read: a cross-origin page must not be
+  // able to spend the user's cookie on a mutation (see request-origin.ts).
+  if (mutationOriginRefusal(req.method, req.headers, ownOrigins(req.nextUrl.origin, process.env.AUTH_URL))) {
+    return Response.json({ error: "csrf_origin_refused" }, { status: 403, headers: { "cache-control": "private, no-store" } });
+  }
+
   // Belt-and-suspenders: middleware should have already rejected unauthenticated
   // traffic, but check here too so a stray client can't reach the backend.
   const session = await auth();
@@ -88,8 +95,9 @@ async function proxy(req: NextRequest, params: { path: string[] }): Promise<Resp
 
   // Pass response through as a stream. Do not buffer.
   const respHeaders = new Headers(upstream.headers);
-  // Hint to any downstream proxies (and Next's dev server) not to buffer SSE.
-  respHeaders.set("Cache-Control", "no-cache, no-transform");
+  // Per-user data: never stored by a shared or browser cache (no-cache alone
+  // still allows storing). no-transform + X-Accel-Buffering keep SSE unbuffered.
+  respHeaders.set("Cache-Control", "private, no-store, no-transform");
   respHeaders.set("X-Accel-Buffering", "no");
 
   return new Response(upstream.body, {

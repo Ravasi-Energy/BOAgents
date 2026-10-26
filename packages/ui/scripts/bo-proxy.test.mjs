@@ -1,4 +1,5 @@
 import {backendUrl} from '../src/lib/backend-url.ts';
+import {mutationOriginRefusal, ownOrigins} from '../src/lib/request-origin.ts';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import fs from 'node:fs';
@@ -10,7 +11,7 @@ function handler(proxySecret, user = { email: 'user@example.invalid' }) {
   const calls = [];
   const exports = {};
   const context = {
-    exports, Headers, Response, URL, backendUrl,
+    exports, Headers, Response, URL, backendUrl, mutationOriginRefusal, ownOrigins,
     process: { env: { BACKEND_SHARED_SECRET: 'service-only', BACKEND_PROXY_SECRET: proxySecret } },
     auth: async () => ({ user }),
     fetch: async (url, init) => {
@@ -22,8 +23,8 @@ function handler(proxySecret, user = { email: 'user@example.invalid' }) {
   const executable = stripTypeScriptTypes(source)
     .replace(/^import .*;$/gm, '')
     .replace(/^export /gm, '');
-  vm.runInNewContext(executable + '\nexports.GET = GET;', context);
-  return { run: exports.GET, calls };
+  vm.runInNewContext(executable + '\nexports.GET = GET; exports.POST = POST;', context);
+  return { run: exports.GET, post: exports.POST, calls };
 }
 const request = () => ({
   method: 'GET', nextUrl: new URL('http://localhost/api/backend/bo/settings'),
@@ -48,3 +49,42 @@ for (const secret of [undefined, '', '   ', 'service-only', ' service-only ']) {
     assert.equal(calls.length, 0);
   });
 }
+
+// Norma v2 C10: SameSite=Lax lets another origin of the same site (other port or
+// subdomain) post with the session cookie; the proxy refuses it before reading
+// the session and never reaches the backend.
+const mutation = (headers) => ({ method: 'POST', nextUrl: new URL('http://localhost/api/backend/people/2/archive'), headers: new Headers(headers), body: null });
+const params = { params: Promise.resolve({ path: ['people', '2', 'archive'] }) };
+for (const [label, headers] of [
+  ['same-site form (Sec-Fetch-Site: same-site)', { 'sec-fetch-site': 'same-site', origin: 'http://localhost:4000' }],
+  ['cross-site no-cors fetch', { 'sec-fetch-site': 'cross-site', origin: 'http://evil.invalid' }],
+  ['opaque origin (sandboxed frame)', { origin: 'null' }],
+  ['foreign Origin without Sec-Fetch-Site', { origin: 'http://localhost:4000' }],
+]) {
+  test(`BO proxy refuses cross-origin mutation: ${label}`, async () => {
+    const { post, calls } = handler('proxy-only');
+    const res = await post(mutation(headers), params);
+    assert.equal(res.status, 403);
+    assert.equal((await res.json()).error, 'csrf_origin_refused');
+    assert.equal(res.headers.get('cache-control'), 'private, no-store');
+    assert.equal(calls.length, 0);
+  });
+}
+for (const [label, headers] of [
+  ['same-origin browser fetch', { 'sec-fetch-site': 'same-origin', origin: 'http://localhost' }],
+  ['own Origin without Sec-Fetch-Site', { origin: 'http://localhost' }],
+  ['non-browser client (no Origin, no Sec-Fetch-Site)', {}],
+]) {
+  test(`BO proxy forwards mutation: ${label}`, async () => {
+    const { post, calls } = handler('proxy-only');
+    const res = await post(mutation(headers), params);
+    assert.equal(res.status, 200);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].init.method, 'POST');
+  });
+}
+test('BO proxy marks every proxied response private, no-store', async () => {
+  const { run } = handler('proxy-only');
+  const res = await run(request(), { params: Promise.resolve({ path: ['bo', 'settings'] }) });
+  assert.equal(res.headers.get('cache-control'), 'private, no-store, no-transform');
+});

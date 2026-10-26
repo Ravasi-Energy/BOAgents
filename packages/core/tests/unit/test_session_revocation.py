@@ -15,13 +15,13 @@ from openexecutive.memory import session_revocation
 ADMIN = {
     "x-caller-email": "admin@probe.local",
     "x-caller-proxy-secret": "proxy-secret-probe",
-    "x-caller-session-jti": "jti-A",
+    "x-caller-session-sid": "jti-A",
 }
-ADMIN_S2 = dict(ADMIN, **{"x-caller-session-jti": "jti-B"})
+ADMIN_S2 = dict(ADMIN, **{"x-caller-session-sid": "jti-B"})
 VIEWER = {
     "x-caller-email": "viewer@probe.local",
     "x-caller-proxy-secret": "proxy-secret-probe",
-    "x-caller-session-jti": "jti-V",
+    "x-caller-session-sid": "jti-V",
 }
 SERVICE = {"x-api-key": "service-secret-probe"}
 
@@ -93,5 +93,5 @@ def test_revoked_readback_and_missing_jti_is_neutral() -> None:
                       headers=SERVICE).json()["revoked"] is True
     # An older proxy that stamps no jti gets no check (compat).
     legacy = {k: v for k, v in ADMIN.items()
-              if k != "x-caller-session-jti"}
+              if k != "x-caller-session-sid"}
     assert client.get("/sessions", headers=legacy).status_code == 200

@@ -279,7 +279,10 @@ def assert_session_not_revoked(request: Request) -> None:
     older proxy: no check. Shared by ``resolve_identity`` and the legacy
     caller-resolution path, so every proxied call is covered.
     """
-    jti = request.headers.get("x-caller-session-jti")
+    # ``sid`` is the UI's own stable session id (NOT the JWT ``jti``
+    # claim, which @auth/core re-mints on every encode — a fresh jti
+    # per encode would defeat revocation).
+    jti = request.headers.get("x-caller-session-sid")
     if jti:
         from openexecutive.memory import session_revocation
 

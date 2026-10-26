@@ -81,8 +81,8 @@ async function proxy(req: NextRequest, params: { path: string[] }): Promise<Resp
     headers.set("x-caller-email", callerEmail);
     // C10: the session's jti — backend refuses delegated identities whose
     // jti landed in the revocation table (logout kills copied tokens).
-    const jti = (session as { jti?: string }).jti;
-    if (jti) headers.set("x-caller-session-jti", jti);
+    const sid = (session as { sid?: string }).sid;
+    if (sid) headers.set("x-caller-session-sid", sid);
   }
 
   const init: RequestInit = {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from pydantic import BaseModel
 
 from openexecutive.api.models import SessionSummary
 from openexecutive.api.routes.chat import _resolve_caller_person_id
@@ -20,7 +21,7 @@ def _require_admin_write(request: Request) -> None:
 router = APIRouter()
 
 
-class _RevokeBody(__import__("pydantic").BaseModel):
+class RevokeBody(BaseModel):
     email: str
     jti: str
 
@@ -36,7 +37,7 @@ def _service_identity(request: Request) -> None:
 
 @router.post("/sessions/revoke", status_code=status.HTTP_204_NO_CONTENT,
              dependencies=[Depends(_service_identity)])
-def revoke_session(body: _RevokeBody) -> Response:
+def revoke_session(body: RevokeBody) -> Response:
     """Per-session revoke (C10): marks ``jti`` dead for any later replay.
     Idempotent; durable across restarts (episodic DB row)."""
     from openexecutive.memory import session_revocation

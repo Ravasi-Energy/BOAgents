@@ -74,6 +74,10 @@ async def _bo_not_found(_req: Request, exc: Exception) -> JSONResponse:
 async def _bo_conflict(_req: Request, exc: Exception) -> JSONResponse:
     if isinstance(exc, bot_store.StateError):
         return _bo_json(409, "state_conflict", str(exc))
+    if isinstance(exc, pkg_store.StateError):
+        # OBS-2: un refuz de politica (verificare/manifest/status) nu este
+        # un conflict CAS — cod distinct pentru ca clientul sa-l deosebeasca.
+        return _bo_json(409, "policy_refused", str(exc))
     return _bo_json(409, "version_conflict", str(exc))
 
 

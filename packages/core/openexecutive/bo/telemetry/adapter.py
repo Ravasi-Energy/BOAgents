@@ -164,8 +164,14 @@ class HttpTransport:
     def send(self, event: dict[str, Any]) -> dict[str, Any] | None:
         import urllib.request
 
+        # OBS-4 — single endpoint convention (base + derived paths): the
+        # administered value is a receiver BASE, never a literal URL. Every
+        # envelope kind lands on its canonical path — the same mapping
+        # ``pilot.delivery._kind_url`` applies — so a ConfigApplied and a
+        # telemetry event can never disagree about where the receiver lives.
+        url = self.endpoint.split("/v1/")[0].rstrip("/") + "/v1/telemetry"
         req = urllib.request.Request(
-            self.endpoint,
+            url,
             data=json.dumps(event).encode("utf-8"),
             headers={
                 "Content-Type": "application/json",

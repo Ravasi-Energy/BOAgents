@@ -1,4 +1,11 @@
 import { deniedAuthResponse } from "@/lib/auth-denial";
+import {
+  checkSessionRevocation,
+  sessionIdOf,
+  sessionRefusedResponse,
+  withSessionId,
+  type RevocationAuthority,
+} from "@/lib/session-revocation";
 import NextAuth from "next-auth";
 import Google from "next-auth/providers/google";
 import {
@@ -41,7 +48,7 @@ export const checkEmailAllowed = (email: string) =>
 
 // Fire-and-forget audit call to the backend. Never awaited — auth must never
 // block or expose errors due to audit failures.
-function auditAuth(
+export function auditAuth(
   event_type: string,
   summary: string,
   actor: string | null,
@@ -58,85 +65,15 @@ function auditAuth(
   });
 }
 
-// C10 logout-replay: the signOut event persists the session's jti into
-// the backend revocation table, so a token copied before logout is refused
-// on every later request — across processes and restarts (server-side row),
-// while other sessions of the same user stay valid. Fire-and-forget like
-// auditAuth — a backend hiccup must never break logout itself.
-// Awaited + retried: a logout is not "revoked" until the durable row is
-// written — the backend commits the row before answering 204. Two
-// attempts; a final failure is recorded as an explicit audit event (not
-// silently declared a success), so the gap is visible and investigable.
-async function revokeSession(sid: unknown, email: string | null): Promise<void> {
-  if (typeof sid !== "string" || !sid || !BACKEND_SHARED_SECRET) return;
-  const body = JSON.stringify({ email: email ?? "unknown", jti: sid });
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const resp = await fetch(`${BACKEND_BASE}/sessions/revoke`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-api-key": BACKEND_SHARED_SECRET,
-        },
-        body,
-        signal: AbortSignal.timeout(3000),
-      });
-      if (resp.ok) return;
-    } catch {
-      // fall through to the retry
-    }
-  }
-  auditAuth("auth_logout_revocation_failed",
-    `Revocation write failed after retry: ${email ?? "unknown"}`,
-    email, { sid_prefix: sid.slice(0, 8) });
-}
-
-// Fail-closed revocation check used by the `authorized` callback: the row
-// lives in the backend's durable store, so a copied token stays dead
-// through both processes' restarts.
-async function isSessionRevoked(sid: unknown): Promise<boolean> {
-  if (typeof sid !== "string" || !sid || !BACKEND_SHARED_SECRET) return false;
-  try {
-    const resp = await fetch(`${BACKEND_BASE}/sessions/revoked/${encodeURIComponent(sid)}`, {
-      headers: { "x-api-key": BACKEND_SHARED_SECRET },
-      signal: AbortSignal.timeout(3000),
-    });
-    // 404 = the backend predates the revocation contract — the feature is
-    // absent there, so there is nothing to enforce (neutral, not a deny).
-    // A live backend that errors is different: fail closed.
-    if (resp.status === 404) return false;
-    if (!resp.ok) return true;
-    return (await resp.json())?.revoked === true;
-  } catch {
-    return true; // fail closed — an unverifiable session is a denied session
-  }
-}
-
-// A revoked session CANNOT be a 302 to /signin: Auth.js rolls a fresh
-// copy of the session cookie onto the response AFTER ours, so the
-// still-decodable session makes /signin bounce right back to a gated
-// page — an infinite redirect loop (observed: ERR_TOO_MANY_REDIRECTS).
-// The refusal is a terminal 401 instead: no redirect, no loop; the
-// expired-cookie headers are a best-effort belt-and-suspenders so a
-// client that does drop it reaches a clean anonymous sign-in.
-function revokedAuthResponse(request: Request): Response {
-  const url = new URL(request.url);
-  const headers = new Headers({ "cache-control": "private, no-store" });
-  const expired =
-    "; Path=/; HttpOnly; Expires=Thu, 01 Jan 1970 00:00:00 GMT";
-  headers.append("set-cookie", "authjs.session-token=" + expired);
-  headers.append("set-cookie", "__Secure-authjs.session-token=" + expired);
-  if (url.pathname.startsWith("/api/")) {
-    headers.set("content-type", "application/json");
-    return Response.json(
-      { error: "session_revoked" }, { status: 401, headers });
-  }
-  headers.set("content-type", "text/html; charset=utf-8");
-  return new Response(
-    "<!doctype html><html><body><h1>Sesiunea a fost revocată.</h1>" +
-      '<p><a href="/signin">Autentificați-vă din nou</a></p></body></html>',
-    { status: 401, headers });
-}
+// C10 per-session revocation (contract: A01 /sessions/revoke 204 +
+// /sessions/revoked/{sid}); the decisions live in lib/session-revocation.ts.
+const REVOCATION_TIMEOUT_MS = 3000;
+export const revocationAuthority: RevocationAuthority = {
+  baseUrl: BACKEND_BASE,
+  sharedSecret: BACKEND_SHARED_SECRET,
+  timeoutMs: REVOCATION_TIMEOUT_MS,
+  fetchImpl: (input, init) => fetch(input, init),
+};
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
   // @auth/core auto-detects trustHost via `AUTH_URL ?? AUTH_TRUST_HOST ??
@@ -206,20 +143,12 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       }
       return true;
     },
-    // Every JWT gets a stable per-session id — the revocation key. Assigned
-    // once at sign-in, it survives refresh so logout can name exactly this
-    // session (not the whole account).
-    // sid — OUR session id, distinct from the JWT ``jti`` claim (which
-    // @auth/core re-mints on every encode). Assigned once and then carried
-    // verbatim through every re-encode/refresh, so revocation names all
-    // generations of one session. A token decoded without sid is a legacy
-    // session: it migrates explicitly — a sid is minted here once, encoded
-    // into the rolled cookie, and enforced from then on (no permanent
-    // sid-less bypass).
-    jwt: async ({ token }) => {
-      if (!token.sid) token.sid = crypto.randomUUID();
-      return token;
-    },
+    // sid — OUR stable session id (the JWT `jti` is re-minted by @auth/core
+    // on every encode). Minted only at sign-in, then carried verbatim through
+    // every refresh. A decoded token without sid is a legacy session: null
+    // makes Auth.js clear the cookie, so the user signs in again instead of a
+    // copied cookie getting a fresh, never-revoked sid on every replay.
+    jwt: async ({ token, trigger }) => withSessionId(token, trigger),
     session: async ({ session, token }) => {
       // The proxy route stamps this as x-caller-session-sid for the
       // backend's revocation check; it is never exposed to the page.
@@ -242,7 +171,9 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       // SessionAction, i.e. fail open. This way adding one is a build error.
       // C10: a revoked session loses even before it reaches an endpoint —
       // a copied token must not render pages either.
-      if (await isSessionRevoked((auth as { sid?: string }).sid)) return revokedAuthResponse(request);
+      // Only an explicit `revoked: false` admits; 404/5xx/timeout/bad body deny.
+      const revocation = await checkSessionRevocation(sessionIdOf(auth), revocationAuthority);
+      if (revocation !== "active") return sessionRefusedResponse(request, revocation);
       switch (decideSessionAction(decision)) {
         case "allow":
           return true;
@@ -270,14 +201,14 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       const email = user.email?.toLowerCase() ?? null;
       auditAuth("auth_login", `Login: ${email ?? "unknown"}`, email, { provider: "google" });
     },
-    signOut: async (message) => {
+    // The revocation itself is confirmed (strict 204) by the sign-out route
+    // wrapper BEFORE Auth.js clears the cookie; reaching this event means it
+    // was acknowledged, so this is only the audit trail.
+    signOut: (message) => {
       // JWT strategy sends { token }, session strategy sends { session }.
       const token = "token" in message ? message.token : undefined;
       const email = typeof token?.email === "string" ? token.email.toLowerCase() : null;
       auditAuth("auth_logout", `Logout: ${email ?? "unknown"}`, email, {});
-      // Revoke exactly this session server-side (C10 logout-replay):
-    // awaited, retried, audited on failure — not fire-and-forget.
-      await revokeSession(token?.sid, email);
     },
   },
 });

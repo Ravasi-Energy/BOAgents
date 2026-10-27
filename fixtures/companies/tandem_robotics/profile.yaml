@@ -5,6 +5,7 @@ company:
   founding_year: 2020
   headcount: 420
   annual_revenue_arr: 90000000
+  annual_revenue_arr_currency: USD
   mission: Put a reliable general-purpose humanoid on the warehouse floor that a
     mid-market operator can deploy as a service — no eight-figure capital outlay
     and no in-house robotics team — and have it work a full shift safely alongside
@@ -79,6 +80,7 @@ company:
       - Export-control, tariff, and workplace-safety policy is tracked weekly — it moves deployment
   financials:
     burn_rate_monthly: 14000000
+    burn_rate_currency: USD
     runway_months: 16
     key_metrics:
       robots_deployed: 380

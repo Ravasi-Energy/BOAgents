@@ -5,6 +5,7 @@ company:
   founding_year: 2008
   headcount: 1400
   annual_revenue_arr: 3200000000
+  annual_revenue_arr_currency: USD
   mission: Turn a volatile global crude market into reliable, fairly priced fuel for
     the regional economy — running a safe, efficient Gulf Coast refinery and a
     disciplined trading desk that takes price risk on purpose, never by accident.

@@ -5,6 +5,7 @@ company:
   founding_year: 2019
   headcount: 480
   annual_revenue_arr: 140000000
+  annual_revenue_arr_currency: USD
   mission: Make a genuinely affordable electric crossover that a middle-income
     household can buy without a luxury-tier price tag — and back it with a charging
     and service experience that does not assume you live in a tech hub.
@@ -77,6 +78,7 @@ company:
       - Regulatory and tax-credit changes are tracked weekly — they move the buy decision
   financials:
     burn_rate_monthly: 18000000
+    burn_rate_currency: USD
     runway_months: 14
     key_metrics:
       vehicles_delivered_qtr: 9800

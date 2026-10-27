@@ -1,6 +1,41 @@
 "use client";
 
+import { useState } from "react";
 import { signOut, useSession } from "next-auth/react";
+import { signOutOutcome } from "@/lib/session-revocation";
+
+type LogoutState = "idle" | "pending" | "unconfirmed";
+
+// C10: the server clears the cookie only after the backend acknowledged the
+// revocation (strict 204). Anything else keeps the session and is shown as
+// such, with a retry — never a silent "signed out".
+function useConfirmedSignOut() {
+  const [state, setState] = useState<LogoutState>("idle");
+  const run = async () => {
+    setState("pending");
+    let data: unknown = null;
+    try {
+      data = await signOut({ redirect: false, redirectTo: "/signin" });
+    } catch {
+      data = null;
+    }
+    if (signOutOutcome(data) === "signed_out") {
+      window.location.href = (data as { url: string }).url;
+      return;
+    }
+    setState("unconfirmed");
+  };
+  return { state, run };
+}
+
+function LogoutStatus({ state }: { state: LogoutState }) {
+  if (state !== "unconfirmed") return null;
+  return (
+    <p role="alert" data-logout-state="unconfirmed" className="text-[10px] text-red-500">
+      Deconectarea nu a fost confirmată — sesiunea este încă activă. Reîncercați.
+    </p>
+  );
+}
 
 interface UserBadgeProps {
   /** "sidebar" (vertical, with sign-out below name) or "compact" (single row, name only). */
@@ -18,6 +53,7 @@ interface UserBadgeProps {
 //
 export default function UserBadge({ variant = "compact" }: UserBadgeProps) {
   const { data: session, status } = useSession();
+  const logout = useConfirmedSignOut();
 
   if (status === "loading") {
     return (
@@ -47,14 +83,17 @@ export default function UserBadge({ variant = "compact" }: UserBadgeProps) {
         <div className="flex-1 min-w-0">
           <p className="text-xs font-medium text-fg truncate">{name}</p>
           <p className="text-[10px] text-fg-muted truncate">{user.email}</p>
+          <LogoutStatus state={logout.state} />
         </div>
         <button
           type="button"
-          onClick={() => signOut({ callbackUrl: "/signin" })}
+          onClick={logout.run}
+          disabled={logout.state === "pending"}
+          aria-busy={logout.state === "pending"}
           className="text-[10px] text-fg-muted hover:text-fg transition-colors cursor-pointer flex-shrink-0"
           title="Sign out"
         >
-          Sign out
+          {logout.state === "unconfirmed" ? "Retry sign out" : "Sign out"}
         </button>
       </div>
     );
@@ -65,13 +104,16 @@ export default function UserBadge({ variant = "compact" }: UserBadgeProps) {
     <div className="flex items-center gap-2 text-xs text-fg-muted">
       <Avatar name={initials} image={user.image} size="w-6 h-6" />
       <span className="hidden sm:inline truncate max-w-[160px]">{name}</span>
+      <LogoutStatus state={logout.state} />
       <button
         type="button"
-        onClick={() => signOut({ callbackUrl: "/signin" })}
+        onClick={logout.run}
+        disabled={logout.state === "pending"}
+        aria-busy={logout.state === "pending"}
         className="text-[10px] text-fg-muted hover:text-fg transition-colors cursor-pointer whitespace-nowrap"
         title={`Sign out ${user.email}`}
       >
-        Sign out
+        {logout.state === "unconfirmed" ? "Retry sign out" : "Sign out"}
       </button>
     </div>
   );

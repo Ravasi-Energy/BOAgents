@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import ReactMarkdown from "react-markdown";
+// Images in Markdown go through the shared policy (SafeMarkdown).
+import ReactMarkdown from "@/components/SafeMarkdown";
 import remarkGfm from "remark-gfm";
 import type { BuiltinFileContent } from "@/lib/api";
 

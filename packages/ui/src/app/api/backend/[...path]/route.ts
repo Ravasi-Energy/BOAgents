@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { auth } from "@/auth";
 import { backendUrl } from "@/lib/backend-url";
 import { mutationOriginRefusal, ownOrigins } from "@/lib/request-origin";
+import { sessionIdOf } from "@/lib/session-revocation";
 
 // Streaming-aware proxy to the FastAPI backend. Replaces the `rewrites()` rule
 // in next.config.ts, which buffers SSE responses in dev so the chat stream
@@ -79,10 +80,14 @@ async function proxy(req: NextRequest, params: { path: string[] }): Promise<Resp
     }
     headers.set("x-caller-proxy-secret", proxySecret);
     headers.set("x-caller-email", callerEmail);
-    // C10: the session's jti — backend refuses delegated identities whose
-    // jti landed in the revocation table (logout kills copied tokens).
-    const sid = (session as { sid?: string }).sid;
-    if (sid) headers.set("x-caller-session-sid", sid);
+    // C10: the session's stable sid — the backend refuses delegated
+    // identities whose sid is in the revocation table. No sid = legacy token,
+    // never forwarded without one (the backend would skip its check).
+    const sid = sessionIdOf(session);
+    if (!sid) {
+      return Response.json({ error: "session_unverifiable" }, { status: 401, headers: { "cache-control": "private, no-store" } });
+    }
+    headers.set("x-caller-session-sid", sid);
   }
 
   const init: RequestInit = {

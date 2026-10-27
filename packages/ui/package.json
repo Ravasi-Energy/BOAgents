@@ -24,6 +24,7 @@
     "test:geometry": "node --test scripts/reference-geometry.mjs",
     "test:read-errors": "node --test --test-reporter=junit scripts/read-error-states.mjs",
     "test:person-routes": "node --test --test-reporter=junit scripts/person-route-states.mjs",
+    "test:hydration-date": "node --test --test-reporter=junit scripts/hydration-date-states.mjs",
     "test:review-details": "node --test --test-reporter=junit scripts/review-detail-states.mjs",
     "test:review-actions": "node --test --test-reporter=junit scripts/review-action-states.mjs",
     "test:review-changes": "node --test --test-reporter=junit scripts/review-change-states.mjs",

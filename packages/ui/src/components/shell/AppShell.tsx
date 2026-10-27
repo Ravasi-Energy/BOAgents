@@ -9,7 +9,7 @@ import AskOEPanel from "@/components/askoe/AskOEPanel";
 import BrandMark from "@/components/BrandMark";
 import Icon, { IconName } from "@/components/Icon";
 import UserBadge from "@/components/UserBadge";
-import { breadcrumbCrumbs } from "@/lib/breadcrumb";
+import { breadcrumbCrumbs, segmentText } from "@/lib/breadcrumb";
 import {
   BRIEFING_DESCRIPTION,
   buildPrimaryNav,
@@ -33,7 +33,7 @@ const EXEMPT_EXACT = new Set(["/"]);
 const NAV_GROUPS = buildPrimaryNav();
 
 // Human-readable labels for path segments shown in the breadcrumb.
-// Dynamic segments (slugs / ids) are rendered raw and truncated by CSS.
+// Dynamic segments (slugs / ids) are rendered decoded and truncated by CSS.
 const SEGMENT_LABELS: Record<string, string> = {
   today: "Today",
   review: "Review",
@@ -62,7 +62,7 @@ const SEGMENT_LABELS: Record<string, string> = {
 };
 
 function labelFor(segment: string): string {
-  return SEGMENT_LABELS[segment] ?? segment;
+  return SEGMENT_LABELS[segment] ?? segmentText(segment);
 }
 
 // Is `href` the active section for the current pathname? Active when

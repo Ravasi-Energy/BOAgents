@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
-import ReactMarkdown from 'react-markdown';
+// Images in Markdown go through the shared policy (SafeMarkdown).
+import ReactMarkdown from '@/components/SafeMarkdown';
 import remarkGfm from 'remark-gfm';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 

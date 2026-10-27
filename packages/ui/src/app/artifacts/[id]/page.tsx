@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import ReactMarkdown from "react-markdown";
+// Images in Markdown go through the shared policy (SafeMarkdown).
+import ReactMarkdown from "@/components/SafeMarkdown";
 import remarkGfm from "remark-gfm";
 
 import {

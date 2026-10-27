@@ -85,7 +85,7 @@ for (const firm of FIRMS) {
       const nfd = fs.openSync(dir + '/next.log', 'w');
       next = spawn(process.execPath, SERVER ? [SERVER + '/server.js'] : [NEXT, 'start', '--hostname', '127.0.0.1', '--port', String(np)], { cwd: SERVER || NEXT_DIR, env: { ...process.env, PORT: String(np), HOSTNAME: '127.0.0.1', NEXT_TELEMETRY_DISABLED: '1', AUTH_SECRET: firm.secret, AUTH_URL: O, AUTH_TRUST_HOST: 'true', ALLOWED_EMAILS: firm.admin, BACKEND_BASE_URL: 'http://127.0.0.1:' + bp, BACKEND_SHARED_SECRET: SVC, BACKEND_PROXY_SECRET: PXY }, stdio: ['ignore', nfd, nfd], detached: true });
       fs.closeSync(nfd); await ready(O + '/signin', next);
-      const cookie = await encode({ token: { email: firm.admin, sub: firm.admin }, secret: firm.secret, salt: 'authjs.session-token', maxAge: 3600 });
+      const cookie = await encode({ token: { sid: crypto.randomUUID(), email: firm.admin, sub: firm.admin }, secret: firm.secret, salt: 'authjs.session-token', maxAge: 3600 });
       const api = async (p, init = {}) => { const r = await fetch(O + '/api/backend/bo' + p, { ...init, headers: { cookie: 'authjs.session-token=' + cookie, 'content-type': 'application/json' } }); const t = await r.text(); let body = null; try { body = t ? JSON.parse(t) : null; } catch { body = t; } assert(is2xx(r.status), p + ' ' + r.status + ' ' + t.slice(0, 200)); return body; };
 
       // Data through the product: an artifact draft, a published BoBot simulation, a signed pilot package and one pilot run.

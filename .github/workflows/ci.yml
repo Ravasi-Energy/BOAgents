@@ -228,6 +228,25 @@ jobs:
           path: ${{ runner.temp }}/bo-person-routes
           if-no-files-found: error
 
+      # React #418: "/" is prerendered at build time; the browser clock is moved
+      # to other days/time zones and hydration must stay clean.
+      - name: Hydration across days and time zones
+        if: steps.diff.outputs.ui == 'true'
+        run: |
+          mkdir -p "$BO_HYDRATION_OUTPUT"
+          cd packages/ui
+          npm run --silent test:hydration-date > "$BO_HYDRATION_OUTPUT/JUNIT.xml"
+        env:
+          BO_HYDRATION_OUTPUT: ${{ runner.temp }}/bo-hydration-date
+
+      - name: Hydration regression evidence
+        if: always() && steps.diff.outputs.ui == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bo-hydration-date-${{ github.sha }}
+          path: ${{ runner.temp }}/bo-hydration-date
+          if-no-files-found: error
+
       - name: Review detail and note transport refusal
         if: steps.diff.outputs.ui == 'true'
         run: |

@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { Children, useCallback, useEffect, useState } from "react";
-import ReactMarkdown from "react-markdown";
+// Images in Markdown go through the shared policy (SafeMarkdown).
+import ReactMarkdown from "@/components/SafeMarkdown";
 import remarkGfm from "remark-gfm";
 
 import {
@@ -1621,7 +1622,13 @@ export default function Briefing({ onContinue, showHeader = false, firstName }: 
     return () => { cancelled = true; };
   }, []);
 
-  const dateLabel = new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
+  // The viewer's day, computed after mount: "/" is prerendered at build time,
+  // so a date computed during render would freeze the build day into the HTML
+  // and mismatch on hydration on any other day (React #418).
+  const [dateLabel, setDateLabel] = useState("");
+  useEffect(() => {
+    setDateLabel(new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" }));
+  }, []);
 
   const activeDepts = today?.departments.filter(
     (d) => d.goal_count > 0 || d.awaiting_count > 0

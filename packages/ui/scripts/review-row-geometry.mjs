@@ -67,7 +67,7 @@ for (const firm of FIRMS) {
       const nfd = fs.openSync(dir + '/next.log', 'w');
       next = spawn(process.execPath, SERVER ? [SERVER + '/server.js'] : [NEXT, 'start', '--hostname', '127.0.0.1', '--port', String(np)], { cwd: SERVER || NEXT_DIR, env: { ...process.env, PORT: String(np), HOSTNAME: '127.0.0.1', NEXT_TELEMETRY_DISABLED: '1', AUTH_SECRET: firm.secret, AUTH_URL: O, AUTH_TRUST_HOST: 'true', ALLOWED_EMAILS: firm.admin, BACKEND_BASE_URL: 'http://127.0.0.1:' + bp, BACKEND_SHARED_SECRET: SVC, BACKEND_PROXY_SECRET: PXY }, stdio: ['ignore', nfd, nfd], detached: true });
       fs.closeSync(nfd); await ready(O + '/signin', next);
-      const token = await encode({ token: { email: firm.admin, sub: firm.admin }, secret: firm.secret, salt: 'authjs.session-token', maxAge: 3600 });
+      const token = await encode({ token: { sid: crypto.randomUUID(), email: firm.admin, sub: firm.admin }, secret: firm.secret, salt: 'authjs.session-token', maxAge: 3600 });
       for (const [name, width, height] of VIEWPORTS) {
         const ctx = await browser.newContext({ viewport: { width, height } });
         await ctx.addCookies([{ name: 'authjs.session-token', value: token, url: O }]);

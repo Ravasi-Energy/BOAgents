@@ -4,7 +4,27 @@ import { auth } from "@/auth";
 // Gate every page + non-auth API route. `auth` from NextAuth v5 wraps a
 // handler that injects req.auth; here we use it directly as middleware, which
 // makes unauthenticated requests redirect to the configured sign-in page.
+// A path segment with an invalid percent-escape (e.g. "%E0%A4%A") makes Next's
+// dynamic-param decoding throw after this middleware, which a matched dynamic
+// route ([id], [slug], [...path]) answers with a bare 500. Refuse it here as the
+// client error it is, before routing, uncached like every other gate response.
+function malformedPath(pathname: string): boolean {
+  return pathname.split("/").some((segment) => {
+    try { decodeURIComponent(segment); return false; } catch { return true; }
+  });
+}
+
 export default auth((req) => {
+  if (malformedPath(req.nextUrl.pathname)) {
+    const headers = { "Cache-Control": "private, no-store" };
+    if (req.nextUrl.pathname.startsWith("/api/")) {
+      return Response.json({ error: "malformed_path" }, { status: 400, headers });
+    }
+    return new Response("Adresa nu este codificată corect (URL invalid).", {
+      status: 400, headers: { ...headers, "Content-Type": "text/plain; charset=utf-8" },
+    });
+  }
+
   if (req.auth) {
     // Gated pages are per-user and these responses also carry the rolled
     // session cookie: no shared or browser cache may keep them (prerendered

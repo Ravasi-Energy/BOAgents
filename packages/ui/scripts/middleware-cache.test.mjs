@@ -34,3 +34,16 @@ test('matcher: fonts and Next internals ungated, look-alikes and pages gated', (
   for (const p of ['/fonts/PlusJakartaSans-latin.woff2', '/_next/static/chunks/a.js', '/api/auth/session', '/signin', '/signin/']) assert.equal(re.test(p), false, p);
   for (const p of ['/people', '/api/backend/people', '/fontsX', '/signin-help', '/']) assert.equal(re.test(p), true, p);
 });
+test('a malformed percent-escape is refused 400 before routing, uncached; valid escapes pass', async () => {
+  for (const p of ['/watchlist/bad%E0%A4%A', '/people/%E0', '/x/%ZZ', '/audit/session/%']) {
+    const page = exports.mw(req(p, { email: 'a@x.test' }));
+    assert.equal(page.status, 400, p); assert.equal(page.headers.get('cache-control'), 'private, no-store');
+    assert.match(await page.text(), /URL invalid/);
+  }
+  const api = exports.mw(req('/api/backend/bo/people/%E0', { email: 'a@x.test' }));
+  assert.equal(api.status, 400); assert.deepEqual(await api.json(), { error: 'malformed_path' });
+  assert.equal(api.headers.get('cache-control'), 'private, no-store');
+  const anon = exports.mw(req('/people/%E0', null));
+  assert.equal(anon.status, 400, 'anonymous malformed path is refused, not redirected with it as callback');
+  for (const p of ['/watchlist/alert%3A1', '/people/%3Cimg%20src%3Dx%3E', '/audit/session/a%2Fb', '/']) assert.equal(exports.mw(req(p, { email: 'a@x.test' })).headers.get('x-middleware-next'), '1', p);
+});

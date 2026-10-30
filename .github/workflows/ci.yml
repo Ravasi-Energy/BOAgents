@@ -1,15 +1,8 @@
 name: CI
 
-# CI economy: work branches run through PRs; main runs after integration.
-# The delivery branch codex/livrare-completa additionally runs on every push —
-# exactly once per commit: when a PR is opened from that same branch, the
-# pull_request jobs are skipped below so the push run stays the single run.
+# Ștefan 30.10.2026: fără push/PR/schedule; numai pornire manuală coordonată.
 on:
-  push:
-    branches: [main, codex/livrare-completa]
-    paths-ignore: ['**/*.md']
-  pull_request:
-    paths-ignore: ['**/*.md']
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
@@ -21,9 +14,6 @@ permissions:
 jobs:
   python-lint:
     name: Python lint & type check
-    # Delivery-branch pushes run via `push`; a PR from the same branch would
-    # duplicate that run, so PR events for it are skipped here.
-    if: github.event_name != 'pull_request' || github.head_ref != 'codex/livrare-completa'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -54,7 +44,6 @@ jobs:
 
   python-test:
     name: Python tests
-    if: github.event_name != 'pull_request' || github.head_ref != 'codex/livrare-completa'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -84,7 +73,6 @@ jobs:
 
   ui-typecheck:
     name: UI type check
-    if: github.event_name != 'pull_request' || github.head_ref != 'codex/livrare-completa'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:

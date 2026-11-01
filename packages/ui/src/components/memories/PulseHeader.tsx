@@ -223,6 +223,7 @@ function Heatmap({ days }: { days: DailyActivityCount[] }) {
                   key={di}
                   className={`h-3 w-3 rounded-[3px] ${LEVEL_BG[intensity(cell.count)]}`}
                   title={`${cell.date}: ${cell.count} ${cell.count === 1 ? "action" : "actions"}`}
+                  role="img"
                   aria-label={`${cell.date}: ${cell.count} ${cell.count === 1 ? "action" : "actions"}`}
                 />
               ),

@@ -124,7 +124,7 @@ export default function GuidePage() {
         </div>
       </aside>
 
-      <main ref={scrollRef} className="flex-1 min-w-0 min-h-0 overflow-y-auto">
+      <main tabIndex={0} ref={scrollRef} className="flex-1 min-w-0 min-h-0 overflow-y-auto">
         <div className="max-w-4xl mx-auto px-4 md:px-8 py-10 space-y-20">
           <div>
             <h1 className="text-2xl font-bold text-fg">Open Executive — User Guide</h1>

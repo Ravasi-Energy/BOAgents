@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 // Images in Markdown go through the shared policy (SafeMarkdown).
 import ReactMarkdown from "@/components/SafeMarkdown";
 import remarkGfm from "remark-gfm";
@@ -30,6 +30,9 @@ export default function CompanyPanel({ domains }: CompanyPanelProps) {
   const [viewing, setViewing] = useState<CompanyDocContent | null>(null);
   const [viewLoading, setViewLoading] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
+  const viewInvokerRef = useRef<HTMLButtonElement | null>(null);
+  const viewerTitleId = useId();
 
   useEffect(() => {
     listDocuments()
@@ -40,11 +43,16 @@ export default function CompanyPanel({ domains }: CompanyPanelProps) {
   // Close the viewer modal on Escape.
   useEffect(() => {
     if (!viewing) return;
+    const previous = viewInvokerRef.current ?? document.activeElement;
+    closeRef.current?.focus();
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setViewing(null);
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      if (previous instanceof HTMLElement && previous.isConnected) previous.focus();
+    };
   }, [viewing]);
 
   async function handleFile(file: File) {
@@ -181,7 +189,10 @@ export default function CompanyPanel({ domains }: CompanyPanelProps) {
               </div>
               <div className="flex items-center gap-1">
                 <button
-                  onClick={() => handleView(doc.filename)}
+                  onClick={(event) => {
+                    viewInvokerRef.current = event.currentTarget;
+                    void handleView(doc.filename);
+                  }}
                   disabled={viewLoading === doc.filename}
                   className="text-xs text-indigo-400 hover:text-indigo-300 disabled:opacity-50 px-2 py-1 rounded transition-colors"
                 >
@@ -205,6 +216,27 @@ export default function CompanyPanel({ domains }: CompanyPanelProps) {
           onClick={() => setViewing(null)}
         >
           <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={viewerTitleId}
+            tabIndex={-1}
+            onKeyDown={(event) => {
+              if (event.key !== "Tab") return;
+              const controls = Array.from(event.currentTarget.querySelectorAll<HTMLElement>(
+                'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
+              )).filter((element) => element.getClientRects().length > 0);
+              const first = controls[0], last = controls[controls.length - 1];
+              if (!first) {
+                event.preventDefault();
+                event.currentTarget.focus();
+              } else if (event.shiftKey && document.activeElement === first) {
+                event.preventDefault();
+                last.focus();
+              } else if (!event.shiftKey && document.activeElement === last) {
+                event.preventDefault();
+                first.focus();
+              }
+            }}
             className="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-2xl border border-line-strong bg-surface-elevated shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
@@ -213,18 +245,20 @@ export default function CompanyPanel({ domains }: CompanyPanelProps) {
                 <p className="text-xs font-semibold uppercase tracking-widest text-indigo-400">
                   Company document
                 </p>
-                <h3 className="truncate text-base font-semibold text-fg">
+                <h3 id={viewerTitleId} className="truncate text-base font-semibold text-fg">
                   {viewing.filename}
                 </h3>
               </div>
               <button
+                ref={closeRef}
+                type="button"
                 onClick={() => setViewing(null)}
                 className="flex-shrink-0 rounded-lg px-3 py-1.5 text-xs text-fg-muted hover:bg-surface-overlay hover:text-fg transition-colors"
               >
                 Close
               </button>
             </div>
-            <div className={`flex-1 overflow-y-auto px-6 py-5 ${PROSE_CLASS}`}>
+            <div role="region" aria-label={`${viewing.filename} document content`} tabIndex={0} className={`flex-1 overflow-y-auto px-6 py-5 ${PROSE_CLASS}`}>
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{viewing.content}</ReactMarkdown>
             </div>
           </div>

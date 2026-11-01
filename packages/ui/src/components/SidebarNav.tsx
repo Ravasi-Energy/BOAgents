@@ -69,7 +69,7 @@ export default function SidebarNav({
       </button>
       {/* Pulse — pinned beside Briefing/New chat as an always-visible
           destination, mirroring the persistent rail. */}
-      <Link
+      <Link prefetch={false}
         href={PULSE_NAV_ITEM.href}
         onClick={onNavigate}
         title={PULSE_NAV_ITEM.description}
@@ -107,7 +107,7 @@ export default function SidebarNav({
             {!collapsed && (
               <div className="space-y-0.5 mt-0.5">
                 {section.items.map((entry) => (
-                  <Link
+                  <Link prefetch={false}
                     key={entry.href}
                     href={entry.href}
                     onClick={onNavigate}

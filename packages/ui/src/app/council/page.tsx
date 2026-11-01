@@ -449,7 +449,7 @@ export default function CouncilPage() {
                         {draft.prompt.length} chars
                       </span>
                     </div>
-                    <textarea
+                    <textarea aria-label="System prompt"
                       value={draft.prompt}
                       onChange={(e) => setDraft({ ...draft, prompt: e.target.value })}
                       rows={20}
@@ -483,7 +483,7 @@ export default function CouncilPage() {
                       contract (output format, recency / grounding / actionability bars)
                       is fixed and not editable here.
                     </p>
-                    <textarea
+                    <textarea aria-label="Research focus"
                       value={draft.research_focus ?? ""}
                       onChange={(e) =>
                         setDraft({ ...draft, research_focus: e.target.value })
@@ -535,7 +535,7 @@ export default function CouncilPage() {
                     <label className="block text-[10px] font-semibold uppercase tracking-widest text-fg-muted mb-1">
                       Active persona
                     </label>
-                    <select
+                    <select aria-label="Active persona"
                       value={draft.voice_persona_slug ?? "default"}
                       onChange={(e) => setDraft({ ...draft, voice_persona_slug: e.target.value === "default" ? null : e.target.value })}
                       className="w-full px-3 py-2 rounded-lg bg-surface border border-line text-fg focus:border-indigo-500/40 focus:outline-none text-sm"
@@ -576,7 +576,7 @@ export default function CouncilPage() {
                         placeholder="Display name"
                         className="w-full px-3 py-2 rounded-lg bg-surface border border-line text-fg focus:border-indigo-500/40 focus:outline-none text-sm"
                       />
-                      <textarea
+                      <textarea aria-label="Persona instructions"
                         value={personaBodyDraft}
                         onChange={(e) => setPersonaBodyDraft(e.target.value)}
                         rows={12}

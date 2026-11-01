@@ -15,6 +15,32 @@ import {
 const none = parseImagePolicy(undefined);
 const listed = parseImagePolicy(' https://img.example.com , https://cdn.example.org/ ,data:raster, http://plain.example.com, https://x.example.com/path, https://u:p@y.example.com, not a url, https://img.example.com ');
 
+test('valid escaped percent filenames remain permitted local assets', () => {
+  for (const src of ['/images/100%25.png', '/images/%2525.png', '/images/caf%C3%A9.png', '/images/a%20b.png']) {
+    assert.deepEqual(decideImage(src, none), { allow: true, url: src, kind: 'relative' }, src);
+  }
+});
+
+test('encoded API path segments cannot become credentialed Markdown image requests', () => {
+  for (const src of [
+    '/%61pi/backend/health',
+    '/api%2fbackend%2fhealth',
+    '/%2561pi/backend/health',
+    '/asset/..%2fapi/backend/health',
+    '/%61%70%69',
+    '/%2e/api/backend/health',
+    '/assets%2f..%2fapi/backend/health',
+    '/api%5cbackend%5chealth',
+  ]) {
+    const decision = decideImage(src, none);
+    assert.equal(decision.allow, false, src);
+    assert.equal(decision.reason, 'api', src);
+  }
+  for (const src of ['/images/caf%C3%A9.png', '/images/api.png', '/api-logo.png']) {
+    assert.deepEqual(decideImage(src, none), { allow: true, url: src, kind: 'relative' });
+  }
+});
+
 test('policy parsing keeps only https origins', () => {
   assert.deepEqual(none, { origins: [], rejected: [] });
   assert.deepEqual(listed.origins, ['https://img.example.com', 'https://cdn.example.org']);

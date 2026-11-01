@@ -58,7 +58,24 @@ export function decideImage(src: unknown, policy: ImagePolicy): ImageDecision {
   try { url = new URL(raw, BASE); } catch { return { allow: false, reason: "invalid", host: null }; }
   if (!absolute) {
     if (url.origin !== BASE) return { allow: false, reason: "invalid", host: null };
-    if (url.pathname === "/api" || url.pathname.startsWith("/api/")) return { allow: false, reason: "api", host: null };
+    // Check decoded paths as well: routers can decode encoded segments and
+    // separators before dispatch. Reparse each layer to normalize dot segments
+    // and backslashes, while keeping the original URL for permitted assets.
+    let pathname = url.pathname;
+    for (let depth = 0; ; depth++) {
+      if (pathname === "/api" || pathname.startsWith("/api/")) return { allow: false, reason: "api", host: null };
+      // Decoding %25 leaves a literal percent in a valid asset filename.
+      // Only another escape triplet needs a further decoding pass.
+      if (!/%[0-9a-f]{2}/i.test(pathname)) break;
+      if (depth === 8) return { allow: false, reason: "invalid", host: null };
+      try {
+        const decoded = decodeURIComponent(pathname);
+        const normalized = new URL(decoded, BASE);
+        if (normalized.origin !== BASE) return { allow: false, reason: "invalid", host: null };
+        if (normalized.pathname === pathname) break;
+        pathname = normalized.pathname;
+      } catch { return { allow: false, reason: "invalid", host: null }; }
+    }
     return { allow: true, url: raw, kind: "relative" };
   }
   if (url.protocol !== "https:" && url.protocol !== "http:") return { allow: false, reason: "scheme", host: null };

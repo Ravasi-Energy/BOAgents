@@ -272,7 +272,7 @@ export default function HomePage() {
             for admin/power tools), kept out of the primary groups above so
             day-to-day nav stays focused. */}
         <div className="px-2 py-2 border-t border-line flex-shrink-0 space-y-0.5">
-          <Link
+          <Link prefetch={false}
             href={GUIDE_NAV_ITEM.href}
             onClick={() => setMobileNavOpen(false)}
             title={GUIDE_NAV_ITEM.description}
@@ -281,7 +281,7 @@ export default function HomePage() {
             <Icon name={GUIDE_NAV_ITEM.icon} size="w-4 h-4" />
             <span className="flex-1">{GUIDE_NAV_ITEM.label}</span>
           </Link>
-          <Link
+          <Link prefetch={false}
             href={SETTINGS_NAV_ITEM.href}
             onClick={() => setMobileNavOpen(false)}
             title={SETTINGS_NAV_ITEM.description}
@@ -337,7 +337,7 @@ export default function HomePage() {
             <p className="text-xs text-fg-muted">
               No company profile — responses will be generic.
             </p>
-            <Link href="/onboard" className="text-xs text-indigo-400 hover:text-indigo-300 font-medium transition-colors whitespace-nowrap cursor-pointer">
+            <Link prefetch={false} href="/onboard" className="text-xs text-indigo-400 hover:text-indigo-300 font-medium transition-colors whitespace-nowrap cursor-pointer">
               Set up profile →
             </Link>
           </div>

@@ -2305,7 +2305,14 @@ export async function createPerson(body: PersonCreate): Promise<Person> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`Failed to create person: ${res.statusText}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    const detail: unknown = body?.detail;
+    const message = detail && typeof detail === "object" && "message" in detail
+      && typeof detail.message === "string" ? detail.message : null;
+    const reason = message || (detail != null ? boErrorDetail(detail) : "");
+    throw new Error(`Failed to create person: HTTP ${res.status} ${res.statusText}${reason ? ` — ${reason}` : ""}`);
+  }
   return res.json();
 }
 

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 
 import { useAskOEFormContext } from "@/components/askoe/AskOEContext";
 import { createPerson, listPeople, type PageFormField, type Person } from "@/lib/api";
@@ -135,9 +135,14 @@ function AddPersonModal({ onCreated, onClose }: AddPersonModalProps) {
   const [showContact, setShowContact] = useState(false);
   const [showAuthority, setShowAuthority] = useState(false);
   const nameRef = useRef<HTMLInputElement>(null);
+  const titleId = useId();
 
   useEffect(() => {
+    const previous = document.activeElement;
     nameRef.current?.focus();
+    return () => {
+      if (previous instanceof HTMLElement && previous.isConnected) previous.focus();
+    };
   }, []);
 
   // Registered with Ask OE for the modal's lifetime — closing the modal
@@ -273,10 +278,36 @@ function AddPersonModal({ onCreated, onClose }: AddPersonModalProps) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={saving ? undefined : onClose}>
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
         className="w-full max-w-lg bg-surface border border-line rounded-2xl shadow-2xl p-6 mx-4 max-h-[90vh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            if (!saving) onClose();
+          } else if (event.key === "Tab") {
+            const controls = Array.from(event.currentTarget.querySelectorAll<HTMLElement>(
+              'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
+            )).filter((element) => element.getClientRects().length > 0);
+            const first = controls[0], last = controls[controls.length - 1];
+            if (!first) {
+              event.preventDefault();
+              event.currentTarget.focus();
+            } else if (event.shiftKey && document.activeElement === first) {
+              event.preventDefault();
+              last.focus();
+            } else if (!event.shiftKey && document.activeElement === last) {
+              event.preventDefault();
+              first.focus();
+            }
+          }
+        }}
       >
-        <h2 className="text-base font-semibold text-fg mb-4">Add person</h2>
+        <h2 id={titleId} className="text-base font-semibold text-fg mb-4">Add person</h2>
 
         <div className="space-y-3">
           {/* Always-visible: the 10-second path */}
@@ -436,7 +467,7 @@ function AddPersonModal({ onCreated, onClose }: AddPersonModalProps) {
 
         </div>
 
-        {err && <p className="text-xs text-rose-300 mt-3">{err}</p>}
+        {err && <p role="alert" className="text-xs text-rose-300 mt-3">{err}</p>}
 
         <div className="flex gap-2 mt-5">
           <button

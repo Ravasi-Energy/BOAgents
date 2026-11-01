@@ -3,10 +3,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import Icon from "@/components/Icon";
-import Message from "@/components/Message";
+import dynamic from "next/dynamic";
 import { useAskOE } from "@/components/askoe/AskOEContext";
 import type { ActionTaken, FormPatch } from "@/lib/api";
 import { streamChat } from "@/lib/api";
+
+// The closed panel has no messages. Load Markdown only when a message renders,
+// while keeping panel state mounted across open/close.
+const Message = dynamic(() => import("@/components/Message"));
 
 // One proposal card per form_patch event: what was applied/skipped, the
 // Executive's rationale, and an Undo that restores the pre-patch values.

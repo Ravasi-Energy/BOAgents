@@ -397,7 +397,7 @@ function BuilderInner() {
         <div className="grid sm:grid-cols-2 gap-4">
           <div>
             <label className={labelCls}>Name (snake_case, unique)</label>
-            <input
+            <input aria-label="Name (snake_case, unique)"
               className={`${inputCls} ${suggestedCls("name")}`}
               value={name}
               disabled={!!editName}
@@ -407,7 +407,7 @@ function BuilderInner() {
           </div>
           <div>
             <label className={labelCls}>Title</label>
-            <input
+            <input aria-label="Title"
               className={`${inputCls} ${suggestedCls("title")}`}
               value={title}
               onChange={(e) => { setTitle(e.target.value); clearSuggested("title"); }}
@@ -417,7 +417,7 @@ function BuilderInner() {
         </div>
         <div>
           <label className={labelCls}>Description</label>
-          <input
+          <input aria-label="Description"
             className={`${inputCls} ${suggestedCls("description")}`}
             value={description}
             onChange={(e) => { setDescription(e.target.value); clearSuggested("description"); }}
@@ -427,7 +427,7 @@ function BuilderInner() {
         <div className="grid sm:grid-cols-2 gap-4">
           <div>
             <label className={labelCls}>Section</label>
-            <select
+            <select aria-label="Section"
               className={`${inputCls} ${suggestedCls("section")}`}
               value={section}
               onChange={(e) => { setSection(e.target.value as WorkflowSection); clearSuggested("section"); }}
@@ -441,7 +441,7 @@ function BuilderInner() {
           </div>
           <div>
             <label className={labelCls}>Estimated minutes</label>
-            <input
+            <input aria-label="Estimated minutes"
               type="number"
               min={1}
               max={120}
@@ -487,7 +487,7 @@ function BuilderInner() {
           >
             <div>
               <label className={labelCls}>Field name</label>
-              <input
+              <input aria-label="Field name"
                 className={inputCls}
                 value={f.name}
                 onChange={(e) => updateField(i, { name: e.target.value })}
@@ -496,7 +496,7 @@ function BuilderInner() {
             </div>
             <div>
               <label className={labelCls}>Label</label>
-              <input
+              <input aria-label="Label"
                 className={inputCls}
                 value={f.label}
                 onChange={(e) => updateField(i, { label: e.target.value })}
@@ -586,7 +586,7 @@ function BuilderInner() {
               <label className={labelCls}>
                 Cadence (daily@HH:MM / weekly@DOW@HH:MM / quarterly@DD-HH:MM, UTC)
               </label>
-              <input
+              <input aria-label="Cadence (daily@HH:MM / weekly@DOW@HH:MM / quarterly@DD-HH:MM, UTC)"
                 className={`${inputCls} ${suggestedCls("cadence")}`}
                 value={cadence}
                 onChange={(e) => { setCadence(e.target.value); clearSuggested("cadence"); }}
@@ -595,7 +595,7 @@ function BuilderInner() {
             </div>
             <div>
               <label className={labelCls}>Deliver artifact to</label>
-              <select
+              <select aria-label="Deliver artifact to"
                 className={`${inputCls} ${suggestedCls("cadence_person_id")}`}
                 value={cadencePersonId}
                 onChange={(e) => { setCadencePersonId(Number(e.target.value)); clearSuggested("cadence_person_id"); }}
@@ -686,7 +686,7 @@ function StepEditor({
       <div className="grid sm:grid-cols-2 gap-3">
         <div>
           <label className={labelCls}>Step id</label>
-          <input
+          <input aria-label="Step id"
             className={inputCls}
             value={step.id}
             onChange={(e) => onChange({ id: e.target.value })}
@@ -694,7 +694,7 @@ function StepEditor({
         </div>
         <div>
           <label className={labelCls}>Title</label>
-          <input
+          <input aria-label="Title"
             className={inputCls}
             value={step.title}
             onChange={(e) => onChange({ title: e.target.value })}
@@ -706,7 +706,7 @@ function StepEditor({
         <>
           <div>
             <label className={labelCls}>Specialist</label>
-            <select
+            <select aria-label="Specialist"
               className={inputCls}
               value={step.specialist}
               onChange={(e) => onChange({ specialist: e.target.value })}
@@ -720,7 +720,7 @@ function StepEditor({
           </div>
           <div>
             <label className={labelCls}>Goal (use {"{field}"} placeholders)</label>
-            <textarea
+            <textarea aria-label="Goal (use {field} placeholders)"
               className={`${inputCls} min-h-[80px]`}
               value={step.goal}
               onChange={(e) => onChange({ goal: e.target.value })}
@@ -728,7 +728,7 @@ function StepEditor({
           </div>
           <div>
             <label className={labelCls}>Knowledge base query (optional)</label>
-            <input
+            <input aria-label="Knowledge base query (optional)"
               className={inputCls}
               value={step.rag_query ?? ""}
               onChange={(e) => onChange({ rag_query: e.target.value })}
@@ -741,7 +741,7 @@ function StepEditor({
         <>
           <div>
             <label className={labelCls}>Ask which person</label>
-            <select
+            <select aria-label="Ask which person"
               className={inputCls}
               value={step.person_id}
               onChange={(e) => onChange({ person_id: Number(e.target.value) })}
@@ -756,7 +756,7 @@ function StepEditor({
           </div>
           <div>
             <label className={labelCls}>Question</label>
-            <textarea
+            <textarea aria-label="Question"
               className={`${inputCls} min-h-[60px]`}
               value={step.question}
               onChange={(e) => onChange({ question: e.target.value })}
@@ -765,7 +765,7 @@ function StepEditor({
           <div className="grid sm:grid-cols-2 gap-3">
             <div>
               <label className={labelCls}>Timeout (hours)</label>
-              <input
+              <input aria-label="Timeout (hours)"
                 type="number"
                 min={1}
                 max={720}
@@ -776,7 +776,7 @@ function StepEditor({
             </div>
             <div>
               <label className={labelCls}>On timeout</label>
-              <select
+              <select aria-label="On timeout"
                 className={inputCls}
                 value={step.on_timeout ?? "escalate"}
                 onChange={(e) =>
@@ -798,7 +798,7 @@ function StepEditor({
         <>
           <div>
             <label className={labelCls}>Synthesis specialist</label>
-            <select
+            <select aria-label="Synthesis specialist"
               className={inputCls}
               value={step.specialist ?? "cso"}
               onChange={(e) => onChange({ specialist: e.target.value })}
@@ -814,7 +814,7 @@ function StepEditor({
             <label className={labelCls}>
               Instructions (optional — leave blank to just concatenate sections)
             </label>
-            <textarea
+            <textarea aria-label="Instructions (optional — leave blank to just concatenate sections)"
               className={`${inputCls} min-h-[60px]`}
               value={step.instructions ?? ""}
               onChange={(e) => onChange({ instructions: e.target.value })}

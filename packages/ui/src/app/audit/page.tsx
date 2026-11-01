@@ -454,7 +454,7 @@ function AuditPageInner() {
               onChange={(e) => setQ(e.target.value)}
               className="md:col-span-2 px-3 py-1.5 rounded-lg bg-surface-elevated border border-line text-sm focus:outline-none focus:border-indigo-500 placeholder-fg-subtle"
             />
-            <select
+            <select aria-label="Event type"
               value={eventType}
               onChange={(e) => setEventType(e.target.value)}
               className="px-3 py-1.5 rounded-lg bg-surface-elevated border border-line text-sm focus:outline-none focus:border-indigo-500"

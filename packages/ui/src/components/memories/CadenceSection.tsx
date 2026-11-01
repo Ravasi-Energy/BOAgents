@@ -92,7 +92,7 @@ export default function CadenceSection() {
             scheduler is running and a company profile is set.
           </div>
         ) : (
-          <div className="max-h-[32rem] overflow-y-auto pr-1 space-y-6">
+          <div tabIndex={0} className="max-h-[32rem] overflow-y-auto pr-1 space-y-6">
             <RhythmBlock
               title="Daily rhythm"
               subtitle="Your daily briefing cycle — the morning brief and end-of-day digest land in your inbox; the reflection sets up the morning brief."
@@ -242,7 +242,7 @@ function RecentActivity() {
       {/* Fixed-height scroll region so the feed scrolls internally instead of
           growing the page. The timeline line lives on the inner <ol> (sized to
           the full list) so it scrolls with the rows rather than clipping. */}
-      <div className="max-h-[32rem] overflow-y-auto pr-1">
+      <div tabIndex={0} className="max-h-[32rem] overflow-y-auto pr-1">
         <ol className="relative space-y-3 before:absolute before:left-[3px] before:top-1.5 before:bottom-1.5 before:w-px before:bg-line">
           {items.map((it, i) => {
             const { relative } = formatRunAt(it.at);
@@ -494,7 +494,7 @@ export function FollowUpsCard() {
         icon="flag"
         subtitle="One-off commitments the Executive scheduled for you."
       />
-      <div className="max-h-[32rem] overflow-y-auto pr-1 divide-y divide-line">
+      <div tabIndex={0} className="max-h-[32rem] overflow-y-auto pr-1 divide-y divide-line">
         {followups.map((a) => (
           <FollowUpRow
             key={a.id}

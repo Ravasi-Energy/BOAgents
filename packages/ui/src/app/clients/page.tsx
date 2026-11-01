@@ -608,7 +608,7 @@ export default function ClientsPage() {
               placeholder="Client company name"
               className="flex-1 rounded-lg border border-line bg-surface px-3 py-2 text-sm text-fg placeholder:text-fg-muted focus:outline-none focus:border-line-strong"
             />
-            <select
+            <select aria-label="New client source"
               value={source}
               onChange={(e) => setSource(e.target.value as "current" | "blank")}
               className="rounded-lg border border-line bg-surface px-3 py-2 text-sm text-fg focus:outline-none"
@@ -711,7 +711,7 @@ export default function ClientsPage() {
           ) : (
             <div className="mt-3">
               <div className="flex flex-col sm:flex-row gap-2 sm:items-center">
-                <input
+                <input aria-label="Draft client name"
                   value={draftName}
                   onChange={(e) => setDraftName(e.target.value)}
                   className="flex-1 rounded-lg border border-line bg-surface px-3 py-2 text-sm text-fg focus:outline-none focus:border-line-strong"
@@ -861,7 +861,7 @@ export default function ClientsPage() {
                           placeholder="Your role (e.g. Fractional CFO)"
                           className="rounded border border-line bg-surface-elevated px-2 py-1.5 text-xs text-fg placeholder:text-fg-muted focus:outline-none"
                         />
-                        <select
+                        <select aria-label="Client status"
                           value={metaForm.status ?? "active"}
                           onChange={(e) => setMetaForm({ ...metaForm, status: e.target.value })}
                           className="rounded border border-line bg-surface-elevated px-2 py-1.5 text-xs text-fg focus:outline-none"

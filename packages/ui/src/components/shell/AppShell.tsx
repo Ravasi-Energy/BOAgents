@@ -149,7 +149,7 @@ function Rail({
       `}
     >
       <div className="px-4 py-4 border-b border-line flex items-center justify-between flex-shrink-0">
-        <Link
+        <Link prefetch={false}
           href="/"
           onClick={onClose}
           className="flex items-center gap-2.5 min-w-0 text-fg hover:opacity-80 transition-opacity"
@@ -284,7 +284,7 @@ function RailLink({
       ? "text-indigo-300 hover:text-indigo-200 hover:bg-surface-overlay"
       : "text-fg-muted hover:text-fg hover:bg-surface-overlay";
   return (
-    <Link href={href} onClick={onClick} title={description} className={`${base} ${tone}`}>
+    <Link prefetch={false} href={href} onClick={onClick} title={description} className={`${base} ${tone}`}>
       <Icon name={icon} size="w-4 h-4" />
       <span className="flex-1 truncate">{label}</span>
     </Link>
@@ -326,7 +326,7 @@ function TopBar({
                     <Icon name="chevron-right" size="w-3 h-3" className="text-fg-subtle flex-shrink-0" />
                   )}
                   {!isLast && c.href ? (
-                    <Link
+                    <Link prefetch={false}
                       href={c.href}
                       className="text-sm text-fg-muted hover:text-fg transition-colors truncate"
                     >
@@ -400,7 +400,7 @@ export function MobileBottomNav({
       {MOBILE_PRIMARY.map((item) => {
         const active = isActive(item.href, pathname);
         return (
-          <Link
+          <Link prefetch={false}
             key={item.href}
             href={item.href}
             title={item.description}

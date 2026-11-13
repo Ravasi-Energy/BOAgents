@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel
 
 from openexecutive.bo.identity import require_http
@@ -54,8 +54,11 @@ class AdviceUpdate(BaseModel):
 
 
 @router.get("/memories/decisions", response_model=list[Decision])
-def get_decisions() -> list[Decision]:
-    return list_decisions()
+def get_decisions(
+    limit: int = Query(default=500, ge=1, le=5000),
+    offset: int = Query(default=0, ge=0),
+) -> list[Decision]:
+    return list_decisions(limit=limit, offset=offset)
 
 
 @router.patch("/memories/decisions/{decision_id}", response_model=Decision, dependencies=[Depends(_require_admin_write)])
@@ -79,8 +82,11 @@ def remove_decision(decision_id: int) -> Response:
 
 
 @router.get("/memories/initiatives", response_model=list[Initiative])
-def get_initiatives() -> list[Initiative]:
-    return list_initiatives()
+def get_initiatives(
+    limit: int = Query(default=500, ge=1, le=5000),
+    offset: int = Query(default=0, ge=0),
+) -> list[Initiative]:
+    return list_initiatives(limit=limit, offset=offset)
 
 
 @router.patch("/memories/initiatives/{initiative_id}", response_model=Initiative, dependencies=[Depends(_require_admin_write)])
@@ -104,8 +110,11 @@ def remove_initiative(initiative_id: int) -> Response:
 
 
 @router.get("/memories/advice", response_model=list[Advice])
-def get_advice_list() -> list[Advice]:
-    return list_advice()
+def get_advice_list(
+    limit: int = Query(default=500, ge=1, le=5000),
+    offset: int = Query(default=0, ge=0),
+) -> list[Advice]:
+    return list_advice(limit=limit, offset=offset)
 
 
 @router.patch("/memories/advice/{advice_id}", response_model=Advice, dependencies=[Depends(_require_admin_write)])

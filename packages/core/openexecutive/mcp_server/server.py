@@ -178,7 +178,7 @@ async def departments_state() -> str:
 async def memory_decisions() -> str:
     from openexecutive.memory.episodic import list_decisions
 
-    rows = await asyncio.to_thread(list_decisions)
+    rows = await asyncio.to_thread(list_decisions, limit=500)
     return _json([r.model_dump(mode="json") for r in rows])
 
 
@@ -191,7 +191,7 @@ async def memory_decisions() -> str:
 async def memory_initiatives() -> str:
     from openexecutive.memory.episodic import list_initiatives
 
-    rows = await asyncio.to_thread(list_initiatives)
+    rows = await asyncio.to_thread(list_initiatives, limit=500)
     return _json([r.model_dump(mode="json") for r in rows])
 
 
@@ -204,7 +204,7 @@ async def memory_initiatives() -> str:
 async def memory_advice() -> str:
     from openexecutive.memory.episodic import list_advice
 
-    rows = await asyncio.to_thread(list_advice)
+    rows = await asyncio.to_thread(list_advice, limit=500)
     return _json([r.model_dump(mode="json") for r in rows])
 
 

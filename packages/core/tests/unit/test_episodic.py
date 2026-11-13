@@ -822,3 +822,28 @@ def test_extract_and_store_drops_initiative_with_hallucinated_quote(
     assert ep.list_initiatives(db_path=db) == [], (
         "initiative with hallucinated user_commitment_quote must be dropped"
     )
+
+
+def test_listele_istorice_sunt_marginite_si_paginate(db: Path) -> None:
+    """NV2-P2/P3: citirile nemarginite de istoric au LIMIT/OFFSET —
+    consumatorii HTTP/MCP nu materializeaza toata istoria intr-un
+    raspuns; limit=None ramane doar pentru exportul complet."""
+    for i in range(7):
+        store_decision("strategy", f"decizia-{i}", db_path=db)
+        store_advice("ops", "q", f"sfat-{i}", db_path=db)
+    for i in range(5):
+        store_initiative(f"initiativa-{i}", "active", db_path=db)
+
+    # complet ramane disponibil explicit (export)
+    assert len(list_decisions(db_path=db)) == 7
+    assert len(list_advice(db_path=db)) == 7
+    assert len(list_initiatives(db_path=db)) == 5
+
+    # marginit + paginat, ordine descrescatoare pastrata
+    pagina1 = list_decisions(db_path=db, limit=3)
+    pagina2 = list_decisions(db_path=db, limit=3, offset=3)
+    assert len(pagina1) == 3 and len(pagina2) == 3
+    assert pagina1[0].summary == "decizia-6"
+    assert pagina2[0].summary == "decizia-3"
+    assert list_advice(db_path=db, limit=2)[0].advice_summary == "sfat-6"
+    assert len(list_initiatives(db_path=db, limit=2)) == 2

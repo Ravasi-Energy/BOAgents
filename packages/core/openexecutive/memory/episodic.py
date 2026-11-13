@@ -642,33 +642,47 @@ def get_recent_initiatives(
     return [Initiative(**dict(row)) for row in rows]
 
 
-def list_decisions(db_path: Path = DB_PATH) -> list[Decision]:
+def list_decisions(db_path: Path = DB_PATH, *, limit: int | None = None,
+                   offset: int = 0) -> list[Decision]:
+    """limit=None pastreaza citirea completa (export/fixture); rutele
+    HTTP/MCP transmit o margine explicita — istoricul creste nemarginit."""
     if not db_path.exists():
         return []
+    sql = "SELECT * FROM decisions ORDER BY timestamp DESC"
+    params: tuple = ()
+    if limit is not None:
+        sql += " LIMIT ? OFFSET ?"
+        params = (limit, offset)
     with _get_conn(db_path) as conn:
-        rows = conn.execute(
-            "SELECT * FROM decisions ORDER BY timestamp DESC"
-        ).fetchall()
+        rows = conn.execute(sql, params).fetchall()
     return [Decision(**dict(row)) for row in rows]
 
 
-def list_initiatives(db_path: Path = DB_PATH) -> list[Initiative]:
+def list_initiatives(db_path: Path = DB_PATH, *, limit: int | None = None,
+                     offset: int = 0) -> list[Initiative]:
     if not db_path.exists():
         return []
+    sql = "SELECT * FROM initiatives ORDER BY updated_at DESC"
+    params: tuple = ()
+    if limit is not None:
+        sql += " LIMIT ? OFFSET ?"
+        params = (limit, offset)
     with _get_conn(db_path) as conn:
-        rows = conn.execute(
-            "SELECT * FROM initiatives ORDER BY updated_at DESC"
-        ).fetchall()
+        rows = conn.execute(sql, params).fetchall()
     return [Initiative(**dict(row)) for row in rows]
 
 
-def list_advice(db_path: Path = DB_PATH) -> list[Advice]:
+def list_advice(db_path: Path = DB_PATH, *, limit: int | None = None,
+                offset: int = 0) -> list[Advice]:
     if not db_path.exists():
         return []
+    sql = "SELECT * FROM advice_given ORDER BY timestamp DESC"
+    params: tuple = ()
+    if limit is not None:
+        sql += " LIMIT ? OFFSET ?"
+        params = (limit, offset)
     with _get_conn(db_path) as conn:
-        rows = conn.execute(
-            "SELECT * FROM advice_given ORDER BY timestamp DESC"
-        ).fetchall()
+        rows = conn.execute(sql, params).fetchall()
     return [Advice(**dict(row)) for row in rows]
 
 

@@ -31,6 +31,7 @@ const HEATMAP_DAYS = 90;
 interface HeaderData {
   pending: ScheduledAction[];
   memoriesTotal: number;
+  memoriesHasMore: boolean;
   heatmap: DailyActivityCount[];
 }
 
@@ -45,9 +46,9 @@ export default function PulseHeader() {
 
     Promise.all([
       listScheduledActions("pending", 200, controller.signal),
-      listDecisions(),
-      listInitiatives(),
-      listAdvice(),
+      listDecisions({limit:101,offset:0,signal:controller.signal}),
+      listInitiatives({limit:101,offset:0,signal:controller.signal}),
+      listAdvice({limit:101,offset:0,signal:controller.signal}),
       getActivityDaily(HEATMAP_DAYS, controller.signal),
     ])
       .then(([pending, decisions, initiatives, advice, daily]) => {
@@ -55,6 +56,7 @@ export default function PulseHeader() {
         setData({
           pending,
           memoriesTotal: decisions.length + initiatives.length + advice.length,
+          memoriesHasMore: [decisions,initiatives,advice].some(rows=>rows.length===101),
           heatmap: daily.days,
         });
       })
@@ -133,7 +135,7 @@ interface Stat {
   tone?: "default" | "accent" | "emerald" | "amber";
 }
 
-function deriveStats({ pending, memoriesTotal, heatmap }: HeaderData): Stat[] {
+function deriveStats({ pending, memoriesTotal, memoriesHasMore, heatmap }: HeaderData): Stat[] {
   const groups = groupByRhythm(pending);
   const followups = pending.filter((a) => a.kind === "ad_hoc").length;
 
@@ -155,7 +157,7 @@ function deriveStats({ pending, memoriesTotal, heatmap }: HeaderData): Stat[] {
     { label: "Daily rhythms", value: groups.daily.length },
     { label: "Dept check-ins", value: groups.departments.length },
     { label: "Follow-ups", value: followups },
-    { label: "Memories", value: memoriesTotal },
+    { label: "Memories observed", value: memoriesHasMore?`≥${memoriesTotal}`:memoriesTotal, hint: "Three bounded first-page reads; not a snapshot total" },
   ];
 }
 

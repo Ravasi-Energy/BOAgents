@@ -6,6 +6,7 @@ import {
   deleteDecision,
   deleteInitiative,
   listAdvice,
+  memoryCursorFor,
   listDecisions,
   listInitiatives,
   updateAdvice,
@@ -19,6 +20,7 @@ import { DOMAINS, STATUSES, EmptyState, formatDate } from "./shared";
 
 type MemoryTab = "decisions" | "initiatives" | "advice";
 
+const MEMORY_PAGE_SIZE = 100;
 const MEMORY_EMPTY = "No memories yet — they're extracted automatically after chats.";
 
 // ---------------------------------------------------------------------------
@@ -27,10 +29,7 @@ const MEMORY_EMPTY = "No memories yet — they're extracted automatically after 
 
 export default function MemorySection() {
   const [tab, setTab] = useState<MemoryTab>("decisions");
-  // Each tab reports its row count so the tab labels can carry a live badge.
-  // All three tabs stay mounted (inactive ones hidden) so every count loads up
-  // front; a tab's own edit/delete re-runs its refresh, which reports the new
-  // length back here, keeping that tab's badge correct.
+  // Counts describe the visible page only; the API does not supply a total.
   const [counts, setCounts] = useState<Record<MemoryTab, number | null>>({
     decisions: null,
     initiatives: null,
@@ -62,7 +61,7 @@ export default function MemorySection() {
               {t}
               {counts[t] != null && (
                 <span className="ml-1.5 text-xs font-normal tabular-nums text-fg-subtle">
-                  {counts[t]}
+                  {counts[t]} on page
                 </span>
               )}
             </button>
@@ -95,23 +94,38 @@ function MemoryReadError({message,retry}:{message:string;retry:()=>Promise<void>
   return <div role="alert" className="text-sm text-fg-muted"><p>{message}</p><p>The memory list could not be read. This is not an empty list.</p><button type="button" className="underline hover:text-fg" onClick={()=>void retry()}>Retry reading memories</button></div>;
 }
 
+function MemoryPager({offset,count,hasMore,blocked,onOffset}:{offset:number;count:number;hasMore:boolean;blocked:boolean;onOffset:(offset:number)=>void}) {
+  return <nav aria-label="Memory pages" className="mt-3 flex flex-wrap items-center gap-3 text-sm">
+    <p role="status">Page {Math.floor(offset/MEMORY_PAGE_SIZE)+1} · {count} records loaded. Total not supplied.</p>
+    <button type="button" disabled={blocked||offset===0} onClick={()=>{if(!blocked&&offset>0)onOffset(Math.max(0,offset-MEMORY_PAGE_SIZE));}}>Previous page</button>
+    <button type="button" disabled={blocked||!hasMore} onClick={()=>{if(!blocked&&hasMore&&Number.isSafeInteger(offset+MEMORY_PAGE_SIZE))onOffset(offset+MEMORY_PAGE_SIZE);}}>Next page</button>
+  </nav>;
+}
+
 function DecisionsTab({ onCount }: { onCount: (n: number | null) => void }) {
   const [items, setItems] = useState<Decision[]>([]);
   const [loading, setLoading] = useState(true);
   const [readError, setReadError] = useState<string | null>(null);
   const readEpoch = useRef(0);
+  const readAbort = useRef<AbortController|null>(null);
+  const [pageOffset,setPageOffset] = useState(0);
+  const [pageCursors,setPageCursors] = useState<(string|null)[]>([null]);
+  const pageCursor=pageCursors[pageOffset/MEMORY_PAGE_SIZE]??null;
+  const [hasMore,setHasMore] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
 
   const refresh = useCallback(async () => {
     const request = ++readEpoch.current;
+    readAbort.current?.abort();const controller=new AbortController();readAbort.current=controller;
+    onCount(null);setHasMore(false);
     setReadError(null);
     setLoading(true);
     try {
-      const rows = await listDecisions();
+      const rows = await listDecisions({limit:MEMORY_PAGE_SIZE+1,cursor:pageCursor??undefined,signal:controller.signal});
       if (request !== readEpoch.current) return;
       if (!Array.isArray(rows)) throw new Error("Invalid memory list response.");
-      setItems(rows);
-      onCount(rows.length);
+      const visible=rows.slice(0,MEMORY_PAGE_SIZE);setItems(visible);
+      setHasMore(rows.length>MEMORY_PAGE_SIZE);onCount(visible.length);
     } catch (error) {
       if (request === readEpoch.current) {
         setReadError(error instanceof Error ? error.message : "Unable to load memories.");
@@ -120,11 +134,21 @@ function DecisionsTab({ onCount }: { onCount: (n: number | null) => void }) {
     } finally {
       if (request === readEpoch.current) setLoading(false);
     }
-  }, [onCount]);
+  }, [onCount,pageOffset,pageCursor]);
+
+  const navigate=(next:number)=>{
+    if(loading||editingId!==null||!Number.isSafeInteger(next)||next<0||next%MEMORY_PAGE_SIZE!==0||Math.abs(next-pageOffset)!==MEMORY_PAGE_SIZE)return;
+    if(next>pageOffset){
+      if(!hasMore||items.length===0)return;
+      const cursor=memoryCursorFor(items[items.length-1],"decisions");
+      setPageCursors(previous=>[...previous.slice(0,next/MEMORY_PAGE_SIZE),cursor]);
+    }else if(pageCursors[next/MEMORY_PAGE_SIZE]===undefined)return;
+    setPageOffset(next);
+  };
 
   useEffect(() => {
     void refresh();
-    return () => { readEpoch.current++; };
+    return () => { readEpoch.current++;readAbort.current?.abort(); };
   }, [refresh]);
 
   const handleDelete = useCallback(async (id: number) => {
@@ -139,11 +163,11 @@ function DecisionsTab({ onCount }: { onCount: (n: number | null) => void }) {
   }, [refresh]);
 
   if (loading) return <div className="text-fg-muted text-sm">Loading…</div>;
-  if (readError) return <MemoryReadError message={readError} retry={refresh} />;
-  if (items.length === 0) return <EmptyState message={MEMORY_EMPTY} />;
+  if (readError) return <><MemoryReadError message={readError} retry={refresh} /><MemoryPager offset={pageOffset} count={0} hasMore={false} blocked={loading||editingId!==null} onOffset={navigate}/></>;
+  if (items.length === 0) return <><EmptyState message={pageOffset===0?MEMORY_EMPTY:"No records on this page. Records may have changed; return to a previous page."} /><MemoryPager offset={pageOffset} count={0} hasMore={false} blocked={loading||editingId!==null} onOffset={navigate}/></>;
 
   return (
-    <div className="divide-y divide-line">
+    <><div className="divide-y divide-line">
       {items.map((d) => (
         <DecisionRow
           key={d.id}
@@ -164,7 +188,7 @@ function DecisionsTab({ onCount }: { onCount: (n: number | null) => void }) {
           onDelete={() => handleDelete(d.id)}
         />
       ))}
-    </div>
+    </div><MemoryPager offset={pageOffset} count={items.length} hasMore={hasMore} blocked={loading||editingId!==null} onOffset={navigate}/></>
   );
 }
 
@@ -281,18 +305,25 @@ function InitiativesTab({ onCount }: { onCount: (n: number | null) => void }) {
   const [loading, setLoading] = useState(true);
   const [readError, setReadError] = useState<string | null>(null);
   const readEpoch = useRef(0);
+  const readAbort = useRef<AbortController|null>(null);
+  const [pageOffset,setPageOffset] = useState(0);
+  const [pageCursors,setPageCursors] = useState<(string|null)[]>([null]);
+  const pageCursor=pageCursors[pageOffset/MEMORY_PAGE_SIZE]??null;
+  const [hasMore,setHasMore] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
 
   const refresh = useCallback(async () => {
     const request = ++readEpoch.current;
+    readAbort.current?.abort();const controller=new AbortController();readAbort.current=controller;
+    onCount(null);setHasMore(false);
     setReadError(null);
     setLoading(true);
     try {
-      const rows = await listInitiatives();
+      const rows = await listInitiatives({limit:MEMORY_PAGE_SIZE+1,cursor:pageCursor??undefined,signal:controller.signal});
       if (request !== readEpoch.current) return;
       if (!Array.isArray(rows)) throw new Error("Invalid memory list response.");
-      setItems(rows);
-      onCount(rows.length);
+      const visible=rows.slice(0,MEMORY_PAGE_SIZE);setItems(visible);
+      setHasMore(rows.length>MEMORY_PAGE_SIZE);onCount(visible.length);
     } catch (error) {
       if (request === readEpoch.current) {
         setReadError(error instanceof Error ? error.message : "Unable to load memories.");
@@ -301,11 +332,21 @@ function InitiativesTab({ onCount }: { onCount: (n: number | null) => void }) {
     } finally {
       if (request === readEpoch.current) setLoading(false);
     }
-  }, [onCount]);
+  }, [onCount,pageOffset,pageCursor]);
+
+  const navigate=(next:number)=>{
+    if(loading||editingId!==null||!Number.isSafeInteger(next)||next<0||next%MEMORY_PAGE_SIZE!==0||Math.abs(next-pageOffset)!==MEMORY_PAGE_SIZE)return;
+    if(next>pageOffset){
+      if(!hasMore||items.length===0)return;
+      const cursor=memoryCursorFor(items[items.length-1],"initiatives");
+      setPageCursors(previous=>[...previous.slice(0,next/MEMORY_PAGE_SIZE),cursor]);
+    }else if(pageCursors[next/MEMORY_PAGE_SIZE]===undefined)return;
+    setPageOffset(next);
+  };
 
   useEffect(() => {
     void refresh();
-    return () => { readEpoch.current++; };
+    return () => { readEpoch.current++;readAbort.current?.abort(); };
   }, [refresh]);
 
   const handleDelete = useCallback(async (id: number) => {
@@ -320,11 +361,11 @@ function InitiativesTab({ onCount }: { onCount: (n: number | null) => void }) {
   }, [refresh]);
 
   if (loading) return <div className="text-fg-muted text-sm">Loading…</div>;
-  if (readError) return <MemoryReadError message={readError} retry={refresh} />;
-  if (items.length === 0) return <EmptyState message={MEMORY_EMPTY} />;
+  if (readError) return <><MemoryReadError message={readError} retry={refresh} /><MemoryPager offset={pageOffset} count={0} hasMore={false} blocked={loading||editingId!==null} onOffset={navigate}/></>;
+  if (items.length === 0) return <><EmptyState message={pageOffset===0?MEMORY_EMPTY:"No records on this page. Records may have changed; return to a previous page."} /><MemoryPager offset={pageOffset} count={0} hasMore={false} blocked={loading||editingId!==null} onOffset={navigate}/></>;
 
   return (
-    <div className="divide-y divide-line">
+    <><div className="divide-y divide-line">
       {items.map((it) => (
         <InitiativeRow
           key={it.id}
@@ -345,7 +386,7 @@ function InitiativesTab({ onCount }: { onCount: (n: number | null) => void }) {
           onDelete={() => handleDelete(it.id)}
         />
       ))}
-    </div>
+    </div><MemoryPager offset={pageOffset} count={items.length} hasMore={hasMore} blocked={loading||editingId!==null} onOffset={navigate}/></>
   );
 }
 
@@ -442,18 +483,25 @@ function AdviceTab({ onCount }: { onCount: (n: number | null) => void }) {
   const [loading, setLoading] = useState(true);
   const [readError, setReadError] = useState<string | null>(null);
   const readEpoch = useRef(0);
+  const readAbort = useRef<AbortController|null>(null);
+  const [pageOffset,setPageOffset] = useState(0);
+  const [pageCursors,setPageCursors] = useState<(string|null)[]>([null]);
+  const pageCursor=pageCursors[pageOffset/MEMORY_PAGE_SIZE]??null;
+  const [hasMore,setHasMore] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
 
   const refresh = useCallback(async () => {
     const request = ++readEpoch.current;
+    readAbort.current?.abort();const controller=new AbortController();readAbort.current=controller;
+    onCount(null);setHasMore(false);
     setReadError(null);
     setLoading(true);
     try {
-      const rows = await listAdvice();
+      const rows = await listAdvice({limit:MEMORY_PAGE_SIZE+1,cursor:pageCursor??undefined,signal:controller.signal});
       if (request !== readEpoch.current) return;
       if (!Array.isArray(rows)) throw new Error("Invalid memory list response.");
-      setItems(rows);
-      onCount(rows.length);
+      const visible=rows.slice(0,MEMORY_PAGE_SIZE);setItems(visible);
+      setHasMore(rows.length>MEMORY_PAGE_SIZE);onCount(visible.length);
     } catch (error) {
       if (request === readEpoch.current) {
         setReadError(error instanceof Error ? error.message : "Unable to load memories.");
@@ -462,11 +510,21 @@ function AdviceTab({ onCount }: { onCount: (n: number | null) => void }) {
     } finally {
       if (request === readEpoch.current) setLoading(false);
     }
-  }, [onCount]);
+  }, [onCount,pageOffset,pageCursor]);
+
+  const navigate=(next:number)=>{
+    if(loading||editingId!==null||!Number.isSafeInteger(next)||next<0||next%MEMORY_PAGE_SIZE!==0||Math.abs(next-pageOffset)!==MEMORY_PAGE_SIZE)return;
+    if(next>pageOffset){
+      if(!hasMore||items.length===0)return;
+      const cursor=memoryCursorFor(items[items.length-1],"advice");
+      setPageCursors(previous=>[...previous.slice(0,next/MEMORY_PAGE_SIZE),cursor]);
+    }else if(pageCursors[next/MEMORY_PAGE_SIZE]===undefined)return;
+    setPageOffset(next);
+  };
 
   useEffect(() => {
     void refresh();
-    return () => { readEpoch.current++; };
+    return () => { readEpoch.current++;readAbort.current?.abort(); };
   }, [refresh]);
 
   const handleDelete = useCallback(async (id: number) => {
@@ -481,11 +539,11 @@ function AdviceTab({ onCount }: { onCount: (n: number | null) => void }) {
   }, [refresh]);
 
   if (loading) return <div className="text-fg-muted text-sm">Loading…</div>;
-  if (readError) return <MemoryReadError message={readError} retry={refresh} />;
-  if (items.length === 0) return <EmptyState message={MEMORY_EMPTY} />;
+  if (readError) return <><MemoryReadError message={readError} retry={refresh} /><MemoryPager offset={pageOffset} count={0} hasMore={false} blocked={loading||editingId!==null} onOffset={navigate}/></>;
+  if (items.length === 0) return <><EmptyState message={pageOffset===0?MEMORY_EMPTY:"No records on this page. Records may have changed; return to a previous page."} /><MemoryPager offset={pageOffset} count={0} hasMore={false} blocked={loading||editingId!==null} onOffset={navigate}/></>;
 
   return (
-    <div className="divide-y divide-line">
+    <><div className="divide-y divide-line">
       {items.map((a) => (
         <AdviceRow
           key={a.id}
@@ -506,7 +564,7 @@ function AdviceTab({ onCount }: { onCount: (n: number | null) => void }) {
           onDelete={() => handleDelete(a.id)}
         />
       ))}
-    </div>
+    </div><MemoryPager offset={pageOffset} count={items.length} hasMore={hasMore} blocked={loading||editingId!==null} onOffset={navigate}/></>
   );
 }
 

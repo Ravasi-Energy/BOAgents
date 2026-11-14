@@ -776,10 +776,36 @@ export interface Advice {
   advice_summary: string;
 }
 
-export async function listDecisions(): Promise<Decision[]> {
-  const res = await fetch(`${API_BASE}/memories/decisions`);
-  if (!res.ok) throw new Error("Failed to list decisions");
-  return res.json();
+export interface MemoryListOptions { limit?: number; offset?: number; cursor?: string; signal?: AbortSignal; }
+const MEMORY_DEFAULT_LIMIT = 100;
+export function memoryCursorFor(row:{id:number;timestamp?:string;updated_at?:string}, kind:"decisions"|"initiatives"|"advice"):string {
+  const timestamp=kind==="initiatives"?row.updated_at:row.timestamp;
+  if(!Number.isSafeInteger(row.id)||row.id<1||typeof timestamp!=="string"||!/^([^|\x00-\x1f]{1,128})$/.test(timestamp))throw new Error("Invalid memory cursor row.");
+  return `${timestamp}|${row.id}`;
+}
+
+async function readMemoryPage<T extends {id:number}>(kind:"decisions"|"initiatives"|"advice", fields:readonly string[], options:MemoryListOptions):Promise<T[]> {
+  const limit=options.limit??MEMORY_DEFAULT_LIMIT, offset=options.offset??0;
+  if(!Number.isSafeInteger(limit)||limit<1||limit>500||!Number.isSafeInteger(offset)||offset<0)throw new Error("Invalid memory page bounds.");
+  const query=new URLSearchParams({limit:String(limit)});
+  if(options.cursor!==undefined){
+    if(offset!==0||typeof options.cursor!=="string"||!/^([^|\x00-\x1f]{1,128})\|([1-9][0-9]*)$/.test(options.cursor)||!Number.isSafeInteger(Number(options.cursor.split("|")[1])))throw new Error("Invalid memory cursor.");
+    query.set("cursor",options.cursor);
+  }else query.set("offset",String(offset));
+  const res=await fetch(`${API_BASE}/memories/${kind}?${query}`,{signal:options.signal});
+  if(!res.ok)throw new Error("Unable to read this memory page.");
+  let rows:unknown;try{rows=await res.json();}catch{throw new Error("Invalid memory page response.");}
+  if(!Array.isArray(rows)||rows.length>limit)throw new Error("Invalid or unbounded memory page response.");
+  const ids=new Set<number>();
+  for(const row of rows){
+    if(!row||typeof row!=="object"||!Number.isSafeInteger(row.id)||row.id<1||ids.has(row.id)||fields.some(field=>typeof row[field]!=="string"))throw new Error("Invalid memory page response.");
+    ids.add(row.id);
+  }
+  return rows as T[];
+}
+
+export async function listDecisions(options:MemoryListOptions={}): Promise<Decision[]> {
+  return readMemoryPage<Decision>("decisions",["timestamp", "domain", "summary", "rationale", "outcome", "tags"],options);
 }
 
 export async function updateDecision(id: number, patch: Partial<Omit<Decision, "id" | "timestamp">>): Promise<Decision> {
@@ -797,10 +823,8 @@ export async function deleteDecision(id: number): Promise<void> {
   if (!res.ok) throw new Error("Failed to delete decision");
 }
 
-export async function listInitiatives(): Promise<Initiative[]> {
-  const res = await fetch(`${API_BASE}/memories/initiatives`);
-  if (!res.ok) throw new Error("Failed to list initiatives");
-  return res.json();
+export async function listInitiatives(options:MemoryListOptions={}): Promise<Initiative[]> {
+  return readMemoryPage<Initiative>("initiatives",["title", "status", "created_at", "updated_at", "summary"],options);
 }
 
 export async function updateInitiative(id: number, patch: Partial<Omit<Initiative, "id" | "created_at" | "updated_at">>): Promise<Initiative> {
@@ -818,10 +842,8 @@ export async function deleteInitiative(id: number): Promise<void> {
   if (!res.ok) throw new Error("Failed to delete initiative");
 }
 
-export async function listAdvice(): Promise<Advice[]> {
-  const res = await fetch(`${API_BASE}/memories/advice`);
-  if (!res.ok) throw new Error("Failed to list advice");
-  return res.json();
+export async function listAdvice(options:MemoryListOptions={}): Promise<Advice[]> {
+  return readMemoryPage<Advice>("advice",["timestamp", "domain", "query_summary", "advice_summary"],options);
 }
 
 export async function updateAdvice(id: number, patch: Partial<Omit<Advice, "id" | "timestamp">>): Promise<Advice> {

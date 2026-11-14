@@ -643,47 +643,102 @@ def get_recent_initiatives(
 
 
 def list_decisions(db_path: Path = DB_PATH, *, limit: int | None = None,
-                   offset: int = 0) -> list[Decision]:
-    """limit=None pastreaza citirea completa (export/fixture); rutele
-    HTTP/MCP transmit o margine explicita — istoricul creste nemarginit."""
+                offset: int = 0, cursor: str | None = None) -> list[Decision]:
+    """Ordine stabila (timestamp DESC, id DESC); `cursor` = "{timestamp}|{id}"
+    al ultimului rand primit — continuare keyset stabila sub mutatii
+    (nu deriva ca OFFSET la inserturi). `offset` ramane pentru compat."""
     if not db_path.exists():
         return []
-    sql = "SELECT * FROM decisions ORDER BY timestamp DESC"
-    params: tuple = ()
+    sql = "SELECT * FROM decisions"
+    params: list = []
+    if cursor:
+        t, _, i = cursor.rpartition("|")
+        sql += (" WHERE (timestamp < ?) OR (timestamp = ? AND id < ?)")
+        params += [t, t, int(i)]
+    sql += " ORDER BY timestamp DESC, id DESC"
     if limit is not None:
-        sql += " LIMIT ? OFFSET ?"
-        params = (limit, offset)
+        sql += " LIMIT ?"
+        params.append(limit)
+        if offset and not cursor:
+            sql += " OFFSET ?"
+            params.append(offset)
     with _get_conn(db_path) as conn:
         rows = conn.execute(sql, params).fetchall()
     return [Decision(**dict(row)) for row in rows]
 
 
+def count_decisions(db_path: Path = DB_PATH) -> int:
+    """Numarator onest pentru antetele/listele paginate."""
+    if not db_path.exists():
+        return 0
+    with _get_conn(db_path) as conn:
+        return conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0]
+
+
 def list_initiatives(db_path: Path = DB_PATH, *, limit: int | None = None,
-                     offset: int = 0) -> list[Initiative]:
+                offset: int = 0, cursor: str | None = None) -> list[Initiative]:
+    """Ordine stabila (updated_at DESC, id DESC); `cursor` = "{updated_at}|{id}"
+    al ultimului rand primit — continuare keyset stabila sub mutatii
+    (nu deriva ca OFFSET la inserturi). `offset` ramane pentru compat."""
     if not db_path.exists():
         return []
-    sql = "SELECT * FROM initiatives ORDER BY updated_at DESC"
-    params: tuple = ()
+    sql = "SELECT * FROM initiatives"
+    params: list = []
+    if cursor:
+        t, _, i = cursor.rpartition("|")
+        sql += (" WHERE (updated_at < ?) OR (updated_at = ? AND id < ?)")
+        params += [t, t, int(i)]
+    sql += " ORDER BY updated_at DESC, id DESC"
     if limit is not None:
-        sql += " LIMIT ? OFFSET ?"
-        params = (limit, offset)
+        sql += " LIMIT ?"
+        params.append(limit)
+        if offset and not cursor:
+            sql += " OFFSET ?"
+            params.append(offset)
     with _get_conn(db_path) as conn:
         rows = conn.execute(sql, params).fetchall()
     return [Initiative(**dict(row)) for row in rows]
 
 
+def count_initiatives(db_path: Path = DB_PATH) -> int:
+    """Numarator onest pentru antetele/listele paginate."""
+    if not db_path.exists():
+        return 0
+    with _get_conn(db_path) as conn:
+        return conn.execute("SELECT COUNT(*) FROM initiatives").fetchone()[0]
+
+
 def list_advice(db_path: Path = DB_PATH, *, limit: int | None = None,
-                offset: int = 0) -> list[Advice]:
+                offset: int = 0, cursor: str | None = None) -> list[Advice]:
+    """Ordine stabila (timestamp DESC, id DESC); `cursor` = "{timestamp}|{id}"
+    al ultimului rand primit — continuare keyset stabila sub mutatii
+    (nu deriva ca OFFSET la inserturi). `offset` ramane pentru compat."""
     if not db_path.exists():
         return []
-    sql = "SELECT * FROM advice_given ORDER BY timestamp DESC"
-    params: tuple = ()
+    sql = "SELECT * FROM advice_given"
+    params: list = []
+    if cursor:
+        t, _, i = cursor.rpartition("|")
+        sql += (" WHERE (timestamp < ?) OR (timestamp = ? AND id < ?)")
+        params += [t, t, int(i)]
+    sql += " ORDER BY timestamp DESC, id DESC"
     if limit is not None:
-        sql += " LIMIT ? OFFSET ?"
-        params = (limit, offset)
+        sql += " LIMIT ?"
+        params.append(limit)
+        if offset and not cursor:
+            sql += " OFFSET ?"
+            params.append(offset)
     with _get_conn(db_path) as conn:
         rows = conn.execute(sql, params).fetchall()
     return [Advice(**dict(row)) for row in rows]
+
+
+def count_advice(db_path: Path = DB_PATH) -> int:
+    """Numarator onest pentru antetele/listele paginate."""
+    if not db_path.exists():
+        return 0
+    with _get_conn(db_path) as conn:
+        return conn.execute("SELECT COUNT(*) FROM advice_given").fetchone()[0]
 
 
 def get_decision(decision_id: int, db_path: Path = DB_PATH) -> Decision | None:

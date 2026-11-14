@@ -14,6 +14,9 @@ from openexecutive.memory.episodic import (
     get_advice,
     get_decision,
     get_initiative,
+    count_advice,
+    count_decisions,
+    count_initiatives,
     list_advice,
     list_decisions,
     list_initiatives,
@@ -53,12 +56,32 @@ class AdviceUpdate(BaseModel):
 # --- Decisions ---
 
 
+def _antete_paginare(response: Response, items: list, total: int,
+                     ts_attr: str) -> None:
+    """Continuare keyset: Link rel=next cu cursorul ultimului rand +
+    numarator onest — pagina nu deriva la mutatii precum OFFSET."""
+    response.headers["X-Total-Count"] = str(total)
+    if len(items) == 0:
+        return
+    last = items[-1]
+    if total <= len(items):
+        return
+    ts = getattr(last, ts_attr)
+    nxt = f"{ts}|{last.id}"
+    response.headers["Link"] = f'<?cursor={nxt}>; rel="next"'
+    response.headers["X-Next-Cursor"] = nxt
+
+
 @router.get("/memories/decisions", response_model=list[Decision])
 def get_decisions(
+    response: Response,
     limit: int = Query(default=500, ge=1, le=5000),
     offset: int = Query(default=0, ge=0),
+    cursor: str | None = Query(default=None),
 ) -> list[Decision]:
-    return list_decisions(limit=limit, offset=offset)
+    items = list_decisions(limit=limit, offset=offset, cursor=cursor)
+    _antete_paginare(response, items, count_decisions(), "timestamp")
+    return items
 
 
 @router.patch("/memories/decisions/{decision_id}", response_model=Decision, dependencies=[Depends(_require_admin_write)])
@@ -83,10 +106,14 @@ def remove_decision(decision_id: int) -> Response:
 
 @router.get("/memories/initiatives", response_model=list[Initiative])
 def get_initiatives(
+    response: Response,
     limit: int = Query(default=500, ge=1, le=5000),
     offset: int = Query(default=0, ge=0),
+    cursor: str | None = Query(default=None),
 ) -> list[Initiative]:
-    return list_initiatives(limit=limit, offset=offset)
+    items = list_initiatives(limit=limit, offset=offset, cursor=cursor)
+    _antete_paginare(response, items, count_initiatives(), "updated_at")
+    return items
 
 
 @router.patch("/memories/initiatives/{initiative_id}", response_model=Initiative, dependencies=[Depends(_require_admin_write)])
@@ -111,10 +138,14 @@ def remove_initiative(initiative_id: int) -> Response:
 
 @router.get("/memories/advice", response_model=list[Advice])
 def get_advice_list(
+    response: Response,
     limit: int = Query(default=500, ge=1, le=5000),
     offset: int = Query(default=0, ge=0),
+    cursor: str | None = Query(default=None),
 ) -> list[Advice]:
-    return list_advice(limit=limit, offset=offset)
+    items = list_advice(limit=limit, offset=offset, cursor=cursor)
+    _antete_paginare(response, items, count_advice(), "timestamp")
+    return items
 
 
 @router.patch("/memories/advice/{advice_id}", response_model=Advice, dependencies=[Depends(_require_admin_write)])

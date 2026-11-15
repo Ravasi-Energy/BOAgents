@@ -56,14 +56,25 @@ class AdviceUpdate(BaseModel):
 # --- Decisions ---
 
 
+def _pagina(lista, *, limit: int, offset: int = 0,
+            cursor: str | None = None):
+    """Lookahead mărginit: cerem limit+1 și întoarcem
+    (pagina, exista_urmatoare). „Pagina plină ⇒ există următoare" e
+    fals la fix L rânduri; existența reală a rândului extra e singura
+    dovadă — fără citiri nemărginite."""
+    rows = lista(limit=limit + 1, offset=offset, cursor=cursor)
+    return rows[:limit], len(rows) > limit
+
+
 def _antete_paginare(response: Response, items: list, total: int,
-                     ts_attr: str, limit: int) -> None:
+                     ts_attr: str, limit: int,
+                     exista_urmatoare: bool) -> None:
     """Continuare keyset: Link rel=next cu cursorul ultimului rand +
     numarator onest — pagina nu deriva la mutatii precum OFFSET.
-    Terminal corect: ultima pagina (mai putin de `limit` randuri) nu
-    emite Link; pagina plina il emite pastrand limitul cerut."""
+    Link se emite numai pe dovada existenței (lookahead), nu pe
+    dimensiunea paginii, și păstrează limitul cerut."""
     response.headers["X-Total-Count"] = str(total)
-    if len(items) < limit:
+    if not exista_urmatoare or not items:
         return
     last = items[-1]
     ts = getattr(last, ts_attr)
@@ -80,8 +91,10 @@ def get_decisions(
     offset: int = Query(default=0, ge=0),
     cursor: str | None = Query(default=None),
 ) -> list[Decision]:
-    items = list_decisions(limit=limit, offset=offset, cursor=cursor)
-    _antete_paginare(response, items, count_decisions(), "timestamp", limit)
+    items, mai_mult = _pagina(
+        list_decisions, limit=limit, offset=offset, cursor=cursor)
+    _antete_paginare(response, items, count_decisions(), "timestamp",
+                     limit, mai_mult)
     return items
 
 
@@ -112,8 +125,10 @@ def get_initiatives(
     offset: int = Query(default=0, ge=0),
     cursor: str | None = Query(default=None),
 ) -> list[Initiative]:
-    items = list_initiatives(limit=limit, offset=offset, cursor=cursor)
-    _antete_paginare(response, items, count_initiatives(), "created_at", limit)
+    items, mai_mult = _pagina(
+        list_initiatives, limit=limit, offset=offset, cursor=cursor)
+    _antete_paginare(response, items, count_initiatives(), "created_at",
+                     limit, mai_mult)
     return items
 
 
@@ -144,8 +159,10 @@ def get_advice_list(
     offset: int = Query(default=0, ge=0),
     cursor: str | None = Query(default=None),
 ) -> list[Advice]:
-    items = list_advice(limit=limit, offset=offset, cursor=cursor)
-    _antete_paginare(response, items, count_advice(), "timestamp", limit)
+    items, mai_mult = _pagina(
+        list_advice, limit=limit, offset=offset, cursor=cursor)
+    _antete_paginare(response, items, count_advice(), "timestamp",
+                     limit, mai_mult)
     return items
 
 

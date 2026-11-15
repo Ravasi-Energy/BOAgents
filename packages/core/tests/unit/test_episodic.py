@@ -14,6 +14,7 @@ from openexecutive.memory.episodic import (
     get_decision,
     get_initiative,
     get_recent_advice,
+    initialize_db,
     get_recent_decisions,
     initialize_db,
     list_advice,
@@ -847,3 +848,38 @@ def test_listele_istorice_sunt_marginite_si_paginate(db: Path) -> None:
     assert pagina2[0].summary == "decizia-3"
     assert list_advice(db_path=db, limit=2)[0].advice_summary == "sfat-6"
     assert len(list_initiatives(db_path=db, limit=2)) == 2
+
+
+def test_pagina_terminala_nu_anunta_continuare_goala(db: Path) -> None:
+    """P2 terminal: lookahead mărginit — pagina plină la terminal nu
+    emite Link/next_cursor; existența rândului extra e singura dovadă.
+    Marginele 0/1/L-1/L/L+1/2L pe decizii."""
+    from fastapi import Response
+    from openexecutive.api.routes.episodic import _antete_paginare, _pagina
+    from openexecutive.memory.episodic import list_decisions as ld
+
+    def ruleaza(n, limit):
+        for i in range(n):
+            store_decision("d", f"d-{i}", db_path=db)
+        r = Response()
+        items, mai = _pagina(lambda **kw: ld(db_path=db, **kw), limit=limit)
+        _antete_paginare(r, items, n, "timestamp", limit, mai)
+        return items, r, mai
+
+    # L exact -> terminal, fara Link; L+1 -> Link cu limit pastrat
+    for n, limit, asteptat in ((1, 3, False), (2, 3, False),
+                               (3, 3, False), (4, 3, True), (6, 3, True)):
+        db.unlink(missing_ok=True)
+        initialize_db(db)
+        items, r, mai = ruleaza(n, limit)
+        assert len(items) == min(n, limit)
+        assert mai == asteptat
+        assert ("Link" in r.headers) == asteptat
+        if asteptat:
+            assert f"limit={limit}" in r.headers["Link"]
+            assert "cursor=" in r.headers["Link"]
+            # cursorul real: continuarea intoarce restul, terminal
+            cur = r.headers["X-Next-Cursor"]
+            items2, mai2 = _pagina(lambda **kw: ld(db_path=db, **kw),
+                                   limit=limit, cursor=cur)
+            assert len(items2) == n - limit and not mai2

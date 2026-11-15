@@ -232,13 +232,16 @@ async def memory_page(kind: str, cursor: str) -> str:
         raise ValueError(f"kind necunoscut: {kind}")
     limit = 500
     rows = await asyncio.to_thread(
-        getattr(episodic, fn_name), limit=limit,
+        getattr(episodic, fn_name), limit=limit + 1,
         cursor=None if cursor == "start" else cursor)
+    # lookahead mărginit: next_cursor numai dacă rândul extra există —
+    # o pagină plină la terminal nu anunță o continuare goală
     nxt = None
-    if len(rows) == limit:
-        last = rows[-1]
+    if len(rows) > limit:
+        last = rows[limit - 1]
         nxt = f"{getattr(last, ts_attr)}|{last.id}"
-    return _json({"items": [r.model_dump(mode="json") for r in rows],
+    return _json({"items": [r.model_dump(mode="json")
+                            for r in rows[:limit]],
                   "next_cursor": nxt})
 
 

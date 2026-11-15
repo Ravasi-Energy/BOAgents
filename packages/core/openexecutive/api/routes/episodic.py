@@ -57,18 +57,19 @@ class AdviceUpdate(BaseModel):
 
 
 def _antete_paginare(response: Response, items: list, total: int,
-                     ts_attr: str) -> None:
+                     ts_attr: str, limit: int) -> None:
     """Continuare keyset: Link rel=next cu cursorul ultimului rand +
-    numarator onest — pagina nu deriva la mutatii precum OFFSET."""
+    numarator onest — pagina nu deriva la mutatii precum OFFSET.
+    Terminal corect: ultima pagina (mai putin de `limit` randuri) nu
+    emite Link; pagina plina il emite pastrand limitul cerut."""
     response.headers["X-Total-Count"] = str(total)
-    if len(items) == 0:
+    if len(items) < limit:
         return
     last = items[-1]
-    if total <= len(items):
-        return
     ts = getattr(last, ts_attr)
     nxt = f"{ts}|{last.id}"
-    response.headers["Link"] = f'<?cursor={nxt}>; rel="next"'
+    response.headers["Link"] = (
+        f'<?limit={limit}&cursor={nxt}>; rel="next"')
     response.headers["X-Next-Cursor"] = nxt
 
 
@@ -80,7 +81,7 @@ def get_decisions(
     cursor: str | None = Query(default=None),
 ) -> list[Decision]:
     items = list_decisions(limit=limit, offset=offset, cursor=cursor)
-    _antete_paginare(response, items, count_decisions(), "timestamp")
+    _antete_paginare(response, items, count_decisions(), "timestamp", limit)
     return items
 
 
@@ -112,7 +113,7 @@ def get_initiatives(
     cursor: str | None = Query(default=None),
 ) -> list[Initiative]:
     items = list_initiatives(limit=limit, offset=offset, cursor=cursor)
-    _antete_paginare(response, items, count_initiatives(), "updated_at")
+    _antete_paginare(response, items, count_initiatives(), "created_at", limit)
     return items
 
 
@@ -144,7 +145,7 @@ def get_advice_list(
     cursor: str | None = Query(default=None),
 ) -> list[Advice]:
     items = list_advice(limit=limit, offset=offset, cursor=cursor)
-    _antete_paginare(response, items, count_advice(), "timestamp")
+    _antete_paginare(response, items, count_advice(), "timestamp", limit)
     return items
 
 

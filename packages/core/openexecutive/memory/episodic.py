@@ -677,18 +677,20 @@ def count_decisions(db_path: Path = DB_PATH) -> int:
 
 def list_initiatives(db_path: Path = DB_PATH, *, limit: int | None = None,
                 offset: int = 0, cursor: str | None = None) -> list[Initiative]:
-    """Ordine stabila (updated_at DESC, id DESC); `cursor` = "{updated_at}|{id}"
-    al ultimului rand primit — continuare keyset stabila sub mutatii
-    (nu deriva ca OFFSET la inserturi). `offset` ramane pentru compat."""
+    """Ordine stabila (created_at DESC, id DESC); `cursor` = "{created_at}|{id}"
+    al ultimului rand primit — continuare keyset stabila si sub
+    UPDATE: updated_at ar muta randul din pagina si ar rupe snapshotul
+    la inserturi/update-uri (nu deriva ca OFFSET, dar nici nu
+    migreaza). `offset` ramane pentru compat."""
     if not db_path.exists():
         return []
     sql = "SELECT * FROM initiatives"
     params: list = []
     if cursor:
         t, _, i = cursor.rpartition("|")
-        sql += (" WHERE (updated_at < ?) OR (updated_at = ? AND id < ?)")
+        sql += (" WHERE (created_at < ?) OR (created_at = ? AND id < ?)")
         params += [t, t, int(i)]
-    sql += " ORDER BY updated_at DESC, id DESC"
+    sql += " ORDER BY created_at DESC, id DESC"
     if limit is not None:
         sql += " LIMIT ?"
         params.append(limit)

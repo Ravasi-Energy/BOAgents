@@ -778,8 +778,8 @@ export interface Advice {
 
 export interface MemoryListOptions { limit?: number; offset?: number; cursor?: string; signal?: AbortSignal; }
 const MEMORY_DEFAULT_LIMIT = 100;
-export function memoryCursorFor(row:{id:number;timestamp?:string;updated_at?:string}, kind:"decisions"|"initiatives"|"advice"):string {
-  const timestamp=kind==="initiatives"?row.updated_at:row.timestamp;
+export function memoryCursorFor(row:{id:number;timestamp?:string;updated_at?:string;created_at?:string}, kind:"decisions"|"initiatives"|"advice"):string {
+  const timestamp=kind==="initiatives"?row.created_at:row.timestamp;
   if(!Number.isSafeInteger(row.id)||row.id<1||typeof timestamp!=="string"||!/^([^|\x00-\x1f]{1,128})$/.test(timestamp))throw new Error("Invalid memory cursor row.");
   return `${timestamp}|${row.id}`;
 }

@@ -208,6 +208,40 @@ async def memory_advice() -> str:
     return _json([r.model_dump(mode="json") for r in rows])
 
 
+_MCP_KINDS = {
+    "decisions": ("list_decisions", "timestamp"),
+    "initiatives": ("list_initiatives", "created_at"),
+    "advice": ("list_advice", "timestamp"),
+}
+
+
+@mcp.resource(
+    "oe://memory/{kind}/page/{cursor}",
+    name="Episodic memory: keyset page",
+    description="Continuare keyset: {kind} din decisions/initiatives/"
+    "advice, {cursor} = X-Next-Cursor al paginii anterioare (ts|id) sau "
+    "'start'. Raspuns: {items, next_cursor} — next_cursor null la "
+    "ultima pagina.",
+    mime_type="application/json",
+)
+async def memory_page(kind: str, cursor: str) -> str:
+    from openexecutive.memory import episodic
+
+    fn_name, ts_attr = _MCP_KINDS.get(kind, (None, None))
+    if fn_name is None:
+        raise ValueError(f"kind necunoscut: {kind}")
+    limit = 500
+    rows = await asyncio.to_thread(
+        getattr(episodic, fn_name), limit=limit,
+        cursor=None if cursor == "start" else cursor)
+    nxt = None
+    if len(rows) == limit:
+        last = rows[-1]
+        nxt = f"{getattr(last, ts_attr)}|{last.id}"
+    return _json({"items": [r.model_dump(mode="json") for r in rows],
+                  "next_cursor": nxt})
+
+
 # ---------------------------------------------------------------------------
 # Tools — structured capabilities. The flagship is consult_specialist.
 # ---------------------------------------------------------------------------
